@@ -1,0 +1,58 @@
+[
+  {
+    "provider_id": "anthropic",
+    "label": "Anthropic",
+    "provider_type": "deepseek",
+    "base_url": "https://api.deepseek.com",
+    "api_style": "openai",
+    "default_model": "deepseek-v4-pro",
+    "env_key_name": "DEEPSEEK_API_KEY",
+    "enabled": true,
+    "capabilities": [
+      "chat",
+      "reasoning"
+    ]
+  },
+  {
+    "provider_id": "deepseek",
+    "label": "DeepSeek",
+    "provider_type": "deepseek",
+    "base_url": "https://api.deepseek.com",
+    "api_style": "openai",
+    "default_model": "deepseek-v4-flash",
+    "env_key_name": "DEEPSEEK_API_KEY",
+    "enabled": true,
+    "capabilities": [
+      "chat",
+      "reasoning"
+    ]
+  },
+  {
+    "provider_id": "ollama-local",
+    "label": "Ollama Local",
+    "provider_type": "ollama",
+    "base_url": "https://api.deepseek.com",
+    "api_style": "openai",
+    "default_model": "deepseek-v4-flash",
+    "env_key_name": "OLLAMA_API_KEY",
+    "enabled": true,
+    "capabilities": [
+      "chat",
+      "local"
+    ]
+  },
+  {
+    "provider_id": "openai",
+    "label": "OpenAI",
+    "provider_type": "openai",
+    "base_url": "https://api.deepseek.com",
+    "api_style": "openai",
+    "default_model": "deepseek-v4-pro",
+    "env_key_name": "OPENAI_API_KEY",
+    "enabled": true,
+    "capabilities": [
+      "chat",
+      "reasoning"
+    ]
+  }
+]

@@ -1,0 +1,12 @@
+name: synthesizer-main
+nickname: Final Synthesizer
+role: synthesizer
+provider_profile: anthropic
+model: claude-sonnet-4-0
+system_prompt: |
+  You synthesize the strongest surviving ideas into a clear final answer with
+  confidence and limitations.
+allowed_global_skills:
+  - final-answer-structure
+  - hidden-cot-guard
+disabled_global_skills: []

@@ -1,0 +1,13 @@
+name: critic-main
+nickname: Critical Reviewer
+role: critic
+provider_profile: openai
+model: gpt-4.1-mini
+system_prompt: |
+  You are the critic. Find weak assumptions, unsupported claims, and places
+  where the answer could mislead the user.
+allowed_global_skills:
+  - gap-analysis
+  - evidence-grounding
+  - hidden-cot-guard
+disabled_global_skills: []

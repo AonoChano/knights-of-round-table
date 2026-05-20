@@ -1,0 +1,92 @@
+from __future__ import annotations
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from .agents import AgentLoader
+from .config import settings
+from .conversations import ConversationStore, VisibleConversationService
+from .providers import ProviderStore
+from .schemas import (
+    AgentView,
+    ConversationListItem,
+    ConversationRequest,
+    ConversationResponse,
+    HealthResponse,
+    ProviderConnectivityRequest,
+    ProviderConnectivityResponse,
+    ProviderProfile,
+    ProviderProfileUpdate,
+    ProviderSecretStatus,
+    ProviderSecretUpdate,
+)
+
+app = FastAPI(title=settings.app_name)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+provider_store = ProviderStore(settings.providers_file, settings.secrets_file)
+agent_loader = AgentLoader(settings.runtime_root)
+conversation_service = VisibleConversationService(ConversationStore(settings.conversation_db))
+
+
+@app.get("/health", response_model=HealthResponse)
+def health() -> HealthResponse:
+    return HealthResponse(app=settings.app_name)
+
+
+@app.get("/api/providers", response_model=list[ProviderProfile])
+def list_providers() -> list[ProviderProfile]:
+    return provider_store.list_profiles()
+
+
+@app.put("/api/providers/{provider_id}", response_model=ProviderProfile)
+def upsert_provider(provider_id: str, payload: ProviderProfileUpdate) -> ProviderProfile:
+    return provider_store.upsert(provider_id=provider_id, update=payload)
+
+
+@app.post("/api/providers/{provider_id}/test", response_model=ProviderConnectivityResponse)
+def test_provider(provider_id: str, payload: ProviderConnectivityRequest) -> ProviderConnectivityResponse:
+    return provider_store.test_connectivity(provider_id=provider_id, request=payload)
+
+
+@app.get("/api/provider-secrets", response_model=list[ProviderSecretStatus])
+def list_provider_secret_statuses() -> list[ProviderSecretStatus]:
+    return provider_store.list_secret_statuses()
+
+
+@app.put("/api/providers/{provider_id}/secret", response_model=ProviderSecretStatus)
+def save_provider_secret(provider_id: str, payload: ProviderSecretUpdate) -> ProviderSecretStatus:
+    return provider_store.save_secret(provider_id=provider_id, update=payload)
+
+
+@app.get("/api/agents", response_model=list[AgentView])
+def list_agents() -> list[AgentView]:
+    return agent_loader.list_agents()
+
+
+@app.get("/api/skills", response_model=list[str])
+def list_skills() -> list[str]:
+    return agent_loader.list_global_skills()
+
+
+@app.get("/api/conversations", response_model=list[ConversationListItem])
+def list_conversations() -> list[ConversationListItem]:
+    return conversation_service.list_conversations()
+
+
+@app.post("/api/conversations", response_model=ConversationResponse)
+def create_conversation(payload: ConversationRequest) -> ConversationResponse:
+    expert_count = len(agent_loader.list_agents())
+    return conversation_service.create_conversation(
+        payload,
+        expert_count=expert_count,
+        agents=agent_loader.list_definitions(),
+        providers=provider_store.list_profiles(),
+        secrets=provider_store.read_secrets(),
+    )

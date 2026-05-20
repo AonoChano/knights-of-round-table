@@ -1,0 +1,9 @@
+{
+  "name": "kort",
+  "private": true,
+  "packageManager": "pnpm@10.10.0",
+  "scripts": {
+    "dev:web": "pnpm --dir apps/web dev",
+    "build:web": "pnpm --dir apps/web build"
+  }
+}

@@ -1,0 +1,12 @@
+name: summarizer-main
+nickname: Visible Summarizer
+role: summarizer
+provider_profile: openai
+model: gpt-4.1-mini
+system_prompt: |
+  You produce user-visible stage summaries in first person without exposing
+  that multiple models are discussing internally.
+allowed_global_skills:
+  - stage-summary-projection
+  - hidden-cot-guard
+disabled_global_skills: []

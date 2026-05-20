@@ -348,6 +348,19 @@ Suggested `agent.yaml` fields:
 - `allowed_global_skills`
 - `disabled_global_skills`
 
+`role` and `system_prompt` define the agent's identity and responsibility.
+
+`allowed_global_skills` refers to reusable capability modules, not persona labels.
+
+Examples of valid global skills:
+
+- `structured-analysis`
+- `evidence-grounding`
+- `gap-analysis`
+- `stage-summary-projection`
+- `final-answer-structure`
+- `hidden-cot-guard`
+
 ### Global Skills
 
 Global skills live under:
@@ -357,6 +370,12 @@ kort/runtime/skills/
 ```
 
 These are selectable in GUI.
+
+Important boundary:
+
+- global skills are reusable workflows or capability modules
+- they are not persona labels
+- `expert`, `critic`, `summarizer`, and `synthesizer` belong in agent role and prompt design, not in the skill layer
 
 ### Private Skills
 
