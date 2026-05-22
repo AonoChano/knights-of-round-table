@@ -389,6 +389,38 @@ button {
   background: #2f7d32;
 }
 
+.reasoning-dot-talking {
+  background: #e67e22;
+  animation: breathe 1.4s ease-in-out infinite;
+}
+
+.thinking-complete-banner {
+  margin-top: 14px;
+  color: #171717;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.thinking-duration-muted {
+  color: #b9b9b4;
+  font-weight: 400;
+}
+
+@keyframes reasoningNodeAppear {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.reasoning-node-appear {
+  animation: reasoningNodeAppear 320ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
 .reasoning-line {
   position: absolute;
   top: 17px;

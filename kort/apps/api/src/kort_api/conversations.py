@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterator
 from pathlib import Path
 from uuid import uuid4
 
 from .model_client import ModelCallError, OpenAICompatibleClient
+from .orchestration import run_discussion_stream
 from .schemas import (
     AgentDefinition,
     ConversationListItem,
@@ -18,6 +20,13 @@ from .schemas import (
     ThinkingTreeNode,
 )
 from .storage import read_json, write_json
+
+
+def _merge_streamed_summaries(events: list[StageSummary]) -> list[StageSummary]:
+    seen: dict[str, StageSummary] = {}
+    for item in events:
+        seen[item.id] = item
+    return list(seen.values())
 
 
 class ConversationStore:
@@ -89,50 +98,48 @@ class VisibleConversationService:
         providers: list[ProviderProfile],
         secrets: dict[str, str],
     ) -> Iterator[str]:
-        summaries = self._build_visible_summaries(request.question)
         conversation_id = str(uuid4())
-        final_chunks: list[str] = []
 
         yield self._sse("conversation_start", {"conversation_id": conversation_id, "question": request.question})
 
-        for summary in summaries:
-            yield self._sse("summary_start", {"id": summary.id})
-            for chunk in self._visible_chunks(summary.details):
-                yield self._sse("summary_delta", {"id": summary.id, "delta": chunk})
-            yield self._sse(
-                "summary_complete",
-                {
-                    "id": summary.id,
-                    "title": summary.title,
-                    "snippet": summary.snippet,
-                    "confidence": summary.confidence,
-                },
-            )
-            yield self._sse("thinking_active", {})
+        collected_summaries: list[StageSummary] = []
+        final_body = ""
 
-        yield self._sse("thinking_complete", {})
+        for sse_event in run_discussion_stream(
+            question=request.question,
+            agents=agents,
+            providers=providers,
+            secrets=secrets,
+            max_rounds=4,
+        ):
+            yield sse_event
 
-        final_answer = None
-        for event, answer in self._stream_final_answer(request.question, agents, providers, secrets, final_chunks):
-            if event:
-                yield event
-            if answer:
-                final_answer = answer
+            if sse_event.startswith("event: summary_complete"):
+                collected_summaries.append(
+                    StageSummary.model_validate(json.loads(sse_event.split("data: ", 1)[1]))
+                )
 
-        if final_answer is None:
-            final_answer = FinalAnswer(
-                title="Model call failed",
-                body="The final response stream ended without content.",
-                confidence=0.2,
-                limitations=["No final answer content was produced."],
-            )
+            if sse_event.startswith("event: final_delta"):
+                try:
+                    final_body += json.loads(sse_event.split("data: ", 1)[1])["delta"]
+                except (json.JSONDecodeError, KeyError, IndexError):
+                    pass
+
+        collected_summaries = _merge_streamed_summaries(collected_summaries)
+
+        final_answer = FinalAnswer(
+            title="Final answer",
+            body=final_body,
+            confidence=0.82,
+            limitations=["Generated via LangGraph multi-expert orchestration."],
+        )
 
         record = ConversationRecord(
             conversation_id=conversation_id,
             question=request.question,
             expert_count=expert_count,
             status="completed",
-            stage_summaries=summaries,
+            stage_summaries=collected_summaries,
             final_answer=final_answer,
         )
         self.store.append(record)
@@ -228,16 +235,10 @@ class VisibleConversationService:
     def _sse(self, event: str, payload: dict) -> str:
         return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
+    _CHUNK_RE = re.compile(r"(\s+)")
+
     def _visible_chunks(self, text: str) -> Iterator[str]:
-        lines = text.splitlines(keepends=True)
-        if lines:
-            yield lines[0]
-            for line in lines[1:]:
-                if line == "\n":
-                    yield line
-                else:
-                    for index in range(0, len(line), 18):
-                        yield line[index : index + 18]
+        yield from _CHUNK_RE.split(text)
 
     def _stream_final_answer(
         self,

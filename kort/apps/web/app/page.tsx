@@ -2,7 +2,7 @@
 
 import "katex/dist/katex.min.css";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeKatex from "rehype-katex";
@@ -90,7 +90,7 @@ type TimelineItem = {
   title: string;
   body: string;
   raw: string;
-  status: "streaming" | "complete" | "active" | "done";
+  status: "streaming" | "complete" | "active" | "done" | "talking";
 };
 
 type StreamEvent = {
@@ -99,6 +99,8 @@ type StreamEvent = {
 };
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+
+const SENTENCE_BOUNDARY_RE = /[。！？…；\n]+/g;
 
 const fallbackProviders: ProviderProfile[] = [
   {
@@ -154,6 +156,12 @@ function markdownBody(markdown: string) {
   return markdown.replace(/^###\s+.+\n+/, "").trim();
 }
 
+function truncateWords(text: string, maxWords: number) {
+  const words = text.split(/\s+/);
+  if (words.length <= maxWords) return text;
+  return words.slice(0, maxWords).join(" ") + "…";
+}
+
 function formatDuration(totalSeconds: number) {
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
@@ -186,6 +194,29 @@ function parseSseChunk(buffer: string): { events: StreamEvent[]; rest: string } 
   return { events, rest };
 }
 
+function extractSentences(text: string) {
+  const sentences: string[] = [];
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+
+  const re = new RegExp(SENTENCE_BOUNDARY_RE.source, SENTENCE_BOUNDARY_RE.flags);
+  re.lastIndex = 0;
+
+  while ((match = re.exec(text)) !== null) {
+    const end = match.index + match[0].length;
+    const sentence = text.slice(lastIndex, end).trim();
+    if (sentence) sentences.push(sentence);
+    lastIndex = end;
+  }
+
+  const remaining = text.slice(lastIndex).trim();
+  return { sentences, remaining };
+}
+
+function randomDelay() {
+  return 1000 + Math.random() * 1000;
+}
+
 export default function HomePage() {
   const [input, setInput] = useState("");
   const [submittedQuestion, setSubmittedQuestion] = useState<string | null>(null);
@@ -205,11 +236,91 @@ export default function HomePage() {
   const [thinkingComplete, setThinkingComplete] = useState(false);
   const [finalBody, setFinalBody] = useState("");
   const [timeline, setTimeline] = useState<TimelineItem[]>([]);
+  const [talkingActive, setTalkingActive] = useState(false);
+
+  const sentenceQueueRef = useRef<string[]>([]);
+  const sentenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const activeSummaryRef = useRef<string>("");
+  const timerElapsedRef = useRef(false);
+  const rawBodyBySummary = useRef<Record<string, string>>({});
+
+  function clearSentenceState() {
+    if (sentenceTimerRef.current) {
+      clearTimeout(sentenceTimerRef.current);
+      sentenceTimerRef.current = null;
+    }
+    sentenceQueueRef.current = [];
+    activeSummaryRef.current = "";
+    timerElapsedRef.current = false;
+    rawBodyBySummary.current = {};
+  }
+
+  function revealNextSentence(summaryId: string) {
+    const queue = sentenceQueueRef.current;
+    if (queue.length === 0) {
+      timerElapsedRef.current = true;
+      sentenceTimerRef.current = null;
+      return;
+    }
+
+    const next = queue.shift()!;
+    setTimeline((current) =>
+      current.map((item) => {
+        if (item.id !== summaryId) return item;
+        return { ...item, body: item.body + next };
+      })
+    );
+
+    sentenceTimerRef.current = setTimeout(() => {
+      revealNextSentence(summaryId);
+    }, randomDelay());
+  }
+
+  function processSentenceBuffer(summaryId: string) {
+    const raw = rawBodyBySummary.current[summaryId] ?? "";
+    const { sentences, remaining } = extractSentences(raw);
+
+    if (sentences.length > 0) {
+      sentenceQueueRef.current.push(...sentences);
+      rawBodyBySummary.current[summaryId] = remaining;
+    } else {
+      rawBodyBySummary.current[summaryId] = raw;
+    }
+
+    if (timerElapsedRef.current && sentenceQueueRef.current.length > 0) {
+      timerElapsedRef.current = false;
+      revealNextSentence(summaryId);
+      return;
+    }
+
+    if (sentenceTimerRef.current === null && sentenceQueueRef.current.length > 0) {
+      timerElapsedRef.current = false;
+      sentenceTimerRef.current = setTimeout(() => {
+        revealNextSentence(summaryId);
+      }, randomDelay());
+    }
+  }
+
+  function resetConversation() {
+    clearSentenceState();
+    setConversation(null);
+    setSubmittedQuestion(null);
+    setTimeline([]);
+    setFinalBody("");
+    setThinkingComplete(false);
+    setElapsed(0);
+    setDrawerOpen(false);
+    setTalkingActive(false);
+  }
 
   useEffect(() => {
     void loadProviders();
     void loadProviderSecretStatuses();
     void loadAgents();
+  }, []);
+
+  useEffect(() => {
+    return () => clearSentenceState();
   }, []);
 
   useEffect(() => {
@@ -265,12 +376,7 @@ export default function HomePage() {
 
     setSubmittedQuestion(question);
     setInput("");
-    setConversation(null);
-    setTimeline([]);
-    setFinalBody("");
-    setThinkingComplete(false);
-    setElapsed(0);
-    setDrawerOpen(false);
+    resetConversation();
     setLoading(true);
 
     try {
@@ -303,53 +409,107 @@ export default function HomePage() {
   }
 
   function handleStreamEvent(message: StreamEvent) {
+    if (message.event === "talking_active") {
+      setTalkingActive(true);
+      setTimeline((current) => {
+        const filtered = current.filter(
+          (item) => item.id !== "thinking-active" && item.id !== "thinking-done" && item.id !== "talking-active"
+        );
+        return [...filtered, { id: "talking-active", title: "讨论中", body: "", raw: "", status: "talking" }];
+      });
+      return;
+    }
+
+    if (message.event === "thinking_active") {
+      setTalkingActive(false);
+      setTimeline((current) => {
+        const filtered = current.filter(
+          (item) => item.id !== "thinking-active" && item.id !== "thinking-done" && item.id !== "talking-active"
+        );
+        return [...filtered, { id: "thinking-active", title: "思考中", body: "", raw: "", status: "active" }];
+      });
+      return;
+    }
+
     if (message.event === "summary_start") {
       const id = String(message.data.id ?? crypto.randomUUID());
+
+      if (sentenceTimerRef.current) {
+        clearTimeout(sentenceTimerRef.current);
+        sentenceTimerRef.current = null;
+      }
+      activeSummaryRef.current = id;
+      rawBodyBySummary.current[id] = "";
+      sentenceQueueRef.current = [];
+      timerElapsedRef.current = false;
+
       setTimeline((current) => [
-        ...current.filter((item) => item.id !== "thinking-active" && item.id !== "thinking-done"),
+        ...current.filter((item) => item.id !== "thinking-active" && item.id !== "thinking-done" && item.id !== "talking-active"),
         { id, title: "Thinking", body: "", raw: "", status: "streaming" },
       ]);
+      return;
+    }
+
+    if (message.event === "summary_title") {
+      const id = String(message.data.id ?? "");
+      const title = String(message.data.title ?? "Thinking");
+      setTimeline((current) =>
+        current.map((item) => (item.id === id ? { ...item, title, status: "streaming" } : item))
+      );
       return;
     }
 
     if (message.event === "summary_delta") {
       const id = String(message.data.id ?? "");
       const delta = String(message.data.delta ?? "");
+
+      rawBodyBySummary.current[id] = (rawBodyBySummary.current[id] ?? "") + delta;
       setTimeline((current) =>
         current.map((item) => {
           if (item.id !== id) return item;
-          const raw = item.raw + delta;
-          return {
-            ...item,
-            raw,
-            title: markdownTitle(raw, item.title),
-            body: markdownBody(raw),
-          };
+          return { ...item, raw: item.raw + delta };
         })
       );
+
+      processSentenceBuffer(id);
       return;
     }
 
     if (message.event === "summary_complete") {
       const id = String(message.data.id ?? "");
+
+      setTimeout(() => {
+        const finalRaw = rawBodyBySummary.current[id] ?? "";
+        if (finalRaw.trim()) {
+          setTimeline((current) =>
+            current.map((item) => {
+              if (item.id !== id) return item;
+              return { ...item, body: finalRaw.trim() };
+            })
+          );
+        }
+
+        if (sentenceTimerRef.current) {
+          clearTimeout(sentenceTimerRef.current);
+          sentenceTimerRef.current = null;
+        }
+      }, 3000);
+
       setTimeline((current) =>
         current.map((item) => (item.id === id ? { ...item, status: "complete" } : item))
       );
       return;
     }
 
-    if (message.event === "thinking_active") {
-      setTimeline((current) => [
-        ...current.filter((item) => item.id !== "thinking-active" && item.id !== "thinking-done"),
-        { id: "thinking-active", title: "思考中", body: "", raw: "", status: "active" },
-      ]);
-      return;
-    }
-
     if (message.event === "thinking_complete") {
       setThinkingComplete(true);
+      setTalkingActive(false);
+      if (sentenceTimerRef.current) {
+        clearTimeout(sentenceTimerRef.current);
+        sentenceTimerRef.current = null;
+      }
       setTimeline((current) => [
-        ...current.filter((item) => item.id !== "thinking-active" && item.id !== "thinking-done"),
+        ...current.filter((item) => item.id !== "thinking-active" && item.id !== "thinking-done" && item.id !== "talking-active"),
         { id: "thinking-done", title: "已完成思考", body: "", raw: "", status: "done" },
       ]);
       return;
@@ -445,8 +605,13 @@ export default function HomePage() {
     );
   }, [conversation, timeline]);
 
-  const currentReasoning = [...visibleTimeline].reverse().find((item) => item.status === "streaming" || item.status === "complete");
-  const activeTitle = currentReasoning?.title ?? (thinkingComplete ? "已完成思考" : "Thinking");
+  const currentReasoning = [...visibleTimeline].reverse().find(
+    (item) => item.status === "streaming" || item.status === "complete"
+  );
+  const statusItem = visibleTimeline.find(
+    (item) => item.status === "active" || item.status === "talking" || item.status === "done"
+  );
+  const activeTitle = statusItem?.title ?? currentReasoning?.title ?? (thinkingComplete ? "已完成思考" : "Thinking");
   const hasRun = Boolean(submittedQuestion || conversation || loading);
 
   return (
@@ -463,18 +628,7 @@ export default function HomePage() {
 
       <section className="main-shell">
         <header className="topbar">
-          <button
-            className="brand-button"
-            onClick={() => {
-              setConversation(null);
-              setSubmittedQuestion(null);
-              setTimeline([]);
-              setFinalBody("");
-              setThinkingComplete(false);
-              setElapsed(0);
-              setDrawerOpen(false);
-            }}
-          >
+          <button className="brand-button" onClick={resetConversation}>
             <span>Round Table</span>
             <small>ready</small>
           </button>
@@ -490,6 +644,8 @@ export default function HomePage() {
               <ConversationView
                 conversation={conversation}
                 loading={loading}
+                thinkingComplete={thinkingComplete}
+                elapsed={elapsed}
                 question={submittedQuestion}
                 timeline={visibleTimeline}
                 finalBody={finalBody || conversation?.final_answer.body || ""}
@@ -611,6 +767,8 @@ function Sidebar({
 function ConversationView({
   conversation,
   loading,
+  thinkingComplete,
+  elapsed,
   question,
   timeline,
   finalBody,
@@ -618,12 +776,19 @@ function ConversationView({
 }: {
   conversation: ConversationResponse | null;
   loading: boolean;
+  thinkingComplete: boolean;
+  elapsed: number;
   question: string | null;
   timeline: TimelineItem[];
   finalBody: string;
   onOpenThinking: () => void;
 }) {
-  const latest = [...timeline].reverse().find((item) => item.status === "streaming" || item.status === "complete");
+  const latest = [...timeline].reverse().find(
+    (item) => item.status === "streaming" || item.status === "complete"
+  );
+  const statusItem = timeline.find(
+    (item) => item.status === "active" || item.status === "talking" || item.status === "done"
+  );
 
   return (
     <div className="conversation-stack">
@@ -634,13 +799,19 @@ function ConversationView({
         <div className="assistant-content">
           <button className="thinking-block" onClick={onOpenThinking}>
             <span className={cn("thinking-title", (loading || conversation) && "thinking-title-active")}>
-              {latest?.title ?? "Thinking"}
+              {statusItem?.title ?? latest?.title ?? "Thinking"}
             </span>
           </button>
 
           {latest ? (
             <div className="thinking-preview markdown-body">
-              <Markdown content={latest.body} />
+              <Markdown content={truncateWords(latest.body, 20)} />
+            </div>
+          ) : null}
+
+          {thinkingComplete && !finalBody ? (
+            <div className="thinking-complete-banner">
+              已完成思考<span className="thinking-duration-muted">（总用时：{formatDuration(elapsed)}）</span>
             </div>
           ) : null}
 
@@ -728,7 +899,9 @@ function ThinkingDrawer({
         <div>
           <div className="text-[15px] font-semibold">思考过程</div>
           <div className="mt-1 text-xs text-muted">
-            {thinkingComplete ? `已完成思考（总用时：${formatDuration(elapsed)}）` : `已进行 ${formatDuration(elapsed)}`}
+            {thinkingComplete
+              ? `已完成思考（总用时：${formatDuration(elapsed)}）`
+              : `已进行 ${formatDuration(elapsed)}`}
           </div>
         </div>
         <button className="small-button" onClick={onClose}>收起</button>
@@ -736,14 +909,28 @@ function ThinkingDrawer({
 
       <div className="reasoning-timeline">
         {timeline.map((item, index) => (
-          <div key={item.id} className="reasoning-node">
-            <div className={cn("reasoning-dot", (item.status === "active" || item.status === "streaming") && "reasoning-dot-active", item.status === "done" && "reasoning-dot-done")} />
+          <div key={item.id} className="reasoning-node reasoning-node-appear">
+            <div
+              className={cn(
+                "reasoning-dot",
+                (item.status === "active" || item.status === "streaming") && "reasoning-dot-active",
+                item.status === "talking" && "reasoning-dot-talking",
+                item.status === "done" && "reasoning-dot-done"
+              )}
+            />
             {index < timeline.length - 1 ? <div className="reasoning-line" /> : null}
             <div className="reasoning-content">
-              <div className={cn("reasoning-title", (item.status === "active" || item.status === "streaming") && "thinking-title-active")}>
+              <div
+                className={cn(
+                  "reasoning-title",
+                  (item.status === "active" || item.status === "streaming" || item.status === "talking") &&
+                    "thinking-title-active"
+                )}
+              >
                 {item.status === "active" ? `思考中（已进行 ${formatDuration(elapsed)}）` : null}
-                {item.status === "done" ? `已完成思考✔（总用时：${formatDuration(elapsed)}）` : null}
-                {item.status !== "active" && item.status !== "done" ? item.title : null}
+                {item.status === "talking" ? `讨论中（已进行 ${formatDuration(elapsed)}）` : null}
+                {item.status === "done" ? `已完成思考（总用时：${formatDuration(elapsed)}）` : null}
+                {item.status !== "active" && item.status !== "done" && item.status !== "talking" ? item.title : null}
               </div>
               {item.status === "complete" || item.status === "streaming" ? (
                 <div className="reasoning-body markdown-body">

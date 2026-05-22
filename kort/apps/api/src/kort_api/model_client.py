@@ -48,7 +48,7 @@ class OpenAICompatibleClient:
         }
 
         try:
-            response = httpx.post(url, headers=headers, json=payload, timeout=60)
+            response = httpx.post(url, headers=headers, json=payload, timeout=120)
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
             detail = sanitize_error_text(exc.response.text)
@@ -91,7 +91,7 @@ class OpenAICompatibleClient:
         }
 
         try:
-            with httpx.stream("POST", url, headers=headers, json=payload, timeout=60) as response:
+            with httpx.stream("POST", url, headers=headers, json=payload, timeout=120) as response:
                 response.raise_for_status()
                 for line in response.iter_lines():
                     if not line.startswith("data:"):
