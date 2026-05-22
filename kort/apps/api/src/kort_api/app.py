@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 
 from .agents import AgentLoader
 from .config import settings
@@ -89,4 +90,24 @@ def create_conversation(payload: ConversationRequest) -> ConversationResponse:
         agents=agent_loader.list_definitions(),
         providers=provider_store.list_profiles(),
         secrets=provider_store.read_secrets(),
+    )
+
+
+@app.post("/api/conversations/stream")
+def stream_conversation(payload: ConversationRequest) -> StreamingResponse:
+    expert_count = len(agent_loader.list_agents())
+    events = conversation_service.stream_conversation(
+        payload,
+        expert_count=expert_count,
+        agents=agent_loader.list_definitions(),
+        providers=provider_store.list_profiles(),
+        secrets=provider_store.read_secrets(),
+    )
+    return StreamingResponse(
+        events,
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
     )

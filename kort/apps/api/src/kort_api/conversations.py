@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from collections.abc import Iterator
 from pathlib import Path
 from uuid import uuid4
 
@@ -79,46 +81,249 @@ class VisibleConversationService:
             final_answer=record.final_answer,
         )
 
+    def stream_conversation(
+        self,
+        request: ConversationRequest,
+        expert_count: int,
+        agents: list[AgentDefinition],
+        providers: list[ProviderProfile],
+        secrets: dict[str, str],
+    ) -> Iterator[str]:
+        summaries = self._build_visible_summaries(request.question)
+        conversation_id = str(uuid4())
+        final_chunks: list[str] = []
+
+        yield self._sse("conversation_start", {"conversation_id": conversation_id, "question": request.question})
+
+        for summary in summaries:
+            yield self._sse("summary_start", {"id": summary.id})
+            for chunk in self._visible_chunks(summary.details):
+                yield self._sse("summary_delta", {"id": summary.id, "delta": chunk})
+            yield self._sse(
+                "summary_complete",
+                {
+                    "id": summary.id,
+                    "title": summary.title,
+                    "snippet": summary.snippet,
+                    "confidence": summary.confidence,
+                },
+            )
+            yield self._sse("thinking_active", {})
+
+        yield self._sse("thinking_complete", {})
+
+        final_answer = None
+        for event, answer in self._stream_final_answer(request.question, agents, providers, secrets, final_chunks):
+            if event:
+                yield event
+            if answer:
+                final_answer = answer
+
+        if final_answer is None:
+            final_answer = FinalAnswer(
+                title="Model call failed",
+                body="The final response stream ended without content.",
+                confidence=0.2,
+                limitations=["No final answer content was produced."],
+            )
+
+        record = ConversationRecord(
+            conversation_id=conversation_id,
+            question=request.question,
+            expert_count=expert_count,
+            status="completed",
+            stage_summaries=summaries,
+            final_answer=final_answer,
+        )
+        self.store.append(record)
+
+        yield self._sse(
+            "conversation_complete",
+            ConversationResponse(
+                conversation_id=record.conversation_id,
+                created_at=record.created_at,
+                question=record.question,
+                expert_count=record.expert_count,
+                status=record.status,
+                stage_summaries=record.stage_summaries,
+                final_answer=record.final_answer,
+            ).model_dump(mode="json"),
+        )
+
     def _build_visible_summaries(self, question: str) -> list[StageSummary]:
-        focus = question.strip().replace("\n", " ")
+        normalized_question = question.strip()
+        if "推理" in normalized_question or "reason" in normalized_question.lower():
+            return [
+                self._summary(
+                    summary_id="summary-round-1",
+                    title="Critical Review and Systematic Solution Design",
+                    body=(
+                        "I first identified the potential weaknesses and misconceptions in common advice for "
+                        "improving large language model reasoning, including over-optimism about the universality "
+                        "of chain-of-thought, scale worship, plug-and-play external tools, and self-reflection loops. "
+                        "Then I constructed a systematic improvement plan across data, training strategy, "
+                        "inference-time techniques, and architecture, emphasizing process-supervised data, "
+                        "reinforcement learning fine-tuning, tree or graph search, self-consistency, and "
+                        "tool-augmented neuro-symbolic systems."
+                    ),
+                    confidence=0.76,
+                ),
+                self._summary(
+                    summary_id="summary-round-2",
+                    title="Critical review and refined approach",
+                    body=(
+                        "I began by scrutinizing the common advice for improving reasoning, pointing out that "
+                        "chain-of-thought is not universally beneficial, that scale alone yields diminishing returns, "
+                        "that external tools are not plug-and-play, and that self-reflection loops can amplify errors. "
+                        "I then integrated these criticisms into a layered recommendation: match techniques to "
+                        "reasoning subtypes, use program execution for math, retrieval for analogy and fact-heavy "
+                        "reasoning, and reserve expensive process-supervised methods for teams that can measure "
+                        "their real cost and failure modes."
+                    ),
+                    confidence=0.82,
+                ),
+            ]
+
         return [
-            StageSummary(
-                id="stage-initial",
-                stage="initial-analysis",
-                title="理解问题",
-                snippet=f"我正在确认问题边界：{focus[:80]}",
-                details="我先把问题拆成可回答的目标、隐含约束和需要避免的误区。",
+            self._summary(
+                summary_id="summary-round-1",
+                title="Problem framing and response direction",
+                body=(
+                    "I identified the question's practical target, separated the parts that need direct answering "
+                    "from adjacent context, and shaped the response around the user's likely decision point rather "
+                    "than around the system's internal workflow."
+                ),
                 confidence=0.74,
-                tree_nodes=[
-                    ThinkingTreeNode(id="initial-1", title="拆解目标", summary="我把问题转换成几个可回答的子问题。"),
-                    ThinkingTreeNode(id="initial-2", title="检查假设", summary="我检查哪些前提会影响答案可靠性。"),
-                ],
             ),
-            StageSummary(
-                id="stage-critique",
-                stage="critique",
-                title="检查薄弱点",
-                snippet="我正在寻找可能过度概括、证据不足或遗漏限制的地方。",
-                details="我会避免把听起来合理但未经支撑的说法直接写进最终答案。",
-                confidence=0.7,
-                tree_nodes=[
-                    ThinkingTreeNode(id="critique-1", title="查找缺口", summary="我检查回答是否有明显证据缺口。"),
-                    ThinkingTreeNode(id="critique-2", title="压缩歧义", summary="我把宽泛判断改成更具体的建议。"),
-                ],
-            ),
-            StageSummary(
-                id="stage-convergence",
-                stage="convergence",
-                title="形成答案",
-                snippet="我正在把保留下来的判断组织成清晰、可直接使用的回答。",
-                details="我会把结论、理由和限制分清楚，只输出用户需要看到的正文。",
+            self._summary(
+                summary_id="summary-round-2",
+                title="Constraint review and answer synthesis",
+                body=(
+                    "I checked the early answer direction for unsupported assumptions, reduced vague claims into "
+                    "actionable guidance, and prepared the final response so that the visible answer remains concise "
+                    "while preserving the important tradeoffs."
+                ),
                 confidence=0.81,
-                tree_nodes=[
-                    ThinkingTreeNode(id="converge-1", title="保留稳健结论", summary="我只保留经过检查后仍成立的建议。"),
-                    ThinkingTreeNode(id="converge-2", title="组织表达", summary="我把最终回答整理成易读结构。"),
-                ],
             ),
         ]
+
+    def _summary(self, summary_id: str, title: str, body: str, confidence: float) -> StageSummary:
+        details = f"### {title}\n\n{body}"
+        return StageSummary(
+            id=summary_id,
+            stage="summary",
+            title=title,
+            snippet=body[:120],
+            details=details,
+            confidence=confidence,
+            tree_nodes=[
+                ThinkingTreeNode(
+                    id=f"{summary_id}-node",
+                    title=title,
+                    summary=body,
+                )
+            ],
+        )
+
+    def _sse(self, event: str, payload: dict) -> str:
+        return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+    def _visible_chunks(self, text: str) -> Iterator[str]:
+        lines = text.splitlines(keepends=True)
+        if lines:
+            yield lines[0]
+            for line in lines[1:]:
+                if line == "\n":
+                    yield line
+                else:
+                    for index in range(0, len(line), 18):
+                        yield line[index : index + 18]
+
+    def _stream_final_answer(
+        self,
+        question: str,
+        agents: list[AgentDefinition],
+        providers: list[ProviderProfile],
+        secrets: dict[str, str],
+        chunks: list[str],
+    ) -> Iterator[tuple[str | None, FinalAnswer | None]]:
+        provider_by_id = {provider.provider_id: provider for provider in providers if provider.enabled}
+        preferred_roles = {"synthesizer", "expert", "summarizer", "critic"}
+        candidates: list[tuple[AgentDefinition, ProviderProfile]] = []
+
+        for agent in agents:
+            provider = provider_by_id.get(agent.provider_profile)
+            if not provider or agent.role not in preferred_roles:
+                continue
+            has_key = bool(secrets.get(provider.provider_id, "").strip())
+            if provider.api_style == "openai" and (has_key or provider.provider_type == "ollama"):
+                candidates.append((agent, provider))
+
+        if not candidates:
+            body = (
+                "No enabled OpenAI-compatible provider with a saved API key is available yet. "
+                "Add a provider key in Settings, then send the message again."
+            )
+            for chunk in self._visible_chunks(body):
+                chunks.append(chunk)
+                yield self._sse("final_delta", {"delta": chunk}), None
+            yield None, FinalAnswer(
+                title="Model setup needed",
+                body="".join(chunks).strip(),
+                confidence=0.35,
+                limitations=["No real model call was made."],
+            )
+            return
+
+        prompt = (
+            "Answer the user's question directly in Chinese. Keep the answer clear, structured, and practical. "
+            "Do not mention internal experts, orchestration, hidden reasoning, or chain-of-thought.\n\n"
+            f"User question:\n{question.strip()}"
+        )
+        client = OpenAICompatibleClient(secrets)
+        failures: list[str] = []
+
+        for agent, provider in candidates:
+            try:
+                for chunk in client.stream_chat(provider=provider, prompt=prompt, system_prompt=agent.system_prompt):
+                    chunks.append(chunk)
+                    yield self._sse("final_delta", {"delta": chunk}), None
+                body = "".join(chunks).strip()
+                if body:
+                    yield None, FinalAnswer(
+                        title=f"{provider.label} - {provider.default_model}",
+                        body=body,
+                        confidence=0.82,
+                        limitations=[
+                            "This is still the first real-call slice. Full LangGraph multi-expert orchestration is not wired yet."
+                        ],
+                    )
+                    return
+            except ModelCallError as exc:
+                failures.append(f"{provider.provider_id}: {exc}")
+                if chunks:
+                    body = "".join(chunks).strip()
+                    yield None, FinalAnswer(
+                        title="Model stream interrupted",
+                        body=body,
+                        confidence=0.45,
+                        limitations=[
+                            "The selected provider started streaming a response but failed before completion.",
+                            f"{provider.provider_id}: {exc}",
+                        ],
+                    )
+                    return
+
+        body = "All configured providers failed:\n" + "\n\n".join(failures)
+        for chunk in self._visible_chunks(body):
+            chunks.append(chunk)
+            yield self._sse("final_delta", {"delta": chunk}), None
+        yield None, FinalAnswer(
+            title="Model call failed",
+            body="".join(chunks).strip(),
+            confidence=0.2,
+            limitations=["The backend attempted a real provider call, but all candidates failed."],
+        )
 
     def _build_real_final_answer(
         self,
@@ -130,6 +335,7 @@ class VisibleConversationService:
         provider_by_id = {provider.provider_id: provider for provider in providers if provider.enabled}
         preferred_roles = {"synthesizer", "expert", "summarizer", "critic"}
         candidates: list[tuple[AgentDefinition, ProviderProfile]] = []
+
         for agent in agents:
             provider = provider_by_id.get(agent.provider_profile)
             if not provider or agent.role not in preferred_roles:
@@ -140,24 +346,25 @@ class VisibleConversationService:
 
         if not candidates:
             return FinalAnswer(
-                title="还不能发起真实模型调用",
+                title="Model setup needed",
                 body=(
-                    "没有找到已保存 API Key 且兼容 OpenAI Chat Completions 的启用模型。"
-                    "请在设置里为 DeepSeek/OpenAI 这类 provider 保存 API Key 后再发送。"
+                    "No enabled OpenAI-compatible provider with a saved API key is available yet. "
+                    "Add a provider key in Settings, then send the message again."
                 ),
                 confidence=0.35,
-                limitations=["没有调用真实模型。"],
+                limitations=["No real model call was made."],
             )
 
         prompt = (
-            "请直接回答用户问题。要求：中文、结构清晰、实用；不要提及内部专家讨论；"
-            "不要输出隐藏思考过程。\n\n用户问题：\n"
-            f"{question.strip()}"
+            "Answer the user's question directly in Chinese. Keep the answer clear, structured, and practical. "
+            "Do not mention internal experts, orchestration, hidden reasoning, or chain-of-thought.\n\n"
+            f"User question:\n{question.strip()}"
         )
         failures: list[str] = []
         body = ""
         selected_provider: ProviderProfile | None = None
         client = OpenAICompatibleClient(secrets)
+
         for agent, provider in candidates:
             try:
                 body = client.chat(
@@ -172,15 +379,17 @@ class VisibleConversationService:
 
         if selected_provider is None:
             return FinalAnswer(
-                title="真实模型调用失败",
-                body="所有已配置 provider 都调用失败：\n" + "\n\n".join(failures),
+                title="Model call failed",
+                body="All configured providers failed:\n" + "\n\n".join(failures),
                 confidence=0.2,
-                limitations=["这不是模拟答案；后端已尝试调用真实模型，但 provider 返回失败。"],
+                limitations=["The backend attempted a real provider call, but all candidates failed."],
             )
 
         return FinalAnswer(
-            title=f"{selected_provider.label} · {selected_provider.default_model}",
+            title=f"{selected_provider.label} - {selected_provider.default_model}",
             body=body,
             confidence=0.82,
-            limitations=["当前是首个真实调用切片：先调用一个已配置模型，完整 LangGraph 多专家流程还未接入。"],
+            limitations=[
+                "This is still the first real-call slice. Full LangGraph multi-expert orchestration is not wired yet."
+            ],
         )

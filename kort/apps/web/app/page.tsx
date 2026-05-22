@@ -1,7 +1,13 @@
 "use client";
 
+import "katex/dist/katex.min.css";
+
 import { useEffect, useMemo, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
+import ReactMarkdown from "react-markdown";
+import rehypeKatex from "rehype-katex";
+import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
 
 type ThinkingTreeNode = {
   id: string;
@@ -79,6 +85,19 @@ type ProviderTextField =
   | "default_model"
   | "env_key_name";
 
+type TimelineItem = {
+  id: string;
+  title: string;
+  body: string;
+  raw: string;
+  status: "streaming" | "complete" | "active" | "done";
+};
+
+type StreamEvent = {
+  event: string;
+  data: Record<string, unknown>;
+};
+
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 
 const fallbackProviders: ProviderProfile[] = [
@@ -99,7 +118,7 @@ const sampleConversations = [
   "如何提高大模型推理能力？",
   "量子计算的基本原理是什么？",
   "Python 中装饰器的工作原理",
-  "推荐几本关于复杂系统的书",
+  "推荐几本关于复杂系统的书籍",
 ];
 
 const settingsTabs: Array<{ id: SettingsTab; label: string }> = [
@@ -126,8 +145,50 @@ function statusText(message: string) {
     .replace("using environment variable", "使用环境变量");
 }
 
+function markdownTitle(markdown: string, fallback: string) {
+  const firstHeading = markdown.match(/^###\s+(.+)$/m);
+  return firstHeading?.[1]?.trim() || fallback;
+}
+
+function markdownBody(markdown: string) {
+  return markdown.replace(/^###\s+.+\n+/, "").trim();
+}
+
+function formatDuration(totalSeconds: number) {
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes <= 0) return `${seconds}s`;
+  return `${minutes} min ${seconds}s`;
+}
+
+function parseSseChunk(buffer: string): { events: StreamEvent[]; rest: string } {
+  const events: StreamEvent[] = [];
+  const normalized = buffer.replace(/\r\n/g, "\n");
+  const parts = normalized.split("\n\n");
+  const rest = parts.pop() ?? "";
+
+  for (const part of parts) {
+    let event = "message";
+    const dataLines: string[] = [];
+    for (const line of part.split("\n")) {
+      if (line.startsWith("event:")) event = line.slice(6).trim();
+      if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
+    }
+
+    if (!dataLines.length) continue;
+    try {
+      events.push({ event, data: JSON.parse(dataLines.join("\n")) as Record<string, unknown> });
+    } catch {
+      // Ignore malformed partial events; the remaining buffer will be retried.
+    }
+  }
+
+  return { events, rest };
+}
+
 export default function HomePage() {
-  const [question, setQuestion] = useState("如何提高大模型推理能力？");
+  const [input, setInput] = useState("");
+  const [submittedQuestion, setSubmittedQuestion] = useState<string | null>(null);
   const [conversation, setConversation] = useState<ConversationResponse | null>(null);
   const [providers, setProviders] = useState<ProviderProfile[]>(fallbackProviders);
   const [providerForms, setProviderForms] = useState<Record<string, ProviderProfile>>({});
@@ -136,16 +197,29 @@ export default function HomePage() {
   const [providerStatus, setProviderStatus] = useState<Record<string, string>>({});
   const [agents, setAgents] = useState<AgentView[]>([]);
   const [agentsError, setAgentsError] = useState<string | null>(null);
-  const [drawerId, setDrawerId] = useState<string | null>(null);
+  const [drawerOpen, setDrawerOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("providers");
   const [loading, setLoading] = useState(false);
+  const [elapsed, setElapsed] = useState(0);
+  const [thinkingComplete, setThinkingComplete] = useState(false);
+  const [finalBody, setFinalBody] = useState("");
+  const [timeline, setTimeline] = useState<TimelineItem[]>([]);
 
   useEffect(() => {
     void loadProviders();
     void loadProviderSecretStatuses();
     void loadAgents();
   }, []);
+
+  useEffect(() => {
+    if (!loading || thinkingComplete) return;
+
+    const timer = window.setInterval(() => {
+      setElapsed((current) => current + 1);
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [loading, thinkingComplete]);
 
   async function loadProviders() {
     try {
@@ -186,20 +260,108 @@ export default function HomePage() {
   }
 
   async function sendQuestion() {
-    if (!question.trim()) return;
+    const question = input.trim();
+    if (!question) return;
 
+    setSubmittedQuestion(question);
+    setInput("");
+    setConversation(null);
+    setTimeline([]);
+    setFinalBody("");
+    setThinkingComplete(false);
+    setElapsed(0);
+    setDrawerOpen(false);
     setLoading(true);
+
     try {
-      const response = await fetch(`${API_BASE}/api/conversations`, {
+      const response = await fetch(`${API_BASE}/api/conversations/stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ question }),
       });
-      const payload = (await response.json()) as ConversationResponse;
-      setConversation(payload);
-      setDrawerId(payload.stage_summaries[0]?.id ?? null);
+
+      if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`);
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let done = false;
+
+      while (!done) {
+        const read = await reader.read();
+        done = read.done;
+        buffer += decoder.decode(read.value, { stream: !done });
+        const parsed = parseSseChunk(buffer);
+        buffer = parsed.rest;
+        for (const event of parsed.events) {
+          handleStreamEvent(event);
+        }
+      }
     } finally {
       setLoading(false);
+    }
+  }
+
+  function handleStreamEvent(message: StreamEvent) {
+    if (message.event === "summary_start") {
+      const id = String(message.data.id ?? crypto.randomUUID());
+      setTimeline((current) => [
+        ...current.filter((item) => item.id !== "thinking-active" && item.id !== "thinking-done"),
+        { id, title: "Thinking", body: "", raw: "", status: "streaming" },
+      ]);
+      return;
+    }
+
+    if (message.event === "summary_delta") {
+      const id = String(message.data.id ?? "");
+      const delta = String(message.data.delta ?? "");
+      setTimeline((current) =>
+        current.map((item) => {
+          if (item.id !== id) return item;
+          const raw = item.raw + delta;
+          return {
+            ...item,
+            raw,
+            title: markdownTitle(raw, item.title),
+            body: markdownBody(raw),
+          };
+        })
+      );
+      return;
+    }
+
+    if (message.event === "summary_complete") {
+      const id = String(message.data.id ?? "");
+      setTimeline((current) =>
+        current.map((item) => (item.id === id ? { ...item, status: "complete" } : item))
+      );
+      return;
+    }
+
+    if (message.event === "thinking_active") {
+      setTimeline((current) => [
+        ...current.filter((item) => item.id !== "thinking-active" && item.id !== "thinking-done"),
+        { id: "thinking-active", title: "思考中", body: "", raw: "", status: "active" },
+      ]);
+      return;
+    }
+
+    if (message.event === "thinking_complete") {
+      setThinkingComplete(true);
+      setTimeline((current) => [
+        ...current.filter((item) => item.id !== "thinking-active" && item.id !== "thinking-done"),
+        { id: "thinking-done", title: "已完成思考", body: "", raw: "", status: "done" },
+      ]);
+      return;
+    }
+
+    if (message.event === "final_delta") {
+      setFinalBody((current) => current + String(message.data.delta ?? ""));
+      return;
+    }
+
+    if (message.event === "conversation_complete") {
+      setConversation(message.data as unknown as ConversationResponse);
     }
   }
 
@@ -270,214 +432,105 @@ export default function HomePage() {
     }));
   }
 
-  const selectedStage = useMemo(
-    () => conversation?.stage_summaries.find((item) => item.id === drawerId) ?? null,
-    [conversation, drawerId]
-  );
+  const visibleTimeline = useMemo(() => {
+    if (timeline.length) return timeline;
+    return (
+      conversation?.stage_summaries.map((stage) => ({
+        id: stage.id,
+        title: markdownTitle(stage.details, stage.title),
+        body: markdownBody(stage.details),
+        raw: stage.details,
+        status: "complete" as const,
+      })) ?? []
+    );
+  }, [conversation, timeline]);
+
+  const currentReasoning = [...visibleTimeline].reverse().find((item) => item.status === "streaming" || item.status === "complete");
+  const activeTitle = currentReasoning?.title ?? (thinkingComplete ? "已完成思考" : "Thinking");
+  const hasRun = Boolean(submittedQuestion || conversation || loading);
 
   return (
-    <main className="flex min-h-screen bg-canvas text-ink">
-      <aside className="hidden w-[286px] shrink-0 flex-col justify-between border-r border-line bg-panel/90 px-4 py-5 backdrop-blur lg:flex">
-        <div className="space-y-6">
-          <div className="flex items-center justify-between px-2">
-            <div className="flex h-10 w-10 items-center justify-center rounded-2xl border border-line bg-white shadow-card">
-              K
-            </div>
-            <button className="rounded-full border border-line bg-white px-3 py-2 text-sm text-muted">新建</button>
-          </div>
-          <button className="w-full rounded-2xl border border-line bg-white px-4 py-4 text-left shadow-card">
-            <span className="text-base font-medium">+ 新对话</span>
-          </button>
-          <div className="space-y-3">
-            <div className="px-2 text-xs font-semibold uppercase tracking-[0.2em] text-muted">今天</div>
-            {sampleConversations.map((item, index) => (
-              <button
-                key={item}
-                className={cn(
-                  "w-full rounded-2xl px-3 py-3 text-left text-sm transition",
-                  index === 0 ? "bg-white shadow-card" : "text-muted hover:bg-white/70"
-                )}
-                onClick={() => setQuestion(item)}
-              >
-                {item}
-              </button>
-            ))}
-          </div>
-        </div>
+    <main className="app-shell">
+      <Sidebar
+        agents={agents}
+        sampleConversations={sampleConversations}
+        setInput={setInput}
+        openSettings={(tab) => {
+          setSettingsTab(tab);
+          setSettingsOpen(true);
+        }}
+      />
 
-        <div className="space-y-4">
+      <section className="main-shell">
+        <header className="topbar">
           <button
-            className="w-full rounded-[24px] border border-line bg-white/90 p-4 text-left shadow-card"
+            className="brand-button"
             onClick={() => {
-              setSettingsTab("experts");
-              setSettingsOpen(true);
+              setConversation(null);
+              setSubmittedQuestion(null);
+              setTimeline([]);
+              setFinalBody("");
+              setThinkingComplete(false);
+              setElapsed(0);
+              setDrawerOpen(false);
             }}
           >
-            <div className="flex items-center justify-between">
-              <div className="text-sm font-medium">专家小组状态</div>
-              <div className="flex items-center gap-2 text-sm text-[#2f7d32]">
-                <span className="breathing-dot h-2.5 w-2.5 rounded-full bg-[#36a852]" />
-                就绪
-              </div>
-            </div>
-            <div className="mt-4 grid gap-2 text-sm text-muted">
-              <div>轮次: 4 / 4</div>
-              <div>专家: {agents.length || 0} 个模型</div>
-            </div>
+            <span>Round Table</span>
+            <small>ready</small>
           </button>
-
-          <button
-            className="flex w-full items-center gap-3 rounded-[24px] border border-line bg-white px-4 py-4 shadow-card"
-            onClick={() => setSettingsOpen(true)}
-          >
-            <div className="flex h-11 w-11 items-center justify-center rounded-full bg-accent text-lg text-white">
-              A
-            </div>
-            <div className="text-left">
-              <div className="font-medium">Alex</div>
-              <div className="text-sm text-muted">设置与偏好</div>
-            </div>
-          </button>
-        </div>
-      </aside>
-
-      <section className="flex min-w-0 flex-1 flex-col">
-        <header className="flex items-center justify-between px-5 py-5 md:px-7 md:py-7">
-          <div>
-            <div className="text-2xl font-medium">圆桌骑士</div>
-            <div className="mt-1 text-sm text-muted">Multi-LLM 专家小组</div>
-          </div>
-          <div className="flex items-center gap-3">
-            <button className="rounded-full border border-line bg-white px-4 py-2 text-sm shadow-card">分享</button>
-            <button
-              className="flex h-11 w-11 items-center justify-center rounded-full bg-accent text-white"
-              onClick={() => setSettingsOpen(true)}
-            >
-              A
-            </button>
+          <div className="flex items-center gap-2">
+            <button className="small-button">分享</button>
+            <button className="avatar-button" onClick={() => setSettingsOpen(true)}>A</button>
           </div>
         </header>
 
-        <div className="mx-auto flex w-full max-w-[920px] flex-1 flex-col px-4 pb-8 md:px-6">
-          <div className="mb-6 max-w-[76%] self-end rounded-[22px] bg-white px-5 py-4 shadow-card">
-            {question}
-          </div>
-
-          {conversation ? (
-            <div className="space-y-6">
-              <div className="flex items-start gap-4">
-                <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-line bg-white text-sm shadow-card">
-                  K
-                </div>
-                <div className="min-w-0 flex-1">
-                  <button
-                    className="mb-3 flex items-center gap-2 text-sm text-muted transition hover:text-ink"
-                    onClick={() => setDrawerId(conversation.stage_summaries[0]?.id ?? null)}
-                  >
-                    <span className="flex h-7 w-7 items-center justify-center rounded-full border border-line bg-white">◎</span>
-                    <span>思考已完成</span>
-                    <span>⌄</span>
-                  </button>
-                  <div className="space-y-2 border-l border-line pl-4">
-                    {conversation.stage_summaries.map((item) => (
-                      <button
-                        key={item.id}
-                        className="block w-full rounded-lg px-2 py-1 text-left transition hover:bg-white/70"
-                        onClick={() => setDrawerId(item.id)}
-                      >
-                        <span className="font-semibold">{item.title}</span>
-                        <span className="ml-2 text-sm leading-7 text-muted">{item.snippet}</span>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              </div>
-
-              <div className="pl-12">
-                <div className="text-xl font-semibold">{conversation.final_answer.title}</div>
-                <div className="mt-4 whitespace-pre-wrap text-[15px] leading-8 text-[#2b2926]">
-                  {conversation.final_answer.body}
-                </div>
-                <div className="mt-5 text-sm text-muted">
-                  置信度 {Math.round(conversation.final_answer.confidence * 100)}%
-                </div>
-              </div>
-            </div>
-          ) : (
-            <div className="mt-16 rounded-[28px] border border-dashed border-line bg-white/60 p-10 text-center shadow-card">
-              <div className="text-2xl font-semibold">准备开始首个可见摘要回合</div>
-              <div className="mt-3 text-base leading-7 text-muted">
-                发送问题后，界面只会展示阶段摘要和最终答案。
-              </div>
-            </div>
-          )}
-
-          <div className="mt-auto pt-10">
-            <div className="rounded-[28px] border border-line bg-white/95 p-5 shadow-card">
-              <textarea
-                value={question}
-                onChange={(event) => setQuestion(event.target.value)}
-                rows={3}
-                className="w-full resize-none border-0 bg-transparent text-lg leading-8 outline-none"
-                placeholder="向专家小组提出你的问题..."
+        <div className="conversation-scroll">
+          <div className={cn("conversation-inner", !hasRun && "conversation-empty")}>
+            {hasRun ? (
+              <ConversationView
+                conversation={conversation}
+                loading={loading}
+                question={submittedQuestion}
+                timeline={visibleTimeline}
+                finalBody={finalBody || conversation?.final_answer.body || ""}
+                onOpenThinking={() => setDrawerOpen(true)}
               />
-              <div className="mt-4 flex flex-wrap items-center justify-between gap-4">
-                <div className="flex flex-wrap gap-3">
-                  {["深度思考", "联网搜索", "上传文件", "专家小组配置"].map((item) => (
-                    <button
-                      key={item}
-                      className="rounded-full border border-line px-4 py-2 text-sm text-muted"
-                      onClick={() => {
-                        if (item === "专家小组配置") {
-                          setSettingsTab("experts");
-                          setSettingsOpen(true);
-                        }
-                      }}
-                    >
-                      {item}
-                    </button>
-                  ))}
-                </div>
-                <button
-                  className="rounded-full bg-accent px-6 py-3 text-sm text-white disabled:opacity-50"
-                  disabled={loading || !question.trim()}
-                  onClick={() => void sendQuestion()}
-                >
-                  {loading ? "生成中..." : "发送"}
-                </button>
-              </div>
-            </div>
-            <div className="mt-4 text-center text-sm text-muted">内部讨论不会出现在界面或 API 响应中</div>
+            ) : (
+              <div className="new-chat-prompt">今天想解决什么？</div>
+            )}
           </div>
         </div>
+
+        <div className="composer-dock">
+          <Composer
+            input={input}
+            loading={loading}
+            setInput={setInput}
+            onSubmit={() => void sendQuestion()}
+            openSettings={() => {
+              setSettingsTab("experts");
+              setSettingsOpen(true);
+            }}
+          />
+        </div>
+
+        {(loading || conversation) && !drawerOpen ? (
+          <button className="thinking-trigger" onClick={() => setDrawerOpen(true)} aria-label="Open thinking timeline">
+            <span className="breathing-dot h-1.5 w-1.5 rounded-full bg-ink/55" />
+            <span>{activeTitle}</span>
+          </button>
+        ) : null}
       </section>
 
-      <aside className="hidden w-[360px] shrink-0 border-l border-line bg-[#fffdfa]/85 px-5 py-6 backdrop-blur xl:block">
-        <div className="text-lg font-semibold">思考树</div>
-        <div className="mt-1 text-sm text-muted">仅展示阶段化摘要节点</div>
-        {selectedStage ? (
-          <div className="mt-8 space-y-6">
-            {selectedStage.tree_nodes.map((node, index) => (
-              <div key={node.id} className="relative pl-8">
-                {index < selectedStage.tree_nodes.length - 1 ? (
-                  <div className="absolute left-3 top-7 h-full w-px bg-line" />
-                ) : null}
-                <div className="absolute left-0 top-1.5 flex h-6 w-6 items-center justify-center rounded-full border border-line bg-white text-xs">
-                  {index + 1}
-                </div>
-                <div className="rounded-2xl border border-line bg-white p-4 shadow-card">
-                  <div className="font-medium">{node.title}</div>
-                  <div className="mt-2 text-sm leading-7 text-muted">{node.summary}</div>
-                </div>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <div className="mt-8 rounded-3xl border border-dashed border-line p-6 text-sm leading-7 text-muted">
-            发送问题后，这里会按阶段展示由 Summarizer 生成的可见思考树。
-          </div>
-        )}
-      </aside>
+      {drawerOpen ? (
+        <ThinkingDrawer
+          loading={loading}
+          elapsed={elapsed}
+          thinkingComplete={thinkingComplete}
+          timeline={visibleTimeline}
+          onClose={() => setDrawerOpen(false)}
+        />
+      ) : null}
 
       {settingsOpen ? (
         <SettingsOverlay
@@ -499,6 +552,209 @@ export default function HomePage() {
         />
       ) : null}
     </main>
+  );
+}
+
+function Sidebar({
+  agents,
+  sampleConversations,
+  setInput,
+  openSettings,
+}: {
+  agents: AgentView[];
+  sampleConversations: string[];
+  setInput: Dispatch<SetStateAction<string>>;
+  openSettings: (tab: SettingsTab) => void;
+}) {
+  return (
+    <aside className="sidebar">
+      <div className="space-y-4">
+        <div className="flex items-center justify-between px-1">
+          <div className="logo-mark">K</div>
+          <button className="small-button">新建</button>
+        </div>
+        <button className="sidebar-primary" onClick={() => setInput("")}>
+          新对话
+        </button>
+        <div className="space-y-1">
+          <div className="px-2 py-1 text-xs text-muted">今天</div>
+          {sampleConversations.map((item) => (
+            <button key={item} className="sidebar-link" onClick={() => setInput(item)}>
+              {item}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="space-y-2">
+        <button className="sidebar-primary group" onClick={() => openSettings("experts")}>
+          <div className="flex items-center justify-between">
+            <span>Discussion ready</span>
+            <span className="breathing-dot h-1.5 w-1.5 rounded-full bg-[#2f7d32]" />
+          </div>
+          <div className="mt-2 hidden text-xs leading-5 text-muted group-hover:block">
+            {agents.length || 0} profiles available
+          </div>
+        </button>
+        <button className="sidebar-user" onClick={() => openSettings("general")}>
+          <div className="avatar-button">A</div>
+          <div className="text-left">
+            <div className="text-sm font-medium">Alex</div>
+            <div className="text-xs text-muted">Settings</div>
+          </div>
+        </button>
+      </div>
+    </aside>
+  );
+}
+
+function ConversationView({
+  conversation,
+  loading,
+  question,
+  timeline,
+  finalBody,
+  onOpenThinking,
+}: {
+  conversation: ConversationResponse | null;
+  loading: boolean;
+  question: string | null;
+  timeline: TimelineItem[];
+  finalBody: string;
+  onOpenThinking: () => void;
+}) {
+  const latest = [...timeline].reverse().find((item) => item.status === "streaming" || item.status === "complete");
+
+  return (
+    <div className="conversation-stack">
+      {question ? <div className="user-message">{question}</div> : null}
+
+      <div className="assistant-row">
+        <div className="assistant-avatar">K</div>
+        <div className="assistant-content">
+          <button className="thinking-block" onClick={onOpenThinking}>
+            <span className={cn("thinking-title", (loading || conversation) && "thinking-title-active")}>
+              {latest?.title ?? "Thinking"}
+            </span>
+          </button>
+
+          {latest ? (
+            <div className="thinking-preview markdown-body">
+              <Markdown content={latest.body} />
+            </div>
+          ) : null}
+
+          {finalBody ? (
+            <div className="answer-body markdown-body">
+              <Markdown content={finalBody} />
+              {conversation ? (
+                <div className="mt-5 text-xs text-muted">
+                  Confidence {Math.round(conversation.final_answer.confidence * 100)}%
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Markdown({ content }: { content: string }) {
+  return (
+    <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>
+      {content}
+    </ReactMarkdown>
+  );
+}
+
+function Composer({
+  input,
+  loading,
+  setInput,
+  onSubmit,
+  openSettings,
+}: {
+  input: string;
+  loading: boolean;
+  setInput: Dispatch<SetStateAction<string>>;
+  onSubmit: () => void;
+  openSettings: () => void;
+}) {
+  return (
+    <div className="composer-shell">
+      <textarea
+        value={input}
+        onChange={(event) => setInput(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" && !event.shiftKey) {
+            event.preventDefault();
+            onSubmit();
+          }
+        }}
+        rows={3}
+        className="max-h-40 min-h-20 w-full resize-none border-0 bg-transparent text-[15px] leading-7 outline-none"
+        placeholder="向圆桌提出你的问题..."
+      />
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <button className="icon-soft" title="深度思考" type="button">深</button>
+          <button className="icon-soft" title="专家小组配置" type="button" onClick={openSettings}>设</button>
+        </div>
+        <button className="send-button" disabled={loading || !input.trim()} onClick={onSubmit} type="button">
+          {loading ? "..." : "发送"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function ThinkingDrawer({
+  loading,
+  elapsed,
+  thinkingComplete,
+  timeline,
+  onClose,
+}: {
+  loading: boolean;
+  elapsed: number;
+  thinkingComplete: boolean;
+  timeline: TimelineItem[];
+  onClose: () => void;
+}) {
+  return (
+    <aside className="thinking-drawer">
+      <div className="mb-6 flex items-center justify-between">
+        <div>
+          <div className="text-[15px] font-semibold">思考过程</div>
+          <div className="mt-1 text-xs text-muted">
+            {thinkingComplete ? `已完成思考（总用时：${formatDuration(elapsed)}）` : `已进行 ${formatDuration(elapsed)}`}
+          </div>
+        </div>
+        <button className="small-button" onClick={onClose}>收起</button>
+      </div>
+
+      <div className="reasoning-timeline">
+        {timeline.map((item, index) => (
+          <div key={item.id} className="reasoning-node">
+            <div className={cn("reasoning-dot", (item.status === "active" || item.status === "streaming") && "reasoning-dot-active", item.status === "done" && "reasoning-dot-done")} />
+            {index < timeline.length - 1 ? <div className="reasoning-line" /> : null}
+            <div className="reasoning-content">
+              <div className={cn("reasoning-title", (item.status === "active" || item.status === "streaming") && "thinking-title-active")}>
+                {item.status === "active" ? `思考中（已进行 ${formatDuration(elapsed)}）` : null}
+                {item.status === "done" ? `已完成思考✔（总用时：${formatDuration(elapsed)}）` : null}
+                {item.status !== "active" && item.status !== "done" ? item.title : null}
+              </div>
+              {item.status === "complete" || item.status === "streaming" ? (
+                <div className="reasoning-body markdown-body">
+                  <Markdown content={item.body} />
+                </div>
+              ) : null}
+            </div>
+          </div>
+        ))}
+      </div>
+    </aside>
   );
 }
 
@@ -536,16 +792,13 @@ function SettingsOverlay({
   testProvider: (providerId: string) => Promise<void>;
 }) {
   return (
-    <div className="absolute inset-0 z-20 flex bg-[rgba(245,241,236,0.92)] backdrop-blur">
-      <div className="hidden w-[280px] border-r border-line bg-white/90 px-5 py-6 md:block">
-        <div className="mb-6 text-xl font-semibold">设置</div>
+    <div className="settings-backdrop">
+      <div className="hidden w-[260px] border-r border-line bg-white px-4 py-5 md:block">
+        <div className="mb-5 text-[15px] font-medium">设置</div>
         {settingsTabs.map((tab) => (
           <button
             key={tab.id}
-            className={cn(
-              "mb-2 w-full rounded-2xl px-4 py-3 text-left text-sm transition",
-              settingsTab === tab.id ? "bg-[#f3ede4] font-medium" : "text-muted hover:bg-[#faf7f2]"
-            )}
+            className={cn("settings-tab", settingsTab === tab.id && "settings-tab-active")}
             onClick={() => setSettingsTab(tab.id)}
           >
             {tab.label}
@@ -553,23 +806,21 @@ function SettingsOverlay({
         ))}
       </div>
 
-      <div className="flex-1 overflow-auto px-5 py-6 md:px-8">
-        <div className="mb-6 flex items-center justify-between gap-4">
+      <div className="flex-1 overflow-auto px-5 py-5 md:px-7">
+        <div className="mb-5 flex items-start justify-between gap-4">
           <div>
-            <div className="text-2xl font-semibold">{settingsTitle(settingsTab)}</div>
-            <div className="mt-2 text-sm leading-6 text-muted">{settingsSubtitle(settingsTab)}</div>
+            <div className="text-xl font-medium">{settingsTitle(settingsTab)}</div>
+            <div className="mt-1 max-w-[640px] text-sm leading-6 text-muted">{settingsSubtitle(settingsTab)}</div>
           </div>
-          <button className="rounded-full border border-line bg-white px-4 py-2" onClick={() => setSettingsOpen(false)}>
-            关闭
-          </button>
+          <button className="small-button" onClick={() => setSettingsOpen(false)}>关闭</button>
         </div>
 
-        <div className="mb-5 flex gap-2 overflow-x-auto md:hidden">
+        <div className="mb-4 flex gap-2 overflow-x-auto md:hidden">
           {settingsTabs.map((tab) => (
             <button
               key={tab.id}
               className={cn(
-                "shrink-0 rounded-full border border-line px-4 py-2 text-sm",
+                "shrink-0 rounded-md border border-line px-3 py-2 text-sm",
                 settingsTab === tab.id ? "bg-accent text-white" : "bg-white text-muted"
               )}
               onClick={() => setSettingsTab(tab.id)}
@@ -580,40 +831,34 @@ function SettingsOverlay({
         </div>
 
         {settingsTab === "providers" ? (
-          <div className="grid gap-5">
+          <div className="grid gap-4">
             {providers.map((provider) => {
               const form = providerForms[provider.provider_id] ?? provider;
               const keyConfigured = providerSecretStatus[provider.provider_id];
               return (
-                <section key={provider.provider_id} className="rounded-[24px] border border-line bg-white p-6 shadow-card">
-                  <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
+                <section key={provider.provider_id} className="settings-card">
+                  <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
                     <div>
-                      <div className="text-lg font-semibold">{form.label}</div>
-                      <div className="text-sm text-muted">
+                      <div className="font-medium">{form.label}</div>
+                      <div className="mt-1 text-xs text-muted">
                         {provider.provider_id} · {keyConfigured ? "API Key 已配置" : "API Key 未配置"}
                       </div>
                     </div>
                     <div className="flex flex-wrap gap-2">
-                      <button className="rounded-full border border-line px-4 py-2 text-sm" onClick={() => void testProvider(provider.provider_id)}>
-                        测试
-                      </button>
-                      <button className="rounded-full border border-line px-4 py-2 text-sm" onClick={() => void saveProviderSecret(provider.provider_id)}>
-                        保存 API Key
-                      </button>
-                      <button className="rounded-full bg-accent px-4 py-2 text-sm text-white" onClick={() => void saveProvider(provider.provider_id)}>
-                        保存配置
-                      </button>
+                      <button className="small-button" onClick={() => void testProvider(provider.provider_id)}>测试</button>
+                      <button className="small-button" onClick={() => void saveProviderSecret(provider.provider_id)}>保存 Key</button>
+                      <button className="small-button-primary" onClick={() => void saveProvider(provider.provider_id)}>保存配置</button>
                     </div>
                   </div>
 
-                  <div className="grid gap-4 md:grid-cols-2">
+                  <div className="grid gap-3 md:grid-cols-2">
                     <ProviderField provider={form} field="label" label="显示名称" setProviderForms={setProviderForms} />
                     <ProviderField provider={form} field="default_model" label="默认模型" setProviderForms={setProviderForms} />
                     <ProviderField provider={form} field="base_url" label="Base URL" setProviderForms={setProviderForms} />
                     <ProviderField provider={form} field="api_style" label="API 风格" setProviderForms={setProviderForms} />
                     <ProviderField provider={form} field="provider_type" label="Provider 类型" setProviderForms={setProviderForms} />
                     <ProviderField provider={form} field="env_key_name" label="环境变量名" setProviderForms={setProviderForms} />
-                    <label className="grid gap-2 text-sm md:col-span-2">
+                    <label className="grid gap-1 text-sm md:col-span-2">
                       <span className="font-medium">API Key</span>
                       <input
                         type="password"
@@ -624,13 +869,13 @@ function SettingsOverlay({
                             [provider.provider_id]: event.target.value,
                           }))
                         }
-                        className="rounded-2xl border border-line bg-[#fcfbf8] px-4 py-3 outline-none focus:border-[#b49c7d]"
+                        className="settings-input"
                         placeholder={keyConfigured ? "已保存；输入新值可覆盖" : `保存到本地运行时，或使用 ${form.env_key_name}`}
                       />
                     </label>
                   </div>
 
-                  <div className="mt-4 text-sm text-muted">
+                  <div className="mt-3 text-xs leading-5 text-muted">
                     {providerStatus[provider.provider_id] ?? "密钥只保存到本地 runtime/data，不会在 API 响应中回显。"}
                   </div>
                 </section>
@@ -641,31 +886,31 @@ function SettingsOverlay({
 
         {settingsTab === "experts" ? (
           agents.length ? (
-            <div className="grid gap-5 md:grid-cols-2">
+            <div className="grid gap-4 md:grid-cols-2">
               {agents.map((agent) => (
-                <section key={agent.name} className="rounded-[24px] border border-line bg-white p-6 shadow-card">
-                  <div className="text-lg font-semibold">{agent.nickname}</div>
-                  <div className="mt-1 text-sm text-muted">{agent.name}</div>
+                <section key={agent.name} className="settings-card">
+                  <div className="font-medium">{agent.nickname}</div>
+                  <div className="mt-1 text-xs text-muted">{agent.name}</div>
                   <div className="mt-4 grid gap-2 text-sm text-muted">
                     <div>角色: {agent.role}</div>
                     <div>模型: {agent.model}</div>
                     <div>Provider: {agent.provider_profile}</div>
-                    <div>全局 Skills: {agent.allowed_global_skills.join(", ") || "未配置"}</div>
-                    <div>禁用 Skills: {agent.disabled_global_skills.join(", ") || "未配置"}</div>
+                    <div>Skills: {agent.allowed_global_skills.join(", ") || "未配置"}</div>
+                    <div>禁用: {agent.disabled_global_skills.join(", ") || "无"}</div>
                     <div>私有 Skills: {agent.private_skill_count}</div>
                   </div>
                 </section>
               ))}
             </div>
           ) : (
-            <section className="rounded-[24px] border border-line bg-white p-6 text-sm leading-7 text-muted shadow-card">
-              没有加载到专家。{agentsError ? `错误：${agentsError}` : "请确认后端 API 正在运行并且 runtime/agents 中存在 agent.yaml。"}
+            <section className="settings-card text-sm leading-7 text-muted">
+              没有加载到专家。{agentsError ? `错误：${agentsError}` : "请确认后端 API 正在运行，并且 runtime/agents 中存在 agent.yaml。"}
             </section>
           )
         ) : null}
 
         {settingsTab !== "providers" && settingsTab !== "experts" ? (
-          <section className="rounded-[24px] border border-line bg-white p-6 text-sm leading-7 text-muted shadow-card">
+          <section className="settings-card text-sm leading-7 text-muted">
             该部分保留为 MVP 设置中心骨架。后续会接入真实表单、技能授权和数据清理动作。
           </section>
         ) : null}
@@ -683,9 +928,9 @@ function settingsTitle(tab: SettingsTab) {
 }
 
 function settingsSubtitle(tab: SettingsTab) {
-  if (tab === "providers") return "可在前端配置并保存 API Key。当前 MVP 将密钥保存到本机 runtime/data，仅用于本地开发。";
-  if (tab === "experts") return "默认专家从 runtime/agents 自动加载。";
-  if (tab === "skills") return "全局 Skills 对专家可见，专家可通过 yaml 白名单或禁用列表控制访问。";
+  if (tab === "providers") return "开发阶段可在前端配置并保存 API Key。密钥只存本机 runtime/data，用于本地开发。";
+  if (tab === "experts") return "默认专家从 runtime/agents 自动加载。角色和提示词定义身份，Skills 只定义可复用能力。";
+  if (tab === "skills") return "全局 Skills 是能力模块，不是身份标签。专家通过 yaml 白名单或禁用列表控制访问。";
   if (tab === "data") return "只持久化用户可见投影，不保存原始专家讨论。";
   return "圆桌骑士的基础偏好设置。";
 }
@@ -702,7 +947,7 @@ function ProviderField({
   setProviderForms: Dispatch<SetStateAction<Record<string, ProviderProfile>>>;
 }) {
   return (
-    <label className="grid gap-2 text-sm">
+    <label className="grid gap-1 text-sm">
       <span className="font-medium">{label}</span>
       <input
         value={provider[field]}
@@ -715,7 +960,7 @@ function ProviderField({
             },
           }))
         }
-        className="rounded-2xl border border-line bg-[#fcfbf8] px-4 py-3 outline-none focus:border-[#b49c7d]"
+        className="settings-input"
       />
     </label>
   );
