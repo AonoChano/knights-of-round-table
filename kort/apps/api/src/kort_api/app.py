@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
@@ -9,6 +9,8 @@ from .config import settings
 from .conversations import ConversationStore, VisibleConversationService
 from .providers import ProviderStore
 from .schemas import (
+    AgentCreateRequest,
+    AgentUpdateRequest,
     AgentView,
     ConversationListItem,
     ConversationRenameRequest,
@@ -70,6 +72,34 @@ def save_provider_secret(provider_id: str, payload: ProviderSecretUpdate) -> Pro
 @app.get("/api/agents", response_model=list[AgentView])
 def list_agents() -> list[AgentView]:
     return agent_loader.list_agents()
+
+
+@app.post("/api/agents", response_model=AgentView, status_code=201)
+def create_agent(payload: AgentCreateRequest) -> AgentView:
+    try:
+        return agent_loader.create_agent(payload)
+    except FileExistsError:
+        raise HTTPException(status_code=409, detail=f"Agent '{payload.name}' already exists")
+
+
+@app.put("/api/agents/{name}", response_model=AgentView)
+def update_agent(name: str, payload: AgentUpdateRequest) -> AgentView:
+    result, reason = agent_loader.update_agent(name, payload)
+    if reason == "system_protected":
+        raise HTTPException(status_code=403, detail=f"Agent '{name}' is a system agent and cannot be updated")
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
+    return result
+
+
+@app.delete("/api/agents/{name}")
+def delete_agent(name: str) -> Response:
+    ok, reason = agent_loader.delete_agent(name)
+    if reason == "system_protected":
+        raise HTTPException(status_code=403, detail=f"Agent '{name}' is a system agent and cannot be deleted")
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @app.get("/api/skills", response_model=list[str])

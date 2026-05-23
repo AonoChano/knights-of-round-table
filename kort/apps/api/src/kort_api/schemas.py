@@ -76,7 +76,7 @@ class ProviderSecretStatus(BaseModel):
 class AgentDefinition(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    name: str = Field(pattern=r"^[a-z-]+$")
+    name: str = Field(pattern=r"^[a-z][a-z0-9-]*$")
     nickname: str
     role: Literal["expert", "critic", "summarizer", "synthesizer"] = "expert"
     provider_profile: str
@@ -85,6 +85,33 @@ class AgentDefinition(BaseModel):
     allowed_global_skills: list[str] = Field(default_factory=list)
     disabled_global_skills: list[str] = Field(default_factory=list)
     priority: int = Field(default=0, ge=0, le=100)
+
+
+class AgentCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(pattern=r"^[a-z][a-z0-9-]*$")
+    nickname: str
+    role: Literal["expert", "critic", "summarizer", "synthesizer"] = "expert"
+    provider_profile: str
+    model: str
+    system_prompt: str
+    allowed_global_skills: list[str] = Field(default_factory=list)
+    disabled_global_skills: list[str] = Field(default_factory=list)
+    priority: int = Field(default=0, ge=0, le=100)
+
+
+class AgentUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    nickname: str | None = None
+    role: Literal["expert", "critic", "summarizer", "synthesizer"] | None = None
+    provider_profile: str | None = None
+    model: str | None = None
+    system_prompt: str | None = None
+    allowed_global_skills: list[str] | None = None
+    disabled_global_skills: list[str] | None = None
+    priority: int | None = None
 
 
 class AgentView(BaseModel):

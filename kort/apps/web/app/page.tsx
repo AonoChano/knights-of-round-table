@@ -264,6 +264,9 @@ export default function HomePage() {
   const [conversations, setConversations] = useState<ConversationListItem[]>([]);
   const [messagePairs, setMessagePairs] = useState<MessagePair[]>([]);
   const [currentConversationId, setCurrentConversationId] = useState<string | null>(null);
+  const [expertModalOpen, setExpertModalOpen] = useState(false);
+  const [expertModalMode, setExpertModalMode] = useState<"create" | "edit">("create");
+  const [editingAgent, setEditingAgent] = useState<AgentView | null>(null);
 
   const sentenceQueueRef = useRef<string[]>([]);
   const sentenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -414,6 +417,44 @@ export default function HomePage() {
     } catch (error) {
       setAgents([]);
       setAgentsError(error instanceof Error ? error.message : "无法连接后端 API");
+    }
+  }
+
+  async function createAgent(data: { name: string; nickname: string; role: string; provider_profile: string; model: string; system_prompt: string; priority: number }) {
+    try {
+      const response = await fetch(`${API_BASE}/api/agents`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(data),
+      });
+      if (response.ok) await loadAgents();
+      else setAgentsError(`创建失败 HTTP ${response.status}`);
+    } catch (error) {
+      setAgentsError(error instanceof Error ? error.message : "创建请求失败");
+    }
+  }
+
+  async function updateAgent(name: string, data: Record<string, unknown>) {
+    try {
+      const response = await fetch(`${API_BASE}/api/agents/${name}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(data),
+      });
+      if (response.ok) await loadAgents();
+      else setAgentsError(`更新失败 HTTP ${response.status}`);
+    } catch (error) {
+      setAgentsError(error instanceof Error ? error.message : "更新请求失败");
+    }
+  }
+
+  async function deleteAgent(name: string) {
+    try {
+      const response = await fetch(`${API_BASE}/api/agents/${name}`, { method: "DELETE" });
+      if (response.ok) await loadAgents();
+      else setAgentsError(`删除失败 HTTP ${response.status}`);
+    } catch (error) {
+      setAgentsError(error instanceof Error ? error.message : "删除请求失败");
     }
   }
 
@@ -876,6 +917,33 @@ export default function HomePage() {
           saveProvider={saveProvider}
           saveProviderSecret={saveProviderSecret}
           testProvider={testProvider}
+          onAddExpert={() => {
+            setExpertModalMode("create");
+            setEditingAgent(null);
+            setExpertModalOpen(true);
+          }}
+          onEditExpert={(agent: AgentView) => {
+            setExpertModalMode("edit");
+            setEditingAgent(agent);
+            setExpertModalOpen(true);
+          }}
+          onDeleteExpert={(name: string) => void deleteAgent(name)}
+        />
+      ) : null}
+
+      {settingsOpen && expertModalOpen ? (
+        <ExpertModal
+          mode={expertModalMode}
+          agent={editingAgent}
+          providers={providers}
+          onClose={() => setExpertModalOpen(false)}
+          onSave={async (data) => {
+            if (expertModalMode === "create") {
+              await createAgent(data);
+            } else if (editingAgent) {
+              await updateAgent(editingAgent.name, data as Record<string, unknown>);
+            }
+          }}
         />
       ) : null}
     </main>
@@ -1383,6 +1451,9 @@ function SettingsOverlay({
   saveProvider,
   saveProviderSecret,
   testProvider,
+  onAddExpert,
+  onEditExpert,
+  onDeleteExpert,
 }: {
   agents: AgentView[];
   agentsError: string | null;
@@ -1399,7 +1470,11 @@ function SettingsOverlay({
   saveProvider: (providerId: string) => Promise<void>;
   saveProviderSecret: (providerId: string) => Promise<void>;
   testProvider: (providerId: string) => Promise<void>;
+  onAddExpert: () => void;
+  onEditExpert: (agent: AgentView) => void;
+  onDeleteExpert: (name: string) => void;
 }) {
+  const [confirmDeleteName, setConfirmDeleteName] = useState<string | null>(null);
   return (
     <div className="settings-backdrop">
       <div className="hidden w-[260px] border-r border-line bg-white px-4 py-5 md:block">
@@ -1494,34 +1569,58 @@ function SettingsOverlay({
         ) : null}
 
         {settingsTab === "experts" ? (
-          agents.length ? (
-            <div className="grid gap-4 md:grid-cols-2">
-              {agents.map((agent) => (
-                <section key={agent.name} className="settings-card">
-                  <div className="flex items-center gap-2">
-                    <div className="font-medium">{agent.nickname}</div>
-                    {(agent.role === "summarizer" || agent.role === "synthesizer") ? (
-                      <span className="rounded border border-line bg-gray-50 px-1.5 py-0.5 text-[11px] text-muted">系统</span>
-                    ) : null}
-                  </div>
-                  <div className="mt-1 text-xs text-muted">{agent.name}</div>
-                  <div className="mt-4 grid gap-2 text-sm text-muted">
-                    <div>角色: {agent.role}</div>
-                    <div>模型: {agent.model}</div>
-                    <div>Provider: {agent.provider_profile}</div>
-                    <div>优先级: {agent.priority}</div>
-                    <div>Skills: {agent.allowed_global_skills.join(", ") || "未配置"}</div>
-                    <div>禁用: {agent.disabled_global_skills.join(", ") || "无"}</div>
-                    <div>私有 Skills: {agent.private_skill_count}</div>
-                  </div>
-                </section>
-              ))}
-            </div>
-          ) : (
-            <section className="settings-card text-sm leading-7 text-muted">
-              没有加载到专家。{agentsError ? `错误：${agentsError}` : "请确认后端 API 正在运行，并且 runtime/agents 中存在 agent.yaml。"}
-            </section>
-          )
+          <>
+            <button
+              className="small-button-primary mb-4"
+              onClick={onAddExpert}
+            >
+              + 添加专家
+            </button>
+            {agents.length ? (
+              <div className="grid gap-4 md:grid-cols-2">
+                {agents.filter(a => a.name !== "summarizer-main" && a.name !== "synthesizer-main").map((agent) => {
+                  const isSystem =
+                    agent.name === "summarizer-main" || agent.name === "synthesizer-main";
+                  return (
+                    <section key={agent.name} className="settings-card">
+                      <div className="flex items-center gap-2">
+                        <div className="font-medium">{agent.nickname}</div>
+                        {isSystem ? (
+                          <span className="rounded border border-line bg-gray-50 px-1.5 py-0.5 text-[11px] text-muted">系统</span>
+                        ) : null}
+                      </div>
+                      <div className="mt-1 text-xs text-muted">{agent.name}</div>
+                      <div className="mt-4 grid gap-2 text-sm text-muted">
+                        <div>角色: {agent.role}</div>
+                        <div>模型: {agent.model}</div>
+                        <div>Provider: {agent.provider_profile}</div>
+                        <div>优先级: {agent.priority}</div>
+                        <div>Skills: {agent.allowed_global_skills.join(", ") || "未配置"}</div>
+                        <div>禁用: {agent.disabled_global_skills.join(", ") || "无"}</div>
+                        <div>私有 Skills: {agent.private_skill_count}</div>
+                      </div>
+                      {!isSystem ? (
+                        <div className="mt-3 flex gap-2">
+                          <button className="small-button" onClick={() => onEditExpert(agent)}>编辑</button>
+                          <button
+                            className="small-button"
+                            style={{ color: "#d92d20", borderColor: "rgba(217,45,32,0.3)" }}
+                            onClick={() => setConfirmDeleteName(agent.name)}
+                          >
+                            删除
+                          </button>
+                        </div>
+                      ) : null}
+                    </section>
+                  );
+                })}
+              </div>
+            ) : (
+              <section className="settings-card text-sm leading-7 text-muted">
+                没有加载到专家。点击上方按钮添加。{agentsError ? `错误：${agentsError}` : ""}
+              </section>
+            )}
+          </>
         ) : null}
 
         {settingsTab !== "providers" && settingsTab !== "experts" ? (
@@ -1530,6 +1629,26 @@ function SettingsOverlay({
           </section>
         ) : null}
       </div>
+
+      {confirmDeleteName ? (
+        <div className="sidebar-confirm-overlay" onClick={() => setConfirmDeleteName(null)}>
+          <div className="sidebar-confirm-box" onClick={(e) => e.stopPropagation()}>
+            <div className="text-sm mb-3">确定要删除专家 "{confirmDeleteName}" 吗？</div>
+            <div className="flex gap-2 justify-end">
+              <button className="small-button" onClick={() => setConfirmDeleteName(null)}>取消</button>
+              <button
+                className="small-button-primary"
+                onClick={() => {
+                  onDeleteExpert(confirmDeleteName);
+                  setConfirmDeleteName(null);
+                }}
+              >
+                删除
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -1578,5 +1697,214 @@ function ProviderField({
         className="settings-input"
       />
     </label>
+  );
+}
+
+function ExpertModal({
+  mode,
+  agent,
+  providers,
+  onClose,
+  onSave,
+}: {
+  mode: "create" | "edit";
+  agent: AgentView | null;
+  providers: ProviderProfile[];
+  onClose: () => void;
+  onSave: (data: {
+    name: string;
+    nickname: string;
+    role: string;
+    provider_profile: string;
+    model: string;
+    system_prompt: string;
+    priority: number;
+  }) => Promise<void>;
+}) {
+  const [name, setName] = useState(agent?.name ?? "");
+  const [nickname, setNickname] = useState(agent?.nickname ?? "");
+  const [providerProfile, setProviderProfile] = useState(
+    agent?.provider_profile ?? (providers[0]?.provider_id ?? "")
+  );
+  const [model, setModel] = useState(agent?.model ?? "");
+  const [systemPrompt, setSystemPrompt] = useState("");
+  const [role, setRole] = useState(agent?.role ?? "expert");
+  const [priority, setPriority] = useState(agent?.priority ?? 50);
+  const [saving, setSaving] = useState(false);
+
+  const selectedProvider = providers.find((p) => p.provider_id === providerProfile);
+
+  useEffect(() => {
+    if (selectedProvider && !model) {
+      setModel(selectedProvider.default_model);
+    }
+  }, [providerProfile, selectedProvider, model]);
+
+  async function handleSave() {
+    if (!name.trim()) return;
+    setSaving(true);
+    try {
+      await onSave({
+        name: name.trim(),
+        nickname: nickname.trim(),
+        role,
+        provider_profile: providerProfile,
+        model: model.trim() || selectedProvider?.default_model || "",
+        system_prompt: systemPrompt,
+        priority,
+      });
+      onClose();
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const isValidName = /^[a-z][a-z0-9-]*$/.test(name);
+
+  const overlayStyle: React.CSSProperties = {
+    position: "fixed",
+    inset: 0,
+    zIndex: 40,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    background: "rgba(0, 0, 0, 0.3)",
+  };
+
+  const panelStyle: React.CSSProperties = {
+    background: "#fff",
+    borderRadius: "12px",
+    boxShadow: "0 16px 48px rgba(0, 0, 0, 0.15)",
+    maxWidth: "520px",
+    width: "90%",
+    maxHeight: "85vh",
+    overflow: "auto",
+    padding: "24px",
+  };
+
+  return (
+    <div style={overlayStyle} onClick={onClose}>
+      <div style={panelStyle} onClick={(e) => e.stopPropagation()}>
+        <div style={{ fontSize: "18px", fontWeight: 600, marginBottom: "20px" }}>
+          {mode === "create" ? "添加专家" : "编辑专家"}
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
+          {/* name */}
+          <label style={{ display: "flex", flexDirection: "column", gap: "4px", fontSize: "14px" }}>
+            <span style={{ fontWeight: 500 }}>
+              名称{mode === "edit" ? "（只读）" : ""}
+            </span>
+            <input
+              className="settings-input"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              disabled={mode === "edit"}
+              placeholder="小写字母开头，仅小写字母、数字、连字符"
+            />
+            {name && !isValidName ? (
+              <span style={{ fontSize: "12px", color: "#d92d20" }}>
+                格式不符（需匹配 ^[a-z][a-z0-9-]*$）
+              </span>
+            ) : null}
+          </label>
+
+          {/* nickname */}
+          <label style={{ display: "flex", flexDirection: "column", gap: "4px", fontSize: "14px" }}>
+            <span style={{ fontWeight: 500 }}>昵称</span>
+            <input
+              className="settings-input"
+              value={nickname}
+              onChange={(e) => setNickname(e.target.value)}
+              placeholder="显示名称"
+            />
+          </label>
+
+          {/* provider_profile */}
+          <label style={{ display: "flex", flexDirection: "column", gap: "4px", fontSize: "14px" }}>
+            <span style={{ fontWeight: 500 }}>模型提供商</span>
+            <select
+              className="settings-input"
+              value={providerProfile}
+              onChange={(e) => setProviderProfile(e.target.value)}
+            >
+              {providers.length === 0 ? (
+                <option value="">无可用提供商</option>
+              ) : null}
+              {providers.filter(p => p.enabled).map((p) => (
+                <option key={p.provider_id} value={p.provider_id}>
+                  {p.label} ({p.provider_id})
+                </option>
+              ))}
+            </select>
+          </label>
+
+          {/* model */}
+          <label style={{ display: "flex", flexDirection: "column", gap: "4px", fontSize: "14px" }}>
+            <span style={{ fontWeight: 500 }}>模型</span>
+            <input
+              className="settings-input"
+              value={model}
+              onChange={(e) => setModel(e.target.value)}
+              placeholder={selectedProvider?.default_model ?? ""}
+            />
+          </label>
+
+          {/* system_prompt */}
+          <label style={{ display: "flex", flexDirection: "column", gap: "4px", fontSize: "14px" }}>
+            <span style={{ fontWeight: 500 }}>系统提示词</span>
+            <textarea
+              className="settings-input"
+              value={systemPrompt}
+              onChange={(e) => setSystemPrompt(e.target.value)}
+              rows={4}
+              placeholder="输入该专家的系统提示词..."
+            />
+          </label>
+
+          {/* role */}
+          <label style={{ display: "flex", flexDirection: "column", gap: "4px", fontSize: "14px" }}>
+            <span style={{ fontWeight: 500 }}>角色</span>
+            <select
+              className="settings-input"
+              value={role}
+              onChange={(e) => setRole(e.target.value)}
+            >
+              <option value="expert">Expert</option>
+              <option value="critic">Critic</option>
+              <option value="summarizer">Summarizer</option>
+              <option value="synthesizer">Synthesizer</option>
+            </select>
+          </label>
+
+          {/* priority */}
+          <label style={{ display: "flex", flexDirection: "column", gap: "4px", fontSize: "14px" }}>
+            <span style={{ fontWeight: 500 }}>优先级 (0-100)</span>
+            <input
+              className="settings-input"
+              type="number"
+              min={0}
+              max={100}
+              value={priority}
+              onChange={(e) =>
+                setPriority(Math.max(0, Math.min(100, Number(e.target.value) || 0)))
+              }
+            />
+          </label>
+        </div>
+
+        <div style={{ display: "flex", gap: "8px", justifyContent: "flex-end", marginTop: "24px" }}>
+          <button className="small-button" onClick={onClose}>
+            取消
+          </button>
+          <button
+            className="small-button-primary"
+            onClick={() => void handleSave()}
+            disabled={saving || !name.trim() || !isValidName}
+          >
+            {saving ? "保存中..." : mode === "create" ? "创建" : "保存"}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
