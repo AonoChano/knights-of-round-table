@@ -330,20 +330,6 @@ button {
   gap: 12px;
 }
 
-.assistant-avatar {
-  margin-top: 4px;
-  display: flex;
-  height: 28px;
-  width: 28px;
-  flex-shrink: 0;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid rgba(0, 0, 0, 0.06);
-  border-radius: 999px;
-  background: #fff;
-  font-size: 12px;
-}
-
 .assistant-content {
   min-width: 0;
   flex: 1;
@@ -388,6 +374,14 @@ button {
 
 .thinking-preview p {
   margin: 0;
+}
+
+.thinking-preview.markdown-body h1,
+.thinking-preview.markdown-body h2,
+.thinking-preview.markdown-body h3 {
+  font-size: 13px;
+  font-weight: 500;
+  margin: 0.35em 0;
 }
 
 .answer-body {
@@ -634,6 +628,17 @@ button {
   animation: sendSpin 1s linear infinite;
 }
 
+.send-button-stop {
+  border: 2px solid rgba(0, 0, 0, 0.12);
+  border-top-color: #171717;
+  animation: borderSpin 800ms linear infinite;
+}
+
+@keyframes borderSpin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
 .send-button-pause {
   display: inline-flex;
   align-items: center;
@@ -835,4 +840,29 @@ button {
     z-index: 20;
     width: min(380px, 92vw);
   }
+}
+
+.conversation-scroll::-webkit-scrollbar {
+  width: 5px;
+}
+.conversation-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.conversation-scroll::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.12);
+  border-radius: 10px;
+}
+.conversation-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.22);
+}
+
+.thinking-drawer::-webkit-scrollbar {
+  width: 4px;
+}
+.thinking-drawer::-webkit-scrollbar-track {
+  background: transparent;
+}
+.thinking-drawer::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.1);
+  border-radius: 10px;
 }

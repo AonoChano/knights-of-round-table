@@ -32,19 +32,26 @@ type FinalAnswer = {
   limitations: string[];
 };
 
-type ConversationResponse = {
-  conversation_id: string;
+type ConversationRound = {
+  round_id: string;
   created_at: string;
   question: string;
-  expert_count: number;
-  status: "completed";
   stage_summaries: StageSummary[];
   final_answer: FinalAnswer;
 };
 
+type ConversationResponse = {
+  conversation_id: string;
+  created_at: string;
+  updated_at: string;
+  title: string;
+  expert_count: number;
+  rounds: ConversationRound[];
+};
+
 type ConversationListItem = {
   conversation_id: string;
-  question: string;
+  title: string;
   created_at: string;
   updated_at: string;
   expert_count: number;
@@ -74,6 +81,7 @@ type AgentView = {
   role: string;
   provider_profile: string;
   model: string;
+  system_prompt: string;
   allowed_global_skills: string[];
   disabled_global_skills: string[];
   private_skill_count: number;
@@ -264,6 +272,7 @@ export default function HomePage() {
   const [conversations, setConversations] = useState<ConversationListItem[]>([]);
   const [messagePairs, setMessagePairs] = useState<MessagePair[]>([]);
   const [currentConversationId, setCurrentConversationId] = useState<string | null>(null);
+  const [pendingConvId, setPendingConvId] = useState<string | null>(null);
   const [expertModalOpen, setExpertModalOpen] = useState(false);
   const [expertModalMode, setExpertModalMode] = useState<"create" | "edit">("create");
   const [editingAgent, setEditingAgent] = useState<AgentView | null>(null);
@@ -472,13 +481,29 @@ export default function HomePage() {
   async function loadConversation(conversationId: string) {
     resetConversation();
     setMessagePairs([]);
-    setCurrentConversationId(null);
+    setCurrentConversationId(conversationId);
     try {
       const response = await fetch(`${API_BASE}/api/conversations/${conversationId}`);
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const payload = (await response.json()) as ConversationResponse;
       setConversation(payload);
-      setSubmittedQuestion(payload.question);
+      if (payload.rounds?.length) {
+        const pairs: MessagePair[] = payload.rounds.map((round) => {
+          const timelineItems: TimelineItem[] = (round.stage_summaries ?? []).map((s) => ({
+            id: s.id,
+            title: markdownTitle(s.details, s.title),
+            body: markdownBody(s.details),
+            raw: s.details,
+            status: "complete" as const,
+          }));
+          return {
+            question: round.question,
+            timeline: timelineItems,
+            finalBody: round.final_answer.body,
+          };
+        });
+        setMessagePairs(pairs);
+      }
     } catch {
       // silently fail
     }
@@ -489,7 +514,7 @@ export default function HomePage() {
       const response = await fetch(`${API_BASE}/api/conversations/${conversationId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question: newName }),
+        body: JSON.stringify({ title: newName }),
       });
       if (response.ok) {
         await loadConversations();
@@ -519,6 +544,10 @@ export default function HomePage() {
     abortControllerRef.current?.abort();
     abortControllerRef.current = null;
     setLoading(false);
+    if (pendingConvId) {
+      setConversations((prev) => prev.filter((c) => c.conversation_id !== pendingConvId));
+      setPendingConvId(null);
+    }
   }
 
   async function sendQuestion() {
@@ -528,8 +557,7 @@ export default function HomePage() {
     const isNewConversation = !currentConversationId;
 
     if (isNewConversation) {
-      setMessagePairs([]);
-      setConversation(null);
+      fullReset();
     }
 
     clearSentenceState();
@@ -547,6 +575,21 @@ export default function HomePage() {
 
     const controller = new AbortController();
     abortControllerRef.current = controller;
+
+    if (isNewConversation) {
+      const placeholderId = "pending";
+      setConversations((prev) => [
+        {
+          conversation_id: placeholderId,
+          title: question.slice(0, 30),
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+          expert_count: 0,
+        },
+        ...prev,
+      ]);
+      setPendingConvId(placeholderId);
+    }
 
     try {
       const body: Record<string, string> = { question, level: discussionLevel };
@@ -710,21 +753,32 @@ export default function HomePage() {
       const conv = message.data as unknown as ConversationResponse;
       setConversation(conv);
       setCurrentConversationId(conv.conversation_id);
-      const snapshotTimeline = timelineRef.current.filter(
-        (t) => t.id !== "thinking-active" && t.id !== "thinking-done" && t.id !== "talking-active"
-      );
-      const snapshotBody = finalBodyRef.current;
       const question = submittedQuestionRef.current;
-      if (question) {
-        setMessagePairs((prev) => [
-          ...prev,
-          { question, timeline: snapshotTimeline, finalBody: snapshotBody },
-        ]);
-      }
+      submittedQuestionRef.current = null;
+      setSubmittedQuestion(null);
       setTimeline([]);
       setFinalBody("");
-      setSubmittedQuestion(null);
-      submittedQuestionRef.current = null;
+      if (question && conv.rounds.length > 0) {
+        const lastRound = conv.rounds[conv.rounds.length - 1];
+        const timelineItems: TimelineItem[] = (lastRound.stage_summaries ?? []).map((s) => ({
+          id: s.id,
+          title: markdownTitle(s.details, s.title),
+          body: markdownBody(s.details),
+          raw: s.details,
+          status: "complete" as const,
+        }));
+        setMessagePairs((prev) => [
+          ...prev,
+          {
+            question: lastRound.question,
+            timeline: timelineItems,
+            finalBody: lastRound.final_answer.body,
+          },
+        ]);
+      }
+      if (pendingConvId) {
+        setPendingConvId(null);
+      }
       void loadConversations();
     }
   }
@@ -797,17 +851,8 @@ export default function HomePage() {
   }
 
   const visibleTimeline = useMemo(() => {
-    if (timeline.length) return timeline;
-    return (
-      conversation?.stage_summaries.map((stage) => ({
-        id: stage.id,
-        title: markdownTitle(stage.details, stage.title),
-        body: markdownBody(stage.details),
-        raw: stage.details,
-        status: "complete" as const,
-      })) ?? []
-    );
-  }, [conversation, timeline]);
+    return timeline;
+  }, [timeline]);
 
   const currentReasoning = [...visibleTimeline].reverse().find(
     (item) => item.status === "streaming" || item.status === "complete"
@@ -842,7 +887,6 @@ export default function HomePage() {
           </button>
           <div className="flex items-center gap-2">
             <button className="small-button">分享</button>
-            <button className="avatar-button" onClick={() => setSettingsOpen(true)}>A</button>
           </div>
         </header>
 
@@ -856,7 +900,7 @@ export default function HomePage() {
                 elapsed={elapsed}
                 question={submittedQuestion}
                 timeline={visibleTimeline}
-                finalBody={finalBody || conversation?.final_answer.body || ""}
+                finalBody={finalBody}
                 messagePairs={messagePairs}
                 onToggleThinking={() => setDrawerOpen((prev) => !prev)}
               />
@@ -875,10 +919,6 @@ export default function HomePage() {
             setDiscussionLevel={setDiscussionLevel}
             onSubmit={() => void sendQuestion()}
             onPause={pauseConversation}
-            openSettings={() => {
-              setSettingsTab("experts");
-              setSettingsOpen(true);
-            }}
           />
         </div>
 
@@ -992,7 +1032,11 @@ function Sidebar({
       { label: "更早", items: [] },
     ];
 
+    const seenIds = new Set<string>();
+
     for (const conv of conversations) {
+      if (seenIds.has(conv.conversation_id)) continue;
+      seenIds.add(conv.conversation_id);
       const d = new Date(conv.created_at);
       if (d >= todayStart) {
         groups[0].items.push(conv);
@@ -1009,7 +1053,7 @@ function Sidebar({
   function startRename(item: ConversationListItem, e: React.MouseEvent) {
     e.stopPropagation();
     setEditingId(item.conversation_id);
-    setEditValue(item.question);
+    setEditValue(item.title);
   }
 
   function commitRename() {
@@ -1071,7 +1115,7 @@ function Sidebar({
                       )}
                       onClick={() => onSelectConversation(item.conversation_id)}
                     >
-                      {item.question}
+                      {item.title}
                     </button>
                   )}
                   <span className="sidebar-link-actions">
@@ -1161,7 +1205,6 @@ function ConversationView({
       <div key={pair.question} className="conversation-stack">
         <div className="user-message">{pair.question}</div>
         <div className="assistant-row">
-          <div className="assistant-avatar">K</div>
           <div className="assistant-content">
             <span className="thinking-title text-muted text-xs">已完成思考</span>
             {cleanBody ? (
@@ -1188,7 +1231,7 @@ function ConversationView({
   const isHistoryView = Boolean(conversation && !loading && !hasActiveTimelineItems);
   const isDone = thinkingComplete || statusItem?.status === "done";
   const showPreview = !isDone && latest && latest.body.trim();
-  const showCurrentTurn = question || timeline.length > 0 || finalBody;
+  const showCurrentTurn = !isHistoryView && (question || timeline.length > 0 || finalBody);
   const previewTitle = lastCompleteTitle ?? statusItem?.title ?? latest?.title ?? "Thinking";
   const previewBody = latest ? markdownBody(latest.body) : "";
 
@@ -1200,51 +1243,29 @@ function ConversationView({
         <div className="conversation-stack">
           {question ? <div className="user-message">{question}</div> : null}
 
-          {isHistoryView ? (
-            <div className="assistant-row">
-              <div className="assistant-avatar">K</div>
-              <div className="assistant-content">
-                {finalBody ? (
-                  <div className="answer-body markdown-body">
-                    <Markdown content={finalBody} />
-                    <div className="mt-5 text-xs text-muted">
-                      Confidence {Math.round(conversation!.final_answer.confidence * 100)}%
-                    </div>
-                  </div>
-                ) : null}
-              </div>
-            </div>
-          ) : (
-            <div className="assistant-row">
-              <div className="assistant-avatar">K</div>
-              <div className="assistant-content">
-                <button className="thinking-block" onClick={onToggleThinking}>
-                  <span className={cn("thinking-title", !isDone && "thinking-title-active", isDone && !!lastCompleteTitle && "thinking-title-active")}>
-                    {isDone
-                      ? `已完成思考（总用时：${formatDuration(elapsed)}）`
-                      : previewTitle}
-                  </span>
-                </button>
+          <div className="assistant-row">
+            <div className="assistant-content">
+              <button className="thinking-block" onClick={onToggleThinking}>
+                <span className={cn("thinking-title", !isDone && "thinking-title-active", isDone && !!lastCompleteTitle && "thinking-title-active")}>
+                  {isDone
+                    ? `已完成思考（总用时：${formatDuration(elapsed)}）`
+                    : previewTitle}
+                </span>
+              </button>
 
-                {showPreview && previewBody ? (
-                  <div className="thinking-preview markdown-body">
-                    <Markdown content={truncateWords(previewBody, 20)} />
-                  </div>
-                ) : null}
+              {showPreview && previewBody ? (
+                <div className="thinking-preview markdown-body">
+                  <Markdown content={truncateWords(previewBody, 20)} />
+                </div>
+              ) : null}
 
-                {finalBody ? (
-                  <div className="answer-body markdown-body">
-                    <Markdown content={finalBody} />
-                    {conversation ? (
-                      <div className="mt-5 text-xs text-muted">
-                        Confidence {Math.round(conversation.final_answer.confidence * 100)}%
-                      </div>
-                    ) : null}
-                  </div>
-                ) : null}
-              </div>
+              {finalBody ? (
+                <div className="answer-body markdown-body">
+                  <Markdown content={finalBody} />
+                </div>
+              ) : null}
             </div>
-          )}
+          </div>
         </div>
       ) : null}
     </div>
@@ -1267,7 +1288,6 @@ function Composer({
   setDiscussionLevel,
   onSubmit,
   onPause,
-  openSettings,
 }: {
   input: string;
   loading: boolean;
@@ -1276,7 +1296,6 @@ function Composer({
   setDiscussionLevel: Dispatch<SetStateAction<DiscussionLevel>>;
   onSubmit: () => void;
   onPause: () => void;
-  openSettings: () => void;
 }) {
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const active = DISCUSSION_LEVELS.find((d) => d.id === discussionLevel) ?? DISCUSSION_LEVELS[0];
@@ -1328,37 +1347,22 @@ function Composer({
               </div>
             ) : null}
           </div>
-          <button className="icon-soft" title="设置" type="button" onClick={openSettings}>设</button>
         </div>
         <div className="flex items-center gap-2">
-          {loading ? (
-            <button className="send-button-pause" title="暂停" type="button" onClick={onPause}>
-              <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor">
-                <rect x="2" y="1" width="3" height="10" rx="1" />
-                <rect x="7" y="1" width="3" height="10" rx="1" />
-              </svg>
-            </button>
-          ) : null}
           <button
-            className="send-button"
-            disabled={loading || !input.trim()}
-            onClick={onSubmit}
+            className={cn("send-button", loading && "send-button-stop")}
+            onClick={loading ? onPause : onSubmit}
+            disabled={!loading && !input.trim()}
             type="button"
+            style={loading ? { border: "2px solid rgba(0,0,0,0.12)" } : undefined}
           >
             {loading ? (
-              <svg
-                className="send-button-spinner"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-              >
-                <circle cx="12" cy="12" r="10" strokeOpacity="0.25" />
-                <path d="M12 2a10 10 0 0 1 10 10" strokeOpacity="1" />
+              <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor">
+                <rect x="1.5" y="1.5" width="9" height="9" rx="2" />
               </svg>
             ) : (
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+                strokeLinecap="round" strokeLinejoin="round">
                 <path d="M22 2L11 13" />
                 <path d="M22 2L15 22L11 13L2 9L22 2Z" />
               </svg>
@@ -1578,7 +1582,7 @@ function SettingsOverlay({
             </button>
             {agents.length ? (
               <div className="grid gap-4 md:grid-cols-2">
-                {agents.filter(a => a.name !== "summarizer-main" && a.name !== "synthesizer-main").map((agent) => {
+                {agents.map((agent) => {
                   const isSystem =
                     agent.name === "summarizer-main" || agent.name === "synthesizer-main";
                   return (
@@ -1586,22 +1590,21 @@ function SettingsOverlay({
                       <div className="flex items-center gap-2">
                         <div className="font-medium">{agent.nickname}</div>
                         {isSystem ? (
-                          <span className="rounded border border-line bg-gray-50 px-1.5 py-0.5 text-[11px] text-muted">系统</span>
+                          <span className="rounded border border-line bg-gray-50 px-1.5 py-0.5 text-[11px] text-muted">[系统]</span>
                         ) : null}
                       </div>
                       <div className="mt-1 text-xs text-muted">{agent.name}</div>
                       <div className="mt-4 grid gap-2 text-sm text-muted">
                         <div>角色: {agent.role}</div>
-                        <div>模型: {agent.model}</div>
                         <div>Provider: {agent.provider_profile}</div>
                         <div>优先级: {agent.priority}</div>
                         <div>Skills: {agent.allowed_global_skills.join(", ") || "未配置"}</div>
                         <div>禁用: {agent.disabled_global_skills.join(", ") || "无"}</div>
                         <div>私有 Skills: {agent.private_skill_count}</div>
                       </div>
-                      {!isSystem ? (
-                        <div className="mt-3 flex gap-2">
-                          <button className="small-button" onClick={() => onEditExpert(agent)}>编辑</button>
+                      <div className="mt-3 flex gap-2">
+                        <button className="small-button" onClick={() => onEditExpert(agent)}>编辑</button>
+                        {!isSystem ? (
                           <button
                             className="small-button"
                             style={{ color: "#d92d20", borderColor: "rgba(217,45,32,0.3)" }}
@@ -1609,8 +1612,8 @@ function SettingsOverlay({
                           >
                             删除
                           </button>
-                        </div>
-                      ) : null}
+                        ) : null}
+                      </div>
                     </section>
                   );
                 })}
@@ -1727,10 +1730,13 @@ function ExpertModal({
     agent?.provider_profile ?? (providers[0]?.provider_id ?? "")
   );
   const [model, setModel] = useState(agent?.model ?? "");
-  const [systemPrompt, setSystemPrompt] = useState("");
+  const [systemPrompt, setSystemPrompt] = useState(agent?.system_prompt ?? "");
   const [role, setRole] = useState(agent?.role ?? "expert");
   const [priority, setPriority] = useState(agent?.priority ?? 50);
   const [saving, setSaving] = useState(false);
+
+  const isSystem =
+    (agent?.name === "summarizer-main" || agent?.name === "synthesizer-main");
 
   const selectedProvider = providers.find((p) => p.provider_id === providerProfile);
 
@@ -1749,7 +1755,7 @@ function ExpertModal({
         nickname: nickname.trim(),
         role,
         provider_profile: providerProfile,
-        model: model.trim() || selectedProvider?.default_model || "",
+        model: selectedProvider?.default_model ?? "",
         system_prompt: systemPrompt,
         priority,
       });
@@ -1798,7 +1804,7 @@ function ExpertModal({
               className="settings-input"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              disabled={mode === "edit"}
+              disabled={mode === "edit" || isSystem}
               placeholder="小写字母开头，仅小写字母、数字、连字符"
             />
             {name && !isValidName ? (
@@ -1815,6 +1821,7 @@ function ExpertModal({
               className="settings-input"
               value={nickname}
               onChange={(e) => setNickname(e.target.value)}
+              disabled={isSystem}
               placeholder="显示名称"
             />
           </label>
@@ -1838,17 +1845,6 @@ function ExpertModal({
             </select>
           </label>
 
-          {/* model */}
-          <label style={{ display: "flex", flexDirection: "column", gap: "4px", fontSize: "14px" }}>
-            <span style={{ fontWeight: 500 }}>模型</span>
-            <input
-              className="settings-input"
-              value={model}
-              onChange={(e) => setModel(e.target.value)}
-              placeholder={selectedProvider?.default_model ?? ""}
-            />
-          </label>
-
           {/* system_prompt */}
           <label style={{ display: "flex", flexDirection: "column", gap: "4px", fontSize: "14px" }}>
             <span style={{ fontWeight: 500 }}>系统提示词</span>
@@ -1856,6 +1852,7 @@ function ExpertModal({
               className="settings-input"
               value={systemPrompt}
               onChange={(e) => setSystemPrompt(e.target.value)}
+              disabled={isSystem}
               rows={4}
               placeholder="输入该专家的系统提示词..."
             />
@@ -1868,6 +1865,7 @@ function ExpertModal({
               className="settings-input"
               value={role}
               onChange={(e) => setRole(e.target.value)}
+              disabled={isSystem}
             >
               <option value="expert">Expert</option>
               <option value="critic">Critic</option>
@@ -1885,6 +1883,7 @@ function ExpertModal({
               min={0}
               max={100}
               value={priority}
+              disabled={isSystem}
               onChange={(e) =>
                 setPriority(Math.max(0, Math.min(100, Number(e.target.value) || 0)))
               }

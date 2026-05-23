@@ -57,6 +57,7 @@ class AgentLoader:
             role=definition.role,
             provider_profile=definition.provider_profile,
             model=definition.model,
+            system_prompt=definition.system_prompt,
             allowed_global_skills=[
                 item for item in definition.allowed_global_skills if item in global_skills
             ],

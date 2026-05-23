@@ -122,7 +122,7 @@ def get_conversation(conversation_id: str) -> ConversationResponse:
 
 @app.patch("/api/conversations/{conversation_id}", response_model=ConversationListItem)
 def rename_conversation(conversation_id: str, payload: ConversationRenameRequest) -> ConversationListItem:
-    result = conversation_service.rename_conversation(conversation_id, payload.question)
+    result = conversation_service.rename_conversation(conversation_id, payload.title)
     if result is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
     return result
@@ -134,18 +134,6 @@ def delete_conversation(conversation_id: str) -> dict:
     if not ok:
         raise HTTPException(status_code=404, detail="Conversation not found")
     return {"ok": True}
-
-
-@app.post("/api/conversations", response_model=ConversationResponse)
-def create_conversation(payload: ConversationRequest) -> ConversationResponse:
-    expert_count = len(agent_loader.list_agents())
-    return conversation_service.create_conversation(
-        payload,
-        expert_count=expert_count,
-        agents=agent_loader.list_definitions(),
-        providers=provider_store.list_profiles(),
-        secrets=provider_store.read_secrets(),
-    )
 
 
 @app.post("/api/conversations/stream")

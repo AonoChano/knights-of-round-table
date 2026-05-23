@@ -120,6 +120,7 @@ class AgentView(BaseModel):
     role: str
     provider_profile: str
     model: str
+    system_prompt: str
     allowed_global_skills: list[str]
     disabled_global_skills: list[str]
     private_skill_count: int
@@ -152,25 +153,33 @@ class FinalAnswer(BaseModel):
 class ConversationRequest(BaseModel):
     question: str = Field(min_length=1, max_length=4000)
     level: str = Field(default="auto", pattern=r"^(off|auto|low|medium|high)$")
+    conversation_id: str | None = Field(default=None)
 
 
 class ConversationRenameRequest(BaseModel):
-    question: str = Field(min_length=1, max_length=200)
+    title: str = Field(min_length=1, max_length=200)
+
+
+class ConversationRound(BaseModel):
+    round_id: str
+    created_at: datetime = Field(default_factory=utc_now)
+    question: str
+    stage_summaries: list[StageSummary]
+    final_answer: FinalAnswer
 
 
 class ConversationResponse(BaseModel):
     conversation_id: str
     created_at: datetime
-    question: str
+    updated_at: datetime
+    title: str
     expert_count: int
-    status: Literal["completed"]
-    stage_summaries: list[StageSummary]
-    final_answer: FinalAnswer
+    rounds: list[ConversationRound]
 
 
 class ConversationListItem(BaseModel):
     conversation_id: str
-    question: str
+    title: str
     created_at: datetime
     updated_at: datetime
     expert_count: int
@@ -180,11 +189,9 @@ class ConversationRecord(BaseModel):
     conversation_id: str
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
-    question: str
+    title: str
     expert_count: int
-    status: Literal["completed"]
-    stage_summaries: list[StageSummary]
-    final_answer: FinalAnswer
+    rounds: list[ConversationRound] = Field(default_factory=list)
 
 
 class HealthResponse(BaseModel):

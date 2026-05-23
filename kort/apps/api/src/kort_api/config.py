@@ -26,7 +26,14 @@ class Settings(BaseSettings):
     secrets_file: Path = Field(
         default=Path(__file__).resolve().parents[4] / "runtime" / "data" / "provider-secrets.local.json"
     )
-    cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:3000", "http://127.0.0.1:3000"])
+    cors_origins: list[str] = Field(
+        default_factory=lambda: [
+            "http://localhost:3000",
+            "http://localhost:3001",
+            "http://127.0.0.1:3000",
+            "http://127.0.0.1:3001",
+        ]
+    )
 
 
 settings = Settings()
