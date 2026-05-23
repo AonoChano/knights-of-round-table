@@ -271,6 +271,8 @@ def _experts_think(state: DiscussionState) -> dict:
             )
         except ModelCallError:
             output = f"[{nickname} was unavailable]"
+        except Exception:
+            output = f"[{nickname} encountered an unexpected error]"
 
         return name, nickname, output
 
@@ -331,6 +333,8 @@ def _critics_review(state: DiscussionState) -> dict:
             )
         except ModelCallError:
             review = f"[{nickname} review unavailable]"
+        except Exception:
+            review = f"[{nickname} encountered an unexpected error]"
 
         return nickname, review
 
