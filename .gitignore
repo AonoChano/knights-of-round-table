@@ -1,12 +1,51 @@
-﻿logs/
-__pycache__/
+﻿# Logs
+*.log
+
+# Dependencies
 node_modules/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+virtualenv/
+
+# Build outputs
+.next/
+dist/
+build/
+*.tsbuildinfo
+*.egg-info/
+*.egg
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*.sublime*
+*.vscode*
+
+# Environment variables
 .env
+.env.local
+.env.*.local
+
+# AIIDE/Claude/Codex/Trae config
+.claude/
 .codex/
-.trae/tasks/思考方式纠正.md
-.trae/tasks/plan.md
-.gitignore
-.trae/documents/design.md
-.trae/rules/about-issue.md
-.trae/tasks/product-polish-roadmap.md
-.trae/tasks/todo.md
+.trae/
+.Agents/
+
+# Media (non-code assets)
+/media/
+
+# Docker
+.dockerignore
+.docker/
+*.dockerignore
+
+# Runtime data (keep directory structure, ignore content)
+kort/runtime/data/*
+!kort/runtime/data/.gitkeep
+
