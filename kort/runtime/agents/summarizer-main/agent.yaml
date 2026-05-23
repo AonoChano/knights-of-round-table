@@ -10,3 +10,4 @@ allowed_global_skills:
   - stage-summary-projection
   - hidden-cot-guard
 disabled_global_skills: []
+priority: 10

@@ -3,10 +3,10 @@ __pycache__/
 node_modules/
 .env
 .codex/
-.agents/tasks/思考方式纠正.md
-.agents/tasks/plan.md
+.trae/tasks/思考方式纠正.md
+.trae/tasks/plan.md
 .gitignore
-.agents/documents/design.md
-.agents/rules/about-issue.md
-.agents/tasks/product-polish-roadmap.md
-.agents/tasks/todo.md
+.trae/documents/design.md
+.trae/rules/about-issue.md
+.trae/tasks/product-polish-roadmap.md
+.trae/tasks/todo.md

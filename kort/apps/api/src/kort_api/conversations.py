@@ -18,6 +18,7 @@ from .schemas import (
     ProviderProfile,
     StageSummary,
     ThinkingTreeNode,
+    utc_now,
 )
 from .storage import read_json, write_json
 
@@ -37,6 +38,12 @@ class ConversationStore:
         raw = read_json(self.path, default=[])
         return [ConversationRecord.model_validate(item) for item in raw]
 
+    def get_record(self, conversation_id: str) -> ConversationRecord | None:
+        for record in self.list_records():
+            if record.conversation_id == conversation_id:
+                return record
+        return None
+
     def save_records(self, records: list[ConversationRecord]) -> None:
         write_json(self.path, [record.model_dump(mode="json") for record in records])
 
@@ -44,6 +51,24 @@ class ConversationStore:
         records = self.list_records()
         records.insert(0, record)
         self.save_records(records)
+
+    def rename(self, conversation_id: str, new_question: str) -> ConversationRecord | None:
+        records = self.list_records()
+        for record in records:
+            if record.conversation_id == conversation_id:
+                record.question = new_question
+                record.updated_at = utc_now()
+                self.save_records(records)
+                return record
+        return None
+
+    def delete(self, conversation_id: str) -> bool:
+        records = self.list_records()
+        new_records = [r for r in records if r.conversation_id != conversation_id]
+        if len(new_records) == len(records):
+            return False
+        self.save_records(new_records)
+        return True
 
 
 class VisibleConversationService:
@@ -62,6 +87,35 @@ class VisibleConversationService:
             )
             for item in records
         ]
+
+    def get_conversation(self, conversation_id: str) -> ConversationResponse | None:
+        record = self.store.get_record(conversation_id)
+        if record is None:
+            return None
+        return ConversationResponse(
+            conversation_id=record.conversation_id,
+            created_at=record.created_at,
+            question=record.question,
+            expert_count=record.expert_count,
+            status=record.status,
+            stage_summaries=record.stage_summaries,
+            final_answer=record.final_answer,
+        )
+
+    def rename_conversation(self, conversation_id: str, new_question: str) -> ConversationListItem | None:
+        record = self.store.rename(conversation_id, new_question)
+        if record is None:
+            return None
+        return ConversationListItem(
+            conversation_id=record.conversation_id,
+            question=record.question,
+            created_at=record.created_at,
+            updated_at=record.updated_at,
+            expert_count=record.expert_count,
+        )
+
+    def delete_conversation(self, conversation_id: str) -> bool:
+        return self.store.delete(conversation_id)
 
     def create_conversation(
         self,
@@ -102,6 +156,15 @@ class VisibleConversationService:
 
         yield self._sse("conversation_start", {"conversation_id": conversation_id, "question": request.question})
 
+        level_max_rounds: dict[str, int] = {
+            "off": 0,
+            "low": 2,
+            "auto": 4,
+            "medium": 5,
+            "high": 8,
+        }
+        max_rounds = level_max_rounds.get(request.level, 4)
+
         collected_summaries: list[StageSummary] = []
         final_body = ""
 
@@ -110,7 +173,7 @@ class VisibleConversationService:
             agents=agents,
             providers=providers,
             secrets=secrets,
-            max_rounds=4,
+            max_rounds=max_rounds,
         ):
             yield sse_event
 

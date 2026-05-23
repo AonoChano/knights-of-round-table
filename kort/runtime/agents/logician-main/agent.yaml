@@ -1,6 +1,6 @@
 name: logician-main
 nickname: 逻辑分析师
-role: logician
+role: expert
 provider_profile: openai
 model: deepseek-v4-pro
 system_prompt: |

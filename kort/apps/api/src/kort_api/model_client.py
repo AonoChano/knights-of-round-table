@@ -24,7 +24,7 @@ class OpenAICompatibleClient:
     def __init__(self, secrets: dict[str, str]) -> None:
         self.secrets = secrets
 
-    def chat(self, provider: ProviderProfile, prompt: str, system_prompt: str) -> str:
+    def chat(self, provider: ProviderProfile, prompt: str, system_prompt: str, *, disable_thinking: bool = False) -> str:
         if provider.api_style != "openai":
             raise ModelCallError(f"Provider {provider.provider_id} is not OpenAI-compatible yet.")
 
@@ -47,6 +47,9 @@ class OpenAICompatibleClient:
             "temperature": 0.4,
         }
 
+        if disable_thinking:
+            payload["thinking"] = {"type": "disabled"}
+
         try:
             response = httpx.post(url, headers=headers, json=payload, timeout=120)
             response.raise_for_status()
@@ -66,7 +69,7 @@ class OpenAICompatibleClient:
             raise ModelCallError("Model response content was empty.")
         return content.strip()
 
-    def stream_chat(self, provider: ProviderProfile, prompt: str, system_prompt: str) -> Iterator[str]:
+    def stream_chat(self, provider: ProviderProfile, prompt: str, system_prompt: str, *, disable_thinking: bool = False) -> Iterator[str]:
         if provider.api_style != "openai":
             raise ModelCallError(f"Provider {provider.provider_id} is not OpenAI-compatible yet.")
 
@@ -89,6 +92,9 @@ class OpenAICompatibleClient:
             "temperature": 0.4,
             "stream": True,
         }
+
+        if disable_thinking:
+            payload["thinking"] = {"type": "disabled"}
 
         try:
             with httpx.stream("POST", url, headers=headers, json=payload, timeout=120) as response:

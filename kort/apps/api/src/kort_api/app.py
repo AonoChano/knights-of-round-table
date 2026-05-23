@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
@@ -11,6 +11,7 @@ from .providers import ProviderStore
 from .schemas import (
     AgentView,
     ConversationListItem,
+    ConversationRenameRequest,
     ConversationRequest,
     ConversationResponse,
     HealthResponse,
@@ -79,6 +80,30 @@ def list_skills() -> list[str]:
 @app.get("/api/conversations", response_model=list[ConversationListItem])
 def list_conversations() -> list[ConversationListItem]:
     return conversation_service.list_conversations()
+
+
+@app.get("/api/conversations/{conversation_id}", response_model=ConversationResponse)
+def get_conversation(conversation_id: str) -> ConversationResponse:
+    result = conversation_service.get_conversation(conversation_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return result
+
+
+@app.patch("/api/conversations/{conversation_id}", response_model=ConversationListItem)
+def rename_conversation(conversation_id: str, payload: ConversationRenameRequest) -> ConversationListItem:
+    result = conversation_service.rename_conversation(conversation_id, payload.question)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return result
+
+
+@app.delete("/api/conversations/{conversation_id}")
+def delete_conversation(conversation_id: str) -> dict:
+    ok = conversation_service.delete_conversation(conversation_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return {"ok": True}
 
 
 @app.post("/api/conversations", response_model=ConversationResponse)

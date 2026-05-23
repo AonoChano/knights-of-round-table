@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Annotated, TypedDict
 
 from langgraph.graph import END, StateGraph
@@ -46,10 +47,12 @@ def _call_model(
     system_prompt: str,
     user_prompt: str,
     secrets: dict[str, str],
+    *,
+    disable_thinking: bool = False,
 ) -> str:
     profile = ProviderProfile.model_validate(provider)
     client = OpenAICompatibleClient(secrets)
-    return client.chat(provider=profile, prompt=user_prompt, system_prompt=system_prompt)
+    return client.chat(provider=profile, prompt=user_prompt, system_prompt=system_prompt, disable_thinking=disable_thinking)
 
 
 def _call_model_stream(
@@ -58,10 +61,12 @@ def _call_model_stream(
     system_prompt: str,
     user_prompt: str,
     secrets: dict[str, str],
+    *,
+    disable_thinking: bool = False,
 ) -> Iterator[str]:
     profile = ProviderProfile.model_validate(provider)
     client = OpenAICompatibleClient(secrets)
-    yield from client.stream_chat(provider=profile, prompt=user_prompt, system_prompt=system_prompt)
+    yield from client.stream_chat(provider=profile, prompt=user_prompt, system_prompt=system_prompt, disable_thinking=disable_thinking)
 
 
 def _find_enabled_candidate(
@@ -70,6 +75,7 @@ def _find_enabled_candidate(
     secrets: dict[str, str],
     preferred_roles: tuple[str, ...] = ("synthesizer", "expert", "summarizer", "critic"),
 ) -> tuple[dict, dict] | None:
+    candidates: list[tuple[dict, dict, int]] = []
     for role in preferred_roles:
         for agent in agents:
             if agent.get("role") != role:
@@ -79,8 +85,12 @@ def _find_enabled_candidate(
                 continue
             has_key = bool(secrets.get(provider["provider_id"], "").strip())
             if provider.get("api_style") == "openai" and (has_key or provider.get("provider_type") == "ollama"):
-                return agent, provider
-    return None
+                candidates.append((agent, provider, agent.get("priority", 0)))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[2], reverse=True)
+    best = candidates[0]
+    return best[0], best[1]
 
 
 def _summarize_round(state: DiscussionState) -> dict:
@@ -107,16 +117,25 @@ def _summarize_round(state: DiscussionState) -> dict:
             ],
         }
 
-    summarizer_agent = summarizers[0]
-    provider = _provider_by_id(providers, summarizer_agent.get("provider_profile", ""))
-    if not provider:
+    summarizers.sort(key=lambda a: a.get("priority", 0), reverse=True)
+
+    summarizer_agent: dict | None = None
+    provider: dict | None = None
+    for agent in summarizers:
+        p = _provider_by_id(providers, agent.get("provider_profile", ""))
+        if p and p.get("enabled"):
+            summarizer_agent = agent
+            provider = p
+            break
+
+    if not summarizer_agent or not provider:
         return {
             "current_round": round_number,
             "stage_summaries": [
                 {
                     "id": f"summary-round-{round_number}",
                     "title": f"Round {round_number} summary",
-                    "body": "No provider configured for summarizer.",
+                    "body": "No enabled provider for any summarizer.",
                     "confidence": 0.3,
                 }
             ],
@@ -145,6 +164,7 @@ def _summarize_round(state: DiscussionState) -> dict:
             system_prompt=summarizer_agent.get("system_prompt", ""),
             user_prompt=summarizer_prompt,
             secrets=secrets,
+            disable_thinking=True,
         )
     except ModelCallError:
         raw = f"### Round {round_number} summary\n\nDiscussion complete."
@@ -166,6 +186,50 @@ def _summarize_round(state: DiscussionState) -> dict:
     }
 
 
+def _merge_state(state: DiscussionState, update: dict) -> DiscussionState:
+    merged = dict(state)
+    for key, value in update.items():
+        if key in ("discussion_transcript", "stage_summaries") and key in state:
+            merged[key] = state[key] + value
+        elif key == "expert_outputs":
+            merged[key] = {**state.get("expert_outputs", {}), **value}
+        else:
+            merged[key] = value
+    return merged
+
+
+def _pick_summarizer(
+    agents: list[dict], providers: list[dict], secrets: dict[str, str]
+) -> tuple[dict | None, dict | None]:
+    summarizers = _agent_by_role(agents, "summarizer")
+    if not summarizers:
+        return None, None
+    summarizers.sort(key=lambda a: a.get("priority", 0), reverse=True)
+    for agent in summarizers:
+        p = _provider_by_id(providers, agent.get("provider_profile", ""))
+        if p and p.get("enabled"):
+            return agent, p
+    return None, None
+
+
+def _build_summarizer_prompt(question: str, transcript: str) -> str:
+    return (
+        "Below is a transcript of expert discussions for the question. "
+        "Write a concise first-person stage summary in the format:\n\n"
+        "### Short Descriptive Title\n\n"
+        "First-person summary paragraph.\n\n"
+        "Rules:\n"
+        "- Write ENTIRELY in first person (\"I\").\n"
+        "- NEVER mention multiple models, experts, AI agents, or the discussion process.\n"
+        "- Sound like a single person thinking through the problem.\n"
+        "- Capture intellectual progression: what was considered, challenged, refined.\n"
+        "- Keep to 2-4 sentences.\n\n"
+        f"Question: {question}\n\n"
+        f"Discussion transcript:\n{transcript}\n\n"
+        "Now produce your summary:"
+    )
+
+
 def _experts_think(state: DiscussionState) -> dict:
     agents = state["agents"]
     providers = state["providers"]
@@ -177,18 +241,18 @@ def _experts_think(state: DiscussionState) -> dict:
     if not experts:
         return {"discussion_transcript": ["[No experts configured]"]}
 
-    new_outputs: dict[str, str] = {}
-    transcript_entries: list[str] = []
+    previous_discussion = "\n\n---\n\n".join(state.get("discussion_transcript", []))
 
-    for expert in experts:
+    def _invoke_expert(expert: dict) -> tuple[str, str, str]:
+        name = expert.get("name", "unknown")
+        nickname = expert.get("nickname", name)
         provider = _provider_by_id(providers, expert.get("provider_profile", ""))
         if not provider:
-            continue
+            return name, nickname, f"[{nickname} had no valid provider]"
 
         if current_round == 0:
             prompt = f'Analyze the following question thoroughly and provide your expert analysis.\n\nQuestion: {question}'
         else:
-            previous_discussion = "\n\n---\n\n".join(state.get("discussion_transcript", []))
             prompt = (
                 f"You are continuing a multi-round discussion on this question.\n\n"
                 f"Previous discussion:\n{previous_discussion}\n\n"
@@ -206,11 +270,19 @@ def _experts_think(state: DiscussionState) -> dict:
                 secrets=secrets,
             )
         except ModelCallError:
-            output = f"[{expert.get('nickname', expert.get('name', 'expert'))} was unavailable]"
+            output = f"[{nickname} was unavailable]"
 
-        name = expert.get("nickname", expert.get("name", "expert"))
-        new_outputs[expert["name"]] = output
-        transcript_entries.append(f"[{name} (Round {current_round + 1})]:\n{output}")
+        return name, nickname, output
+
+    new_outputs: dict[str, str] = {}
+    transcript_entries: list[str] = []
+
+    with ThreadPoolExecutor(max_workers=len(experts)) as executor:
+        future_map = {executor.submit(_invoke_expert, e): e for e in experts}
+        for future in as_completed(future_map):
+            name, nickname, output = future.result()
+            new_outputs[name] = output
+            transcript_entries.append(f"[{nickname} (Round {current_round + 1})]:\n{output}")
 
     return {
         "expert_outputs": new_outputs,
@@ -230,15 +302,16 @@ def _critics_review(state: DiscussionState) -> dict:
     if not critics or not expert_outputs:
         return {"discussion_transcript": ["[No critics available for review]"]}
 
-    transcript_entries: list[str] = []
     combined_outputs = "\n\n---\n\n".join(
         f"[{name}]:\n{text}" for name, text in expert_outputs.items()
     )
 
-    for critic in critics:
+    def _invoke_critic(critic: dict) -> tuple[str, str]:
+        name = critic.get("name", "unknown")
+        nickname = critic.get("nickname", name)
         provider = _provider_by_id(providers, critic.get("provider_profile", ""))
         if not provider:
-            continue
+            return nickname, f"[{nickname} had no valid provider]"
 
         prompt = (
             f"You are a critical reviewer. Below are expert analyses for the question.\n\n"
@@ -257,10 +330,17 @@ def _critics_review(state: DiscussionState) -> dict:
                 secrets=secrets,
             )
         except ModelCallError:
-            review = f"[{critic.get('nickname', 'critic')} review unavailable]"
+            review = f"[{nickname} review unavailable]"
 
-        name = critic.get("nickname", critic.get("name", "critic"))
-        transcript_entries.append(f"[{name} (Round {current_round + 1} review)]:\n{review}")
+        return nickname, review
+
+    transcript_entries: list[str] = []
+
+    with ThreadPoolExecutor(max_workers=len(critics)) as executor:
+        future_map = {executor.submit(_invoke_critic, c): c for c in critics}
+        for future in as_completed(future_map):
+            nickname, review = future.result()
+            transcript_entries.append(f"[{nickname} (Round {current_round + 1} review)]:\n{review}")
 
     return {
         "critic_reviews": {},
@@ -318,6 +398,7 @@ def _produce_final_answer(state: DiscussionState) -> dict:
             system_prompt=agent.get("system_prompt", ""),
             user_prompt=prompt,
             secrets=secrets,
+            disable_thinking=True,
         )
     except ModelCallError:
         body = "The final response could not be generated. Please check your provider configuration."
@@ -363,6 +444,7 @@ def _stream_final_answer(state: DiscussionState) -> Iterator[str]:
             provider=profile,
             prompt=prompt,
             system_prompt=agent.get("system_prompt", ""),
+            disable_thinking=True,
         ):
             yield chunk
     except ModelCallError:
@@ -378,7 +460,10 @@ def build_discussion_graph() -> StateGraph:
     graph.add_node("decide_continue", _decide_continue)
     graph.add_node("produce_final", _produce_final_answer)
 
-    graph.set_entry_point("experts_think")
+    graph.set_conditional_entry_point(
+        lambda state: "produce_final" if state.get("max_rounds", 4) <= 0 else "experts_think",
+        {"experts_think": "experts_think", "produce_final": "produce_final"},
+    )
     graph.add_edge("experts_think", "critics_review")
     graph.add_edge("critics_review", "summarize_round")
     graph.add_edge("summarize_round", "decide_continue")
@@ -458,13 +543,10 @@ def run_discussion_stream(
     secrets: dict[str, str],
     max_rounds: int = 4,
 ) -> Iterator[str]:
-    graph = build_discussion_graph()
-    compiled = graph.compile()
-
     agents_dicts = [a.model_dump(mode="json") for a in agents]
     providers_dicts = [p.model_dump(mode="json") for p in providers]
 
-    initial_state: DiscussionState = {
+    state: DiscussionState = {
         "question": question,
         "current_round": 0,
         "max_rounds": max_rounds,
@@ -482,46 +564,83 @@ def run_discussion_stream(
     def _sse(event: str, payload: dict) -> str:
         return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
-    for event in compiled.stream(initial_state, stream_mode="updates"):
-        for node_name, node_output in event.items():
-            if not isinstance(node_output, dict):
-                continue
+    if max_rounds <= 0:
+        yield _sse("thinking_complete", {})
+        for chunk in _stream_final_answer(state):
+            yield _sse("final_delta", {"delta": chunk})
+        return
 
-            if node_name in ("experts_think", "critics_review"):
-                yield _sse("talking_active", {})
+    while True:
+        yield _sse("talking_active", {})
+        expert_output = _experts_think(state)
+        state = _merge_state(state, expert_output)
 
-            summaries = node_output.get("stage_summaries")
-            if summaries:
-                for summary in summaries:
-                    sid = summary.get("id", "")
-                    title = summary.get("title", "")
-                    body = summary.get("body", "")
-                    confidence = summary.get("confidence", 0.0)
+        critic_output = _critics_review(state)
+        state = _merge_state(state, critic_output)
 
-                    yield _sse("summary_start", {"id": sid})
-                    yield _sse("summary_title", {"id": sid, "title": title})
-                    for chunk in re.split(r"(\s+)", body):
-                        yield _sse("summary_delta", {"id": sid, "delta": chunk})
-                    yield _sse("summary_complete", {
-                        "id": sid,
-                        "stage": "summary",
-                        "title": title,
-                        "snippet": body[:120],
-                        "details": f"### {title}\n\n{body}",
-                        "confidence": confidence,
-                        "tree_nodes": [
-                            {
-                                "id": f"{sid}-node",
-                                "title": title,
-                                "summary": body,
-                            }
-                        ],
-                    })
-                    yield _sse("thinking_active", {})
+        round_number = state.get("current_round", 0) + 1
+        sid = f"summary-round-{round_number}"
+
+        summarizer_agent, provider_dict = _pick_summarizer(
+            state["agents"], state["providers"], secrets
+        )
+        transcript = "\n\n---\n\n".join(state.get("discussion_transcript", []))
+
+        if summarizer_agent and provider_dict and transcript.strip():
+            prompt = _build_summarizer_prompt(question, transcript)
+
+            yield _sse("summary_start", {"id": sid})
+
+            streamed_text = ""
+            profile = ProviderProfile.model_validate(provider_dict)
+            client = OpenAICompatibleClient(secrets)
+            try:
+                for chunk in client.stream_chat(
+                    provider=profile,
+                    prompt=prompt,
+                    system_prompt=summarizer_agent.get("system_prompt", ""),
+                    disable_thinking=True,
+                ):
+                    streamed_text += chunk
+                    yield _sse("summary_delta", {"id": sid, "delta": chunk})
+            except ModelCallError:
+                streamed_text = f"### Round {round_number} summary\n\nDiscussion complete."
+
+            title_match = SUMMARY_TITLE_RE.search(streamed_text)
+            title = title_match.group(1).strip() if title_match else f"Round {round_number} summary"
+            body = SUMMARY_BODY_RE.sub("", streamed_text).strip() or streamed_text
+
+            yield _sse("summary_title", {"id": sid, "title": title})
+            yield _sse("summary_complete", {
+                "id": sid,
+                "stage": "summary",
+                "title": title,
+                "snippet": body[:120],
+                "details": f"### {title}\n\n{body}",
+                "confidence": 0.78,
+                "tree_nodes": [
+                    {"id": f"{sid}-node", "title": title, "summary": body},
+                ],
+            })
+            yield _sse("thinking_active", {})
+
+            state["stage_summaries"] = state.get("stage_summaries", []) + [{
+                "id": sid, "title": title, "body": body, "confidence": 0.78,
+            }]
+        else:
+            state["stage_summaries"] = state.get("stage_summaries", []) + [{
+                "id": sid, "title": f"Round {round_number} summary",
+                "body": "Summary unavailable.", "confidence": 0.3,
+            }]
+
+        state["current_round"] = round_number
+        decision = _decide_continue(state)
+        state = _merge_state(state, decision)
+
+        if not state.get("should_continue"):
+            break
 
     yield _sse("thinking_complete", {})
 
-    final_state = compiled.invoke(initial_state)
-
-    for chunk in _stream_final_answer(final_state):
+    for chunk in _stream_final_answer(state):
         yield _sse("final_delta", {"delta": chunk})

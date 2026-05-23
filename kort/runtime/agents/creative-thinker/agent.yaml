@@ -1,6 +1,6 @@
 name: creative-thinker
 nickname: 创意灵感家
-role: creative_thinker
+role: expert
 provider_profile: openai
 model: gpt-4.1-mini
 system_prompt: |

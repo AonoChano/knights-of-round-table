@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import yaml
+from pydantic import ValidationError
 
 from .schemas import AgentDefinition, AgentView
+
+logger = logging.getLogger(__name__)
 
 
 class AgentLoader:
@@ -31,8 +35,13 @@ class AgentLoader:
             if not config_path.exists():
                 continue
 
-            content = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-            definition = AgentDefinition.model_validate(content)
+            try:
+                content = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+                definition = AgentDefinition.model_validate(content)
+            except (yaml.YAMLError, ValidationError) as exc:
+                logger.warning("Skipping invalid agent config %s: %s", agent_dir.name, exc)
+                continue
+
             private_root = agent_dir / "skills"
             private_count = 0
 
@@ -55,6 +64,7 @@ class AgentLoader:
                         item for item in definition.disabled_global_skills if item in global_skills
                     ],
                     private_skill_count=private_count,
+                    priority=definition.priority,
                 )
             )
 
@@ -70,7 +80,11 @@ class AgentLoader:
             if not config_path.exists():
                 continue
 
-            content = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-            definitions.append(AgentDefinition.model_validate(content))
+            try:
+                content = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+                definitions.append(AgentDefinition.model_validate(content))
+            except (yaml.YAMLError, ValidationError) as exc:
+                logger.warning("Skipping invalid agent config %s: %s", agent_dir.name, exc)
+                continue
 
         return definitions

@@ -34,11 +34,26 @@ type FinalAnswer = {
 
 type ConversationResponse = {
   conversation_id: string;
+  created_at: string;
   question: string;
   expert_count: number;
   status: "completed";
   stage_summaries: StageSummary[];
   final_answer: FinalAnswer;
+};
+
+type ConversationListItem = {
+  conversation_id: string;
+  question: string;
+  created_at: string;
+  updated_at: string;
+  expert_count: number;
+};
+
+type MessagePair = {
+  question: string;
+  timeline: TimelineItem[];
+  finalBody: string;
 };
 
 type ProviderProfile = {
@@ -62,6 +77,7 @@ type AgentView = {
   allowed_global_skills: string[];
   disabled_global_skills: string[];
   private_skill_count: number;
+  priority: number;
 };
 
 type ProviderConnectivityResponse = {
@@ -77,6 +93,20 @@ type ProviderSecretStatus = {
 };
 
 type SettingsTab = "general" | "providers" | "experts" | "skills" | "data";
+type DiscussionLevel = "off" | "auto" | "low" | "medium" | "high";
+
+const DISCUSSION_LEVELS: Array<{
+  id: DiscussionLevel;
+  label: string;
+  tag: string;
+}> = [
+  { id: "off", label: "关", tag: "讨论程度" },
+  { id: "auto", label: "自动", tag: "博采众议" },
+  { id: "low", label: "低", tag: "围炉夜话" },
+  { id: "medium", label: "中", tag: "覆卮对弈" },
+  { id: "high", label: "高", tag: "穷尽棋路" },
+];
+
 type ProviderTextField =
   | "label"
   | "provider_type"
@@ -114,13 +144,6 @@ const fallbackProviders: ProviderProfile[] = [
     enabled: true,
     capabilities: ["chat", "reasoning"],
   },
-];
-
-const sampleConversations = [
-  "如何提高大模型推理能力？",
-  "量子计算的基本原理是什么？",
-  "Python 中装饰器的工作原理",
-  "推荐几本关于复杂系统的书籍",
 ];
 
 const settingsTabs: Array<{ id: SettingsTab; label: string }> = [
@@ -237,12 +260,20 @@ export default function HomePage() {
   const [finalBody, setFinalBody] = useState("");
   const [timeline, setTimeline] = useState<TimelineItem[]>([]);
   const [talkingActive, setTalkingActive] = useState(false);
+  const [discussionLevel, setDiscussionLevel] = useState<DiscussionLevel>("auto");
+  const [conversations, setConversations] = useState<ConversationListItem[]>([]);
+  const [messagePairs, setMessagePairs] = useState<MessagePair[]>([]);
+  const [currentConversationId, setCurrentConversationId] = useState<string | null>(null);
 
   const sentenceQueueRef = useRef<string[]>([]);
   const sentenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activeSummaryRef = useRef<string>("");
   const timerElapsedRef = useRef(false);
   const rawBodyBySummary = useRef<Record<string, string>>({});
+  const timelineRef = useRef<TimelineItem[]>([]);
+  const finalBodyRef = useRef("");
+  const submittedQuestionRef = useRef<string | null>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   function clearSentenceState() {
     if (sentenceTimerRef.current) {
@@ -304,7 +335,6 @@ export default function HomePage() {
   function resetConversation() {
     clearSentenceState();
     setConversation(null);
-    setSubmittedQuestion(null);
     setTimeline([]);
     setFinalBody("");
     setThinkingComplete(false);
@@ -313,15 +343,32 @@ export default function HomePage() {
     setTalkingActive(false);
   }
 
+  function fullReset() {
+    resetConversation();
+    setSubmittedQuestion(null);
+    setMessagePairs([]);
+    setCurrentConversationId(null);
+    setConversation(null);
+  }
+
   useEffect(() => {
     void loadProviders();
     void loadProviderSecretStatuses();
     void loadAgents();
+    void loadConversations();
   }, []);
 
   useEffect(() => {
     return () => clearSentenceState();
   }, []);
+
+  useEffect(() => {
+    timelineRef.current = timeline;
+  }, [timeline]);
+
+  useEffect(() => {
+    finalBodyRef.current = finalBody;
+  }, [finalBody]);
 
   useEffect(() => {
     if (!loading || thinkingComplete) return;
@@ -370,20 +417,107 @@ export default function HomePage() {
     }
   }
 
+  async function loadConversations() {
+    try {
+      const response = await fetch(`${API_BASE}/api/conversations`);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const payload = (await response.json()) as ConversationListItem[];
+      setConversations(payload);
+    } catch {
+      setConversations([]);
+    }
+  }
+
+  async function loadConversation(conversationId: string) {
+    resetConversation();
+    setMessagePairs([]);
+    setCurrentConversationId(null);
+    try {
+      const response = await fetch(`${API_BASE}/api/conversations/${conversationId}`);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const payload = (await response.json()) as ConversationResponse;
+      setConversation(payload);
+      setSubmittedQuestion(payload.question);
+    } catch {
+      // silently fail
+    }
+  }
+
+  async function renameConversation(conversationId: string, newName: string) {
+    try {
+      const response = await fetch(`${API_BASE}/api/conversations/${conversationId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question: newName }),
+      });
+      if (response.ok) {
+        await loadConversations();
+      }
+    } catch {
+      // silently fail
+    }
+  }
+
+  async function deleteConversation(conversationId: string) {
+    try {
+      const response = await fetch(`${API_BASE}/api/conversations/${conversationId}`, {
+        method: "DELETE",
+      });
+      if (response.ok) {
+        if (conversation?.conversation_id === conversationId) {
+          fullReset();
+        }
+        await loadConversations();
+      }
+    } catch {
+      // silently fail
+    }
+  }
+
+  function pauseConversation() {
+    abortControllerRef.current?.abort();
+    abortControllerRef.current = null;
+    setLoading(false);
+  }
+
   async function sendQuestion() {
     const question = input.trim();
     if (!question) return;
 
+    const isNewConversation = !currentConversationId;
+
+    if (isNewConversation) {
+      setMessagePairs([]);
+      setConversation(null);
+    }
+
+    clearSentenceState();
+    setTimeline([]);
+    setFinalBody("");
+    setThinkingComplete(false);
+    setElapsed(0);
+    setDrawerOpen(false);
+    setTalkingActive(false);
+
     setSubmittedQuestion(question);
+    submittedQuestionRef.current = question;
     setInput("");
-    resetConversation();
     setLoading(true);
 
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
     try {
+      const body: Record<string, string> = { question, level: discussionLevel };
+      if (!isNewConversation && currentConversationId) {
+        body.conversation_id = currentConversationId;
+      }
+
       const response = await fetch(`${API_BASE}/api/conversations/stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question }),
+        body: JSON.stringify(body),
+        signal: controller.signal,
       });
 
       if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`);
@@ -405,6 +539,7 @@ export default function HomePage() {
       }
     } finally {
       setLoading(false);
+      abortControllerRef.current = null;
     }
   }
 
@@ -471,6 +606,16 @@ export default function HomePage() {
         })
       );
 
+      const raw = rawBodyBySummary.current[id];
+      const earlyTitle = raw.match(/^###\s+(.+)\n/m)?.[1]?.trim();
+      if (earlyTitle) {
+        setTimeline((current) =>
+          current.map((item) =>
+            item.id === id && item.title === "Thinking" ? { ...item, title: earlyTitle } : item
+          )
+        );
+      }
+
       processSentenceBuffer(id);
       return;
     }
@@ -521,7 +666,25 @@ export default function HomePage() {
     }
 
     if (message.event === "conversation_complete") {
-      setConversation(message.data as unknown as ConversationResponse);
+      const conv = message.data as unknown as ConversationResponse;
+      setConversation(conv);
+      setCurrentConversationId(conv.conversation_id);
+      const snapshotTimeline = timelineRef.current.filter(
+        (t) => t.id !== "thinking-active" && t.id !== "thinking-done" && t.id !== "talking-active"
+      );
+      const snapshotBody = finalBodyRef.current;
+      const question = submittedQuestionRef.current;
+      if (question) {
+        setMessagePairs((prev) => [
+          ...prev,
+          { question, timeline: snapshotTimeline, finalBody: snapshotBody },
+        ]);
+      }
+      setTimeline([]);
+      setFinalBody("");
+      setSubmittedQuestion(null);
+      submittedQuestionRef.current = null;
+      void loadConversations();
     }
   }
 
@@ -612,14 +775,18 @@ export default function HomePage() {
     (item) => item.status === "active" || item.status === "talking" || item.status === "done"
   );
   const activeTitle = statusItem?.title ?? currentReasoning?.title ?? (thinkingComplete ? "已完成思考" : "Thinking");
-  const hasRun = Boolean(submittedQuestion || conversation || loading);
+  const hasRun = Boolean(submittedQuestion || conversation || loading || messagePairs.length > 0);
 
   return (
     <main className="app-shell">
       <Sidebar
         agents={agents}
-        sampleConversations={sampleConversations}
-        setInput={setInput}
+        conversations={conversations}
+        activeConversationId={conversation?.conversation_id ?? null}
+        onNewConversation={fullReset}
+        onSelectConversation={(id) => void loadConversation(id)}
+        onRenameConversation={(id, name) => void renameConversation(id, name)}
+        onDeleteConversation={(id) => void deleteConversation(id)}
         openSettings={(tab) => {
           setSettingsTab(tab);
           setSettingsOpen(true);
@@ -628,7 +795,7 @@ export default function HomePage() {
 
       <section className="main-shell">
         <header className="topbar">
-          <button className="brand-button" onClick={resetConversation}>
+          <button className="brand-button" onClick={fullReset}>
             <span>Round Table</span>
             <small>ready</small>
           </button>
@@ -649,7 +816,8 @@ export default function HomePage() {
                 question={submittedQuestion}
                 timeline={visibleTimeline}
                 finalBody={finalBody || conversation?.final_answer.body || ""}
-                onOpenThinking={() => setDrawerOpen(true)}
+                messagePairs={messagePairs}
+                onToggleThinking={() => setDrawerOpen((prev) => !prev)}
               />
             ) : (
               <div className="new-chat-prompt">今天想解决什么？</div>
@@ -661,8 +829,11 @@ export default function HomePage() {
           <Composer
             input={input}
             loading={loading}
+            discussionLevel={discussionLevel}
             setInput={setInput}
+            setDiscussionLevel={setDiscussionLevel}
             onSubmit={() => void sendQuestion()}
+            onPause={pauseConversation}
             openSettings={() => {
               setSettingsTab("experts");
               setSettingsOpen(true);
@@ -671,7 +842,7 @@ export default function HomePage() {
         </div>
 
         {(loading || conversation) && !drawerOpen ? (
-          <button className="thinking-trigger" onClick={() => setDrawerOpen(true)} aria-label="Open thinking timeline">
+          <button className="thinking-trigger" onClick={() => setDrawerOpen((prev) => !prev)} aria-label="Toggle thinking timeline">
             <span className="breathing-dot h-1.5 w-1.5 rounded-full bg-ink/55" />
             <span>{activeTitle}</span>
           </button>
@@ -713,32 +884,151 @@ export default function HomePage() {
 
 function Sidebar({
   agents,
-  sampleConversations,
-  setInput,
+  conversations,
+  activeConversationId,
+  onNewConversation,
+  onSelectConversation,
+  onRenameConversation,
+  onDeleteConversation,
   openSettings,
 }: {
   agents: AgentView[];
-  sampleConversations: string[];
-  setInput: Dispatch<SetStateAction<string>>;
+  conversations: ConversationListItem[];
+  activeConversationId: string | null;
+  onNewConversation: () => void;
+  onSelectConversation: (id: string) => void;
+  onRenameConversation: (id: string, name: string) => void;
+  onDeleteConversation: (id: string) => void;
   openSettings: (tab: SettingsTab) => void;
 }) {
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editValue, setEditValue] = useState("");
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const editInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (editingId && editInputRef.current) {
+      editInputRef.current.focus();
+      editInputRef.current.select();
+    }
+  }, [editingId]);
+
+  const grouped = useMemo(() => {
+    const now = new Date();
+    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const yesterdayStart = new Date(todayStart.getTime() - 86400000);
+
+    const groups: { label: string; items: ConversationListItem[] }[] = [
+      { label: "今天", items: [] },
+      { label: "昨天", items: [] },
+      { label: "更早", items: [] },
+    ];
+
+    for (const conv of conversations) {
+      const d = new Date(conv.created_at);
+      if (d >= todayStart) {
+        groups[0].items.push(conv);
+      } else if (d >= yesterdayStart) {
+        groups[1].items.push(conv);
+      } else {
+        groups[2].items.push(conv);
+      }
+    }
+
+    return groups.filter((g) => g.items.length > 0);
+  }, [conversations]);
+
+  function startRename(item: ConversationListItem, e: React.MouseEvent) {
+    e.stopPropagation();
+    setEditingId(item.conversation_id);
+    setEditValue(item.question);
+  }
+
+  function commitRename() {
+    if (editingId && editValue.trim()) {
+      onRenameConversation(editingId, editValue.trim());
+    }
+    setEditingId(null);
+    setEditValue("");
+  }
+
+  function handleDeleteClick(item: ConversationListItem, e: React.MouseEvent) {
+    e.stopPropagation();
+    setConfirmDeleteId(item.conversation_id);
+  }
+
+  function confirmDelete() {
+    if (confirmDeleteId) {
+      onDeleteConversation(confirmDeleteId);
+    }
+    setConfirmDeleteId(null);
+  }
+
   return (
     <aside className="sidebar">
       <div className="space-y-4">
         <div className="flex items-center justify-between px-1">
           <div className="logo-mark">K</div>
-          <button className="small-button">新建</button>
         </div>
-        <button className="sidebar-primary" onClick={() => setInput("")}>
-          新对话
+        <button className="sidebar-primary" onClick={onNewConversation}>
+          新建对话
         </button>
         <div className="space-y-1">
-          <div className="px-2 py-1 text-xs text-muted">今天</div>
-          {sampleConversations.map((item) => (
-            <button key={item} className="sidebar-link" onClick={() => setInput(item)}>
-              {item}
-            </button>
+          {grouped.map((group) => (
+            <div key={group.label}>
+              <div className="px-2 py-1 text-xs text-muted">{group.label}</div>
+              {group.items.map((item) => (
+                <div key={item.conversation_id} className="sidebar-link-row">
+                  {editingId === item.conversation_id ? (
+                    <input
+                      ref={editInputRef}
+                      className="sidebar-link-input"
+                      value={editValue}
+                      onChange={(e) => setEditValue(e.target.value)}
+                      onBlur={commitRename}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") commitRename();
+                        if (e.key === "Escape") {
+                          setEditingId(null);
+                          setEditValue("");
+                        }
+                      }}
+                      onClick={(e) => e.stopPropagation()}
+                    />
+                  ) : (
+                    <button
+                      className={cn(
+                        "sidebar-link",
+                        activeConversationId === item.conversation_id && "sidebar-link-active"
+                      )}
+                      onClick={() => onSelectConversation(item.conversation_id)}
+                    >
+                      {item.question}
+                    </button>
+                  )}
+                  <span className="sidebar-link-actions">
+                    <button
+                      className="sidebar-link-action-btn"
+                      title="重命名"
+                      onClick={(e) => startRename(item, e)}
+                    >
+                      ✎
+                    </button>
+                    <button
+                      className="sidebar-link-action-btn sidebar-link-action-delete"
+                      title="删除"
+                      onClick={(e) => handleDeleteClick(item, e)}
+                    >
+                      ✕
+                    </button>
+                  </span>
+                </div>
+              ))}
+            </div>
           ))}
+          {conversations.length === 0 && (
+            <div className="px-2 py-3 text-xs text-muted">暂无对话历史</div>
+          )}
         </div>
       </div>
 
@@ -760,6 +1050,18 @@ function Sidebar({
           </div>
         </button>
       </div>
+
+      {confirmDeleteId ? (
+        <div className="sidebar-confirm-overlay" onClick={() => setConfirmDeleteId(null)}>
+          <div className="sidebar-confirm-box" onClick={(e) => e.stopPropagation()}>
+            <div className="text-sm mb-3">确定要删除这个对话吗？</div>
+            <div className="flex gap-2 justify-end">
+              <button className="small-button" onClick={() => setConfirmDeleteId(null)}>取消</button>
+              <button className="small-button-primary" onClick={confirmDelete}>删除</button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </aside>
   );
 }
@@ -772,7 +1074,8 @@ function ConversationView({
   question,
   timeline,
   finalBody,
-  onOpenThinking,
+  messagePairs,
+  onToggleThinking,
 }: {
   conversation: ConversationResponse | null;
   loading: boolean;
@@ -781,52 +1084,101 @@ function ConversationView({
   question: string | null;
   timeline: TimelineItem[];
   finalBody: string;
-  onOpenThinking: () => void;
+  messagePairs: MessagePair[];
+  onToggleThinking: () => void;
 }) {
+  function renderTurn(pair: MessagePair) {
+    const cleanBody = markdownBody(pair.finalBody) || pair.finalBody;
+    return (
+      <div key={pair.question} className="conversation-stack">
+        <div className="user-message">{pair.question}</div>
+        <div className="assistant-row">
+          <div className="assistant-avatar">K</div>
+          <div className="assistant-content">
+            <span className="thinking-title text-muted text-xs">已完成思考</span>
+            {cleanBody ? (
+              <div className="answer-body markdown-body mt-2">
+                <Markdown content={cleanBody} />
+              </div>
+            ) : null}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   const latest = [...timeline].reverse().find(
     (item) => item.status === "streaming" || item.status === "complete"
   );
   const statusItem = timeline.find(
     (item) => item.status === "active" || item.status === "talking" || item.status === "done"
   );
+  const lastCompleteTitle = [...timeline].reverse().find(
+    (item) => item.status === "complete"
+  )?.title;
+  const hasActiveTimelineItems = timeline.some((item) => item.status !== "complete");
+  const isHistoryView = Boolean(conversation && !loading && !hasActiveTimelineItems);
+  const isDone = thinkingComplete || statusItem?.status === "done";
+  const showPreview = !isDone && latest && latest.body.trim();
+  const showCurrentTurn = question || timeline.length > 0 || finalBody;
+  const previewTitle = lastCompleteTitle ?? statusItem?.title ?? latest?.title ?? "Thinking";
+  const previewBody = latest ? markdownBody(latest.body) : "";
 
   return (
-    <div className="conversation-stack">
-      {question ? <div className="user-message">{question}</div> : null}
+    <div>
+      {messagePairs.map((pair) => renderTurn(pair))}
 
-      <div className="assistant-row">
-        <div className="assistant-avatar">K</div>
-        <div className="assistant-content">
-          <button className="thinking-block" onClick={onOpenThinking}>
-            <span className={cn("thinking-title", (loading || conversation) && "thinking-title-active")}>
-              {statusItem?.title ?? latest?.title ?? "Thinking"}
-            </span>
-          </button>
+      {showCurrentTurn ? (
+        <div className="conversation-stack">
+          {question ? <div className="user-message">{question}</div> : null}
 
-          {latest ? (
-            <div className="thinking-preview markdown-body">
-              <Markdown content={truncateWords(latest.body, 20)} />
+          {isHistoryView ? (
+            <div className="assistant-row">
+              <div className="assistant-avatar">K</div>
+              <div className="assistant-content">
+                {finalBody ? (
+                  <div className="answer-body markdown-body">
+                    <Markdown content={finalBody} />
+                    <div className="mt-5 text-xs text-muted">
+                      Confidence {Math.round(conversation!.final_answer.confidence * 100)}%
+                    </div>
+                  </div>
+                ) : null}
+              </div>
             </div>
-          ) : null}
+          ) : (
+            <div className="assistant-row">
+              <div className="assistant-avatar">K</div>
+              <div className="assistant-content">
+                <button className="thinking-block" onClick={onToggleThinking}>
+                  <span className={cn("thinking-title", !isDone && "thinking-title-active", isDone && !!lastCompleteTitle && "thinking-title-active")}>
+                    {isDone
+                      ? `已完成思考（总用时：${formatDuration(elapsed)}）`
+                      : previewTitle}
+                  </span>
+                </button>
 
-          {thinkingComplete && !finalBody ? (
-            <div className="thinking-complete-banner">
-              已完成思考<span className="thinking-duration-muted">（总用时：{formatDuration(elapsed)}）</span>
-            </div>
-          ) : null}
+                {showPreview && previewBody ? (
+                  <div className="thinking-preview markdown-body">
+                    <Markdown content={truncateWords(previewBody, 20)} />
+                  </div>
+                ) : null}
 
-          {finalBody ? (
-            <div className="answer-body markdown-body">
-              <Markdown content={finalBody} />
-              {conversation ? (
-                <div className="mt-5 text-xs text-muted">
-                  Confidence {Math.round(conversation.final_answer.confidence * 100)}%
-                </div>
-              ) : null}
+                {finalBody ? (
+                  <div className="answer-body markdown-body">
+                    <Markdown content={finalBody} />
+                    {conversation ? (
+                      <div className="mt-5 text-xs text-muted">
+                        Confidence {Math.round(conversation.final_answer.confidence * 100)}%
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
+              </div>
             </div>
-          ) : null}
+          )}
         </div>
-      </div>
+      ) : null}
     </div>
   );
 }
@@ -842,23 +1194,33 @@ function Markdown({ content }: { content: string }) {
 function Composer({
   input,
   loading,
+  discussionLevel,
   setInput,
+  setDiscussionLevel,
   onSubmit,
+  onPause,
   openSettings,
 }: {
   input: string;
   loading: boolean;
+  discussionLevel: DiscussionLevel;
   setInput: Dispatch<SetStateAction<string>>;
+  setDiscussionLevel: Dispatch<SetStateAction<DiscussionLevel>>;
   onSubmit: () => void;
+  onPause: () => void;
   openSettings: () => void;
 }) {
+  const [dropdownOpen, setDropdownOpen] = useState(false);
+  const active = DISCUSSION_LEVELS.find((d) => d.id === discussionLevel) ?? DISCUSSION_LEVELS[0];
+  const isActive = discussionLevel !== "off";
+
   return (
     <div className="composer-shell">
       <textarea
         value={input}
         onChange={(event) => setInput(event.target.value)}
         onKeyDown={(event) => {
-          if (event.key === "Enter" && !event.shiftKey) {
+          if (event.key === "Enter" && !event.shiftKey && !loading) {
             event.preventDefault();
             onSubmit();
           }
@@ -869,12 +1231,72 @@ function Composer({
       />
       <div className="flex items-center justify-between gap-3">
         <div className="flex items-center gap-2">
-          <button className="icon-soft" title="深度思考" type="button">深</button>
-          <button className="icon-soft" title="专家小组配置" type="button" onClick={openSettings}>设</button>
+          <div className="relative">
+            <button
+              className={cn("discussion-level-trigger", isActive && "discussion-level-trigger-active")}
+              onClick={() => setDropdownOpen((prev) => !prev)}
+              type="button"
+            >
+              {active.tag}
+            </button>
+            {dropdownOpen ? (
+              <div className="discussion-level-dropdown">
+                {DISCUSSION_LEVELS.map((level) => (
+                  <button
+                    key={level.id}
+                    className="discussion-level-option"
+                    onClick={() => {
+                      setDiscussionLevel(level.id);
+                      setDropdownOpen(false);
+                    }}
+                  >
+                    <span>{level.label}</span>
+                    <span className="discussion-level-tag">{level.id !== "off" ? level.tag : ""}</span>
+                    {discussionLevel === level.id ? (
+                      <span className="discussion-level-check">✓</span>
+                    ) : null}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </div>
+          <button className="icon-soft" title="设置" type="button" onClick={openSettings}>设</button>
         </div>
-        <button className="send-button" disabled={loading || !input.trim()} onClick={onSubmit} type="button">
-          {loading ? "..." : "发送"}
-        </button>
+        <div className="flex items-center gap-2">
+          {loading ? (
+            <button className="send-button-pause" title="暂停" type="button" onClick={onPause}>
+              <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor">
+                <rect x="2" y="1" width="3" height="10" rx="1" />
+                <rect x="7" y="1" width="3" height="10" rx="1" />
+              </svg>
+            </button>
+          ) : null}
+          <button
+            className="send-button"
+            disabled={loading || !input.trim()}
+            onClick={onSubmit}
+            type="button"
+          >
+            {loading ? (
+              <svg
+                className="send-button-spinner"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+              >
+                <circle cx="12" cy="12" r="10" strokeOpacity="0.25" />
+                <path d="M12 2a10 10 0 0 1 10 10" strokeOpacity="1" />
+              </svg>
+            ) : (
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M22 2L11 13" />
+                <path d="M22 2L15 22L11 13L2 9L22 2Z" />
+              </svg>
+            )}
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -1076,12 +1498,18 @@ function SettingsOverlay({
             <div className="grid gap-4 md:grid-cols-2">
               {agents.map((agent) => (
                 <section key={agent.name} className="settings-card">
-                  <div className="font-medium">{agent.nickname}</div>
+                  <div className="flex items-center gap-2">
+                    <div className="font-medium">{agent.nickname}</div>
+                    {(agent.role === "summarizer" || agent.role === "synthesizer") ? (
+                      <span className="rounded border border-line bg-gray-50 px-1.5 py-0.5 text-[11px] text-muted">系统</span>
+                    ) : null}
+                  </div>
                   <div className="mt-1 text-xs text-muted">{agent.name}</div>
                   <div className="mt-4 grid gap-2 text-sm text-muted">
                     <div>角色: {agent.role}</div>
                     <div>模型: {agent.model}</div>
                     <div>Provider: {agent.provider_profile}</div>
+                    <div>优先级: {agent.priority}</div>
                     <div>Skills: {agent.allowed_global_skills.join(", ") || "未配置"}</div>
                     <div>禁用: {agent.disabled_global_skills.join(", ") || "无"}</div>
                     <div>私有 Skills: {agent.private_skill_count}</div>

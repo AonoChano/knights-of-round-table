@@ -84,6 +84,7 @@ class AgentDefinition(BaseModel):
     system_prompt: str
     allowed_global_skills: list[str] = Field(default_factory=list)
     disabled_global_skills: list[str] = Field(default_factory=list)
+    priority: int = Field(default=0, ge=0, le=100)
 
 
 class AgentView(BaseModel):
@@ -95,6 +96,7 @@ class AgentView(BaseModel):
     allowed_global_skills: list[str]
     disabled_global_skills: list[str]
     private_skill_count: int
+    priority: int = 0
 
 
 class ThinkingTreeNode(BaseModel):
@@ -122,6 +124,11 @@ class FinalAnswer(BaseModel):
 
 class ConversationRequest(BaseModel):
     question: str = Field(min_length=1, max_length=4000)
+    level: str = Field(default="auto", pattern=r"^(off|auto|low|medium|high)$")
+
+
+class ConversationRenameRequest(BaseModel):
+    question: str = Field(min_length=1, max_length=200)
 
 
 class ConversationResponse(BaseModel):
