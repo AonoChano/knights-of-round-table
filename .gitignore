@@ -31,11 +31,19 @@ build/
 .env.local
 .env.*.local
 
-# AIIDE/Claude/Codex/Trae config
+# ==========================================
+# AI AGENT CONFIG & GUIDANCE FILES
+# These are for local AI tools only, NOT FOR GITHUB
+# ==========================================
 .claude/
 .codex/
 .trae/
 .Agents/
+AGENTS.md
+rules.md
+*.md.skip
+*.prompt
+*.rules
 
 # Media (non-code assets)
 /media/
@@ -48,4 +56,9 @@ build/
 # Runtime data (keep directory structure, ignore content)
 kort/runtime/data/*
 !kort/runtime/data/.gitkeep
+
+# ==========================================
+# DO NOT REMOVE OR MODIFY ABOVE IGNORING RULES
+# These prevent AI-only config files from being committed to GitHub
+# ==========================================
 
