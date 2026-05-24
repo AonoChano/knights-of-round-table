@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import shutil
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from .schemas import AgentCreateRequest, AgentDefinition, AgentUpdateRequest, Ag
 logger = logging.getLogger(__name__)
 
 SYSTEM_AGENTS: set[str] = {"summarizer-main", "synthesizer-main"}
+AGENT_NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
 
 
 class AgentLoader:
@@ -142,6 +144,8 @@ class AgentLoader:
         return self._build_agent_view(definition, agent_dir)
 
     def update_agent(self, name: str, data: AgentUpdateRequest) -> tuple[AgentView | None, str]:
+        if not AGENT_NAME_RE.fullmatch(name):
+            return None, "not_found"
         if name in SYSTEM_AGENTS:
             return None, "system_protected"
 
@@ -159,6 +163,8 @@ class AgentLoader:
         return self._build_agent_view(merged, agent_dir), ""
 
     def delete_agent(self, name: str) -> tuple[bool, str]:
+        if not AGENT_NAME_RE.fullmatch(name):
+            return False, "not_found"
         if name in SYSTEM_AGENTS:
             return False, "system_protected"
 

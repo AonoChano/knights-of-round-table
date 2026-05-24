@@ -1,6 +1,9 @@
+from pathlib import Path
+
 from fastapi.testclient import TestClient
 
 from kort_api.app import app
+from kort_api.config import settings
 
 
 client = TestClient(app)
@@ -48,6 +51,18 @@ def _delete(name: str) -> None:
     client.delete(f"/api/agents/{name}")
 
 
+def _clear_test_secret(provider_id: str) -> None:
+    path = Path(settings.secrets_file)
+    if not path.exists():
+        return
+    import json
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(data, dict) and provider_id in data:
+        data.pop(provider_id)
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 # ---------------------------------------------------------------------------
 # existing tests
 # ---------------------------------------------------------------------------
@@ -60,14 +75,12 @@ def test_health() -> None:
 
 
 def test_visible_conversation_payload_hides_internal_discussion() -> None:
-    response = client.post("/api/conversations", json={"question": "How should I structure the MVP?"})
-    payload = response.json()
+    response = client.post("/api/conversations/stream", json={"question": "How should I structure the MVP?", "level": "off"})
 
     assert response.status_code == 200
-    assert payload["status"] == "completed"
-    assert payload["stage_summaries"]
-    assert "final_answer" in payload
-    assert "raw_discussion" not in payload
+    assert "raw_discussion" not in response.text
+    assert "discussion_transcript" not in response.text
+    assert "event: conversation_complete" in response.text
 
 
 def test_provider_connectivity_does_not_echo_api_key() -> None:
@@ -81,7 +94,9 @@ def test_provider_connectivity_does_not_echo_api_key() -> None:
     assert "secret-test-key" not in response.text
 
 
-def test_provider_connectivity_requires_key_for_remote_provider() -> None:
+def test_provider_connectivity_requires_key_for_remote_provider(monkeypatch) -> None:
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    _clear_test_secret("deepseek")
     response = client.post("/api/providers/deepseek/test", json={})
     payload = response.json()
 

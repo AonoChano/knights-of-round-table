@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
-from collections.abc import Iterator
+import time
+from collections.abc import AsyncIterator, Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Annotated, TypedDict
+from uuid import uuid4
 
 from langgraph.graph import END, StateGraph
 
@@ -215,12 +218,15 @@ def _pick_summarizer(
 def _build_summarizer_prompt(question: str, transcript: str) -> str:
     return (
         "Below is a transcript of expert discussions for the question. "
+        "Transform it into a safe user-visible thinking projection. "
+        "Do not quote, preserve, or expose the transcript. "
         "Write a concise first-person stage summary in the format:\n\n"
         "### Short Descriptive Title\n\n"
         "First-person summary paragraph.\n\n"
         "Rules:\n"
         "- Write ENTIRELY in first person (\"I\").\n"
         "- NEVER mention multiple models, experts, AI agents, or the discussion process.\n"
+        "- NEVER reveal hidden chain-of-thought, raw transcript lines, speaker names, or internal messages.\n"
         "- Sound like a single person thinking through the problem.\n"
         "- Capture intellectual progression: what was considered, challenged, refined.\n"
         "- Keep to 2-4 sentences.\n\n"
@@ -511,10 +517,14 @@ def run_discussion(
         "secrets": secrets,
     }
 
+    final_text = ""
     for event in compiled.stream(initial_state, stream_mode="updates"):
         for _node_name, node_output in event.items():
             if not isinstance(node_output, dict):
                 continue
+
+            if isinstance(node_output.get("final_answer_text"), str):
+                final_text = node_output["final_answer_text"]
 
             summaries = node_output.get("stage_summaries")
             if summaries:
@@ -530,9 +540,6 @@ def run_discussion(
             transcript = node_output.get("discussion_transcript")
             if transcript:
                 pass
-
-    final_state = compiled.invoke(initial_state)
-    final_text = final_state.get("final_answer_text", "")
 
     yield {
         "type": "final",
@@ -648,3 +655,273 @@ def run_discussion_stream(
 
     for chunk in _stream_final_answer(state):
         yield _sse("final_delta", {"delta": chunk})
+
+
+# ---------------------------------------------------------------------------
+# Solo deep-think streaming (async)
+# ---------------------------------------------------------------------------
+
+
+class TimerContext:
+    """Monotonic clock for measuring elapsed wall time."""
+
+    __slots__ = ("_start",)
+
+    def __init__(self) -> None:
+        self._start = time.monotonic()
+
+    @property
+    def elapsed(self) -> float:
+        return time.monotonic() - self._start
+
+    @property
+    def elapsed_ms(self) -> int:
+        return int((time.monotonic() - self._start) * 1000)
+
+
+def _make_sse(event: str, payload: dict) -> str:
+    """Format a single SSE event string (no trailing newline needed at call-site)."""
+    return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+THINK_CHUNK_SIZE = 1500
+THINK_MIN_CHARS = 500
+
+
+async def _run_summarizer_task(
+    summarizer_agent: dict,
+    provider_dict: dict,
+    secrets: dict[str, str],
+    think_text: str,
+    stage_index: int,
+    output_queue: asyncio.Queue[str],
+) -> None:
+    """Run a sync summarizer stream in a thread executor and push SSE events
+    into *output_queue*.  The task is designed to be cancellable."""
+    loop = asyncio.get_running_loop()
+    summary_id = str(uuid4())
+
+    prompt = (
+        "Rewrite the following internal reasoning signal into a safe user-visible "
+        "thinking projection. Do not quote or expose the source text. Use a ### "
+        "heading and a brief first-person body. Never mention hidden reasoning, "
+        "chain-of-thought, models, experts, agents, or internal messages.\n\n"
+        f"{think_text}"
+    )
+
+    def _sync_summarize() -> list[str]:
+        profile = ProviderProfile.model_validate(provider_dict)
+        sclient = OpenAICompatibleClient(secrets)
+        events: list[str] = []
+        streamed = ""
+
+        try:
+            for chunk in sclient.stream_chat(
+                provider=profile,
+                prompt=prompt,
+                system_prompt=summarizer_agent.get("system_prompt", ""),
+                disable_thinking=True,
+            ):
+                streamed += chunk
+                events.append(
+                    _make_sse(
+                        "summary_delta",
+                        {"id": summary_id, "delta": chunk, "stage_index": stage_index},
+                    )
+                )
+        except ModelCallError:
+            streamed = f"### 思考阶段 {stage_index + 1}\n\n思考过程摘要生成失败。"
+            events.append(
+                _make_sse(
+                    "summary_delta",
+                    {"id": summary_id, "delta": streamed, "stage_index": stage_index},
+                )
+            )
+
+        title_match = SUMMARY_TITLE_RE.search(streamed)
+        title = title_match.group(1).strip() if title_match else f"思考阶段 {stage_index + 1}"
+        body = SUMMARY_BODY_RE.sub("", streamed).strip() or streamed
+
+        events.append(
+            _make_sse(
+                "summary_complete",
+                {
+                    "id": summary_id,
+                    "stage": "summary",
+                    "title": title,
+                    "snippet": body[:120],
+                    "details": f"### {title}\n\n{body}",
+                    "confidence": 0.78,
+                    "stage_index": stage_index,
+                    "tree_nodes": [
+                        {"id": f"{summary_id}-node", "title": title, "summary": body},
+                    ],
+                },
+            )
+        )
+        # Signal the next thinking phase
+        events.append(_make_sse("thinking_active", {}))
+        return events
+
+    try:
+        events = await loop.run_in_executor(None, _sync_summarize)
+    except asyncio.CancelledError:
+        return
+    for evt in events:
+        await output_queue.put(evt)
+
+
+async def run_solo_thinking_stream(
+    question: str,
+    agents: list[AgentDefinition],
+    providers: list[ProviderProfile],
+    secrets: dict[str, str],
+) -> AsyncIterator[str]:
+    """Async generator that streams a single model through visible summaries.
+
+    Provider reasoning tokens never go to the frontend directly. They are only
+    used as an internal signal for a summarizer to produce a safe projection.
+    When the model starts producing answer tokens all in-flight summarizer tasks
+    are cancelled and the answer is streamed to the frontend.
+    """
+    agents_dicts = [a.model_dump(mode="json") for a in agents]
+    providers_dicts = [p.model_dump(mode="json") for p in providers]
+
+    # -- resolve models ------------------------------------------------------
+    candidate = _find_enabled_candidate(agents_dicts, providers_dicts, secrets)
+    if not candidate:
+        yield _make_sse("thinking_complete", {"elapsed_ms": 0})
+        yield _make_sse("final_delta", {"delta": "No enabled provider available. Add a provider key in Settings."})
+        return
+
+    agent, provider = candidate
+    summarizer_agent, summarizer_provider_dict = _pick_summarizer(
+        agents_dicts, providers_dicts, secrets
+    )
+
+    profile = ProviderProfile.model_validate(provider)
+    client = OpenAICompatibleClient(secrets)
+
+    # -- shared state --------------------------------------------------------
+    timer = TimerContext()
+    output_queue: asyncio.Queue[str] = asyncio.Queue()
+    summarizer_tasks: set[asyncio.Task[None]] = set()
+
+    think_buffer = ""
+    char_offset = 0
+    stage_index = 0
+
+    await output_queue.put(_make_sse("thinking_active", {}))
+
+    # -- main model worker ---------------------------------------------------
+    async def _main_worker() -> None:
+        nonlocal think_buffer, char_offset, stage_index
+        answer_started = False
+
+        try:
+            async for chunk in client.stream_model_with_thinking(
+                provider=profile,
+                prompt=question,
+                system_prompt=agent.get("system_prompt", ""),
+                disable_thinking=False,
+            ):
+                if chunk["type"] == "think":
+                    think_buffer += chunk["text"]
+
+                    if (
+                        not answer_started
+                        and len(think_buffer) - char_offset >= THINK_CHUNK_SIZE
+                        and summarizer_agent
+                        and summarizer_provider_dict
+                    ):
+                        chunk_text = think_buffer[char_offset:]
+                        current_stage = stage_index
+                        char_offset = len(think_buffer)
+                        stage_index += 1
+
+                        task = asyncio.create_task(
+                            _run_summarizer_task(
+                                summarizer_agent,
+                                summarizer_provider_dict,
+                                secrets,
+                                chunk_text,
+                                current_stage,
+                                output_queue,
+                            )
+                        )
+                        summarizer_tasks.add(task)
+
+                elif chunk["type"] == "answer":
+                    if not answer_started:
+                        answer_started = True
+
+                        # Cancel every in-flight summarizer
+                        for t in list(summarizer_tasks):
+                            t.cancel()
+                        summarizer_tasks.clear()
+
+                        # If the thinking was too short, skip summaries
+                        if len(think_buffer) >= THINK_MIN_CHARS:
+                            # Drain any already-completed summary events
+                            # before signalling completion
+                            pass  # summaries already pushed to queue
+                        # else: no summaries were generated, just complete
+
+                        await output_queue.put(
+                            _make_sse("thinking_complete", {"elapsed_ms": timer.elapsed_ms})
+                        )
+
+                    await output_queue.put(
+                        _make_sse("final_delta", {"delta": chunk["text"]})
+                    )
+
+        except asyncio.CancelledError:
+            raise
+        except ModelCallError as exc:
+            await output_queue.put(
+                _make_sse("thinking_complete", {"elapsed_ms": timer.elapsed_ms})
+            )
+            await output_queue.put(
+                _make_sse("final_delta", {"delta": f"Model error: {exc}"})
+            )
+        except Exception:
+            await output_queue.put(
+                _make_sse("thinking_complete", {"elapsed_ms": timer.elapsed_ms})
+            )
+            await output_queue.put(
+                _make_sse(
+                    "final_delta",
+                    {"delta": "An unexpected error occurred during model streaming."},
+                )
+            )
+        finally:
+            if not answer_started:
+                await output_queue.put(
+                    _make_sse("thinking_complete", {"elapsed_ms": timer.elapsed_ms})
+                )
+            for t in list(summarizer_tasks):
+                t.cancel()
+            summarizer_tasks.clear()
+            await output_queue.put(None)
+
+    worker_task = asyncio.create_task(_main_worker())
+
+    try:
+        while True:
+            item = await output_queue.get()
+            if item is None:
+                break
+            yield item
+    except GeneratorExit:
+        # Client disconnected – cancel everything
+        worker_task.cancel()
+        for t in list(summarizer_tasks):
+            t.cancel()
+        summarizer_tasks.clear()
+        raise
+    finally:
+        if not worker_task.done():
+            worker_task.cancel()
+        for t in list(summarizer_tasks):
+            t.cancel()
+        summarizer_tasks.clear()

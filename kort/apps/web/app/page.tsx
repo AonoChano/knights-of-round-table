@@ -2,12 +2,17 @@
 
 import "katex/dist/katex.min.css";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import ReactMarkdown from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
+import { loadLocale, saveLocale, localeStatusText, t, nextThinkingLabel, initialThinkingLabel, BRAILLE_SPINNER } from "./locale";
+import type { Locale } from "./locale";
+
+type TimerHandle = ReturnType<typeof setTimeout>;
 
 type ThinkingTreeNode = {
   id: string;
@@ -136,6 +141,40 @@ type StreamEvent = {
   data: Record<string, unknown>;
 };
 
+type StreamSlot = {
+  abortController: AbortController | null;
+  loading: boolean;
+  elapsed: number;
+  thinkingComplete: boolean;
+  finalBody: string;
+  timeline: TimelineItem[];
+  talkingActive: boolean;
+  discussionLevel: DiscussionLevel;
+  submittedQuestion: string | null;
+  plannedConversationId: string | null;
+  deepThink: boolean;
+  paused: boolean;
+  conversation: ConversationResponse | null;
+};
+
+function createEmptySlot(): StreamSlot {
+  return {
+    abortController: null,
+    loading: false,
+    elapsed: 0,
+    thinkingComplete: false,
+    finalBody: "",
+    timeline: [],
+    talkingActive: false,
+    discussionLevel: "auto",
+    submittedQuestion: null,
+    plannedConversationId: null,
+    deepThink: false,
+    paused: false,
+    conversation: null,
+  };
+}
+
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 
 const SENTENCE_BOUNDARY_RE = /[。！？…；\n]+/g;
@@ -154,28 +193,18 @@ const fallbackProviders: ProviderProfile[] = [
   },
 ];
 
-const settingsTabs: Array<{ id: SettingsTab; label: string }> = [
-  { id: "general", label: "通用" },
-  { id: "providers", label: "模型提供商" },
-  { id: "experts", label: "专家小组" },
-  { id: "skills", label: "Skills" },
-  { id: "data", label: "数据与日志" },
-];
+function settingsTabs(locale: Locale): Array<{ id: SettingsTab; label: string }> {
+  return [
+    { id: "general", label: t(locale).ui.general },
+    { id: "providers", label: t(locale).ui.providers },
+    { id: "experts", label: t(locale).ui.experts },
+    { id: "skills", label: t(locale).ui.skills },
+    { id: "data", label: t(locale).ui.data },
+  ];
+}
 
 function cn(...values: Array<string | false | null | undefined>) {
   return values.filter(Boolean).join(" ");
-}
-
-function statusText(message: string) {
-  return message
-    .replace("Provider profile was not found.", "未找到模型提供商配置。")
-    .replace("Provider profile is disabled.", "该模型提供商已禁用。")
-    .replace("Provider base_url must be an absolute http(s) URL.", "Base URL 必须是完整的 http(s) 地址。")
-    .replace("No API key was supplied", "未提供 API Key")
-    .replace("Profile is ready", "配置已就绪")
-    .replace("using temporary input", "使用当前输入框中的临时密钥")
-    .replace("using saved local key", "使用已保存的本地密钥")
-    .replace("using environment variable", "使用环境变量");
 }
 
 function markdownTitle(markdown: string, fallback: string) {
@@ -184,10 +213,15 @@ function markdownTitle(markdown: string, fallback: string) {
 }
 
 function markdownBody(markdown: string) {
-  return markdown.replace(/^###\s+.+\n+/, "").trim();
+  return markdown.replace(/^###[^\n]*\n*/m, "").trim();
 }
 
 function truncateWords(text: string, maxWords: number) {
+  const cjk = /[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff]/;
+  if (cjk.test(text)) {
+    if (text.length <= maxWords * 3) return text;
+    return text.slice(0, maxWords * 3) + "…";
+  }
   const words = text.split(/\s+/);
   if (words.length <= maxWords) return text;
   return words.slice(0, maxWords).join(" ") + "…";
@@ -249,6 +283,14 @@ function randomDelay() {
 }
 
 export default function HomePage() {
+  return (
+    <Suspense fallback={<main className="app-shell" />}>
+      <HomeExperience />
+    </Suspense>
+  );
+}
+
+function HomeExperience() {
   const [input, setInput] = useState("");
   const [submittedQuestion, setSubmittedQuestion] = useState<string | null>(null);
   const [conversation, setConversation] = useState<ConversationResponse | null>(null);
@@ -259,6 +301,7 @@ export default function HomePage() {
   const [providerStatus, setProviderStatus] = useState<Record<string, string>>({});
   const [agents, setAgents] = useState<AgentView[]>([]);
   const [agentsError, setAgentsError] = useState<string | null>(null);
+  const [globalSkills, setGlobalSkills] = useState<string[]>([]);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("providers");
@@ -269,13 +312,27 @@ export default function HomePage() {
   const [timeline, setTimeline] = useState<TimelineItem[]>([]);
   const [talkingActive, setTalkingActive] = useState(false);
   const [discussionLevel, setDiscussionLevel] = useState<DiscussionLevel>("auto");
+  const [deepThink, setDeepThink] = useState(false);
   const [conversations, setConversations] = useState<ConversationListItem[]>([]);
   const [messagePairs, setMessagePairs] = useState<MessagePair[]>([]);
   const [currentConversationId, setCurrentConversationId] = useState<string | null>(null);
   const [pendingConvId, setPendingConvId] = useState<string | null>(null);
+  const [drawerTimeline, setDrawerTimeline] = useState<TimelineItem[] | null>(null);
   const [expertModalOpen, setExpertModalOpen] = useState(false);
   const [expertModalMode, setExpertModalMode] = useState<"create" | "edit">("create");
   const [editingAgent, setEditingAgent] = useState<AgentView | null>(null);
+  const [locale, setLocale] = useState<Locale>(loadLocale);
+  const [paused, setPaused] = useState(false);
+  const [pauseFlash, setPauseFlash] = useState(false);
+
+  const router = useRouter();
+  const searchParams = useSearchParams();
+
+  const thinkingLabelRef = useRef<TimerHandle | null>(null);
+  const lastThinkingLabelRef = useRef("");
+  const lastThinkingActiveTimeRef = useRef(0);
+  const brailleFrameRef = useRef(0);
+  const brailleTimerRef = useRef<TimerHandle | null>(null);
 
   const sentenceQueueRef = useRef<string[]>([]);
   const sentenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -286,11 +343,96 @@ export default function HomePage() {
   const finalBodyRef = useRef("");
   const submittedQuestionRef = useRef<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const slotMapRef = useRef<Map<string, StreamSlot>>(new Map());
+  const [activeSlotId, setActiveSlotId] = useState<string | null>(null);
+  const [slotVersion, setSlotVersion] = useState(0);
+  const activeSlotIdRef = useRef<string | null>(null);
+  const currentCidRef = useRef<string | null>(null);
+
+  function getActiveSlot(): StreamSlot | null {
+    if (!activeSlotId) return null;
+    return slotMapRef.current.get(activeSlotId) ?? null;
+  }
+
+  function syncSlotToState(slot: StreamSlot) {
+    setLoading(slot.loading);
+    setElapsed(slot.elapsed);
+    setThinkingComplete(slot.thinkingComplete);
+    setFinalBody(slot.finalBody);
+    setTimeline(slot.timeline);
+    setTalkingActive(slot.talkingActive);
+    setDiscussionLevel(slot.discussionLevel);
+    setDeepThink(slot.deepThink);
+    setSubmittedQuestion(slot.submittedQuestion);
+    setPendingConvId(slot.plannedConversationId);
+    setConversation(slot.conversation);
+    setPaused(slot.paused);
+  }
+
+  function flushStateToSlot(slot: StreamSlot) {
+    slot.loading = loading;
+    slot.elapsed = elapsed;
+    slot.thinkingComplete = thinkingComplete;
+    slot.finalBody = finalBody;
+    slot.timeline = timeline;
+    slot.talkingActive = talkingActive;
+    slot.discussionLevel = discussionLevel;
+    slot.deepThink = deepThink;
+    slot.paused = paused;
+    slot.submittedQuestion = submittedQuestion;
+    slot.plannedConversationId = pendingConvId;
+    slot.conversation = conversation;
+  }
+
+  function saveCurrentSlot() {
+    if (!activeSlotId) return;
+    const slot = slotMapRef.current.get(activeSlotId);
+    if (!slot) return;
+    flushStateToSlot(slot);
+  }
+
+  function activateSlot(slotId: string) {
+    // save current slot before switching
+    if (activeSlotId && activeSlotId !== slotId) {
+      const cur = slotMapRef.current.get(activeSlotId);
+      if (cur) flushStateToSlot(cur);
+    }
+    const target = slotMapRef.current.get(slotId) ?? createEmptySlot();
+    slotMapRef.current.set(slotId, target);
+    setActiveSlotId(slotId);
+    syncSlotToState(target);
+    setSlotVersion((v) => v + 1);
+  }
+
+  function ensureSlotForSend(slotId: string): StreamSlot {
+    // save current slot before switching
+    if (activeSlotId && activeSlotId !== slotId) {
+      const cur = slotMapRef.current.get(activeSlotId);
+      if (cur) flushStateToSlot(cur);
+    }
+    const slot = createEmptySlot();
+    const ac = new AbortController();
+    slot.abortController = ac;
+    slot.loading = true;
+    slotMapRef.current.set(slotId, slot);
+    setActiveSlotId(slotId);
+    syncSlotToState(slot);
+    setSlotVersion((v) => v + 1);
+    return slot;
+  }
 
   function clearSentenceState() {
     if (sentenceTimerRef.current) {
       clearTimeout(sentenceTimerRef.current);
       sentenceTimerRef.current = null;
+    }
+    if (thinkingLabelRef.current) {
+      clearTimeout(thinkingLabelRef.current);
+      thinkingLabelRef.current = null;
+    }
+    if (brailleTimerRef.current) {
+      clearInterval(brailleTimerRef.current);
+      brailleTimerRef.current = null;
     }
     sentenceQueueRef.current = [];
     activeSummaryRef.current = "";
@@ -345,6 +487,8 @@ export default function HomePage() {
   }
 
   function resetConversation() {
+    // save current slot state before resetting
+    saveCurrentSlot();
     clearSentenceState();
     setConversation(null);
     setTimeline([]);
@@ -353,26 +497,57 @@ export default function HomePage() {
     setElapsed(0);
     setDrawerOpen(false);
     setTalkingActive(false);
+    setLoading(false);
+    setSubmittedQuestion(null);
   }
 
   function fullReset() {
+    // save current slot before creating a new view
+    if (activeSlotId) {
+      const cur = slotMapRef.current.get(activeSlotId);
+      if (cur) {
+        flushStateToSlot(cur);
+        // if this slot was streaming, DON'T abort — let it run in background
+        cur.plannedConversationId = null;
+      }
+    }
+    slotMapRef.current.forEach((s, cid) => {
+      if (!s.loading) slotMapRef.current.delete(cid);
+    });
     resetConversation();
     setSubmittedQuestion(null);
     setMessagePairs([]);
+    setActiveSlotId(null);
     setCurrentConversationId(null);
     setConversation(null);
+    setDrawerTimeline(null);
+    setSlotVersion((v) => v + 1);
+    router.replace("/", { scroll: false });
   }
 
   useEffect(() => {
     void loadProviders();
     void loadProviderSecretStatuses();
     void loadAgents();
+    void loadSkills();
     void loadConversations();
+    const cid = searchParams.get("c");
+    if (cid) {
+      void loadConversation(cid);
+    }
   }, []);
 
   useEffect(() => {
     return () => clearSentenceState();
   }, []);
+
+  useEffect(() => {
+    activeSlotIdRef.current = activeSlotId;
+  }, [activeSlotId]);
+
+  useEffect(() => {
+    currentCidRef.current = currentConversationId;
+  }, [currentConversationId]);
 
   useEffect(() => {
     timelineRef.current = timeline;
@@ -429,7 +604,18 @@ export default function HomePage() {
     }
   }
 
-  async function createAgent(data: { name: string; nickname: string; role: string; provider_profile: string; model: string; system_prompt: string; priority: number }) {
+  async function loadSkills() {
+    try {
+      const response = await fetch(`${API_BASE}/api/skills`);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const payload = (await response.json()) as string[];
+      setGlobalSkills(payload);
+    } catch {
+      setGlobalSkills([]);
+    }
+  }
+
+  async function createAgent(data: { name: string; nickname: string; role: string; provider_profile: string; model: string; system_prompt: string; allowed_global_skills: string[]; disabled_global_skills: string[]; priority: number }) {
     try {
       const response = await fetch(`${API_BASE}/api/agents`, {
         method: "POST",
@@ -474,19 +660,45 @@ export default function HomePage() {
       const payload = (await response.json()) as ConversationListItem[];
       setConversations(payload);
     } catch {
-      setConversations([]);
+      // keep existing conversations on fetch failure
     }
   }
 
   async function loadConversation(conversationId: string) {
-    resetConversation();
+    saveCurrentSlot();
+    const existingSlot = slotMapRef.current.get(conversationId);
+    const hasActiveStream = existingSlot && existingSlot.loading;
+
+    if (hasActiveStream) {
+      activateSlot(conversationId);
+    } else {
+      resetConversation();
+      setActiveSlotId(conversationId);
+      setSlotVersion((v) => v + 1);
+    }
     setMessagePairs([]);
     setCurrentConversationId(conversationId);
+    router.replace(`/?c=${conversationId}`, { scroll: false });
     try {
       const response = await fetch(`${API_BASE}/api/conversations/${conversationId}`);
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      if (!response.ok) {
+        if (response.status === 404) {
+          router.replace("/", { scroll: false });
+          setCurrentConversationId(null);
+          return;
+        }
+        throw new Error(`HTTP ${response.status}`);
+      }
       const payload = (await response.json()) as ConversationResponse;
-      setConversation(payload);
+      if (!hasActiveStream) {
+        setConversation(payload);
+      } else {
+        const slot = slotMapRef.current.get(conversationId);
+        if (slot) {
+          slot.conversation = payload;
+          setConversation(payload);
+        }
+      }
       if (payload.rounds?.length) {
         const pairs: MessagePair[] = payload.rounds.map((round) => {
           const timelineItems: TimelineItem[] = (round.stage_summaries ?? []).map((s) => ({
@@ -541,9 +753,45 @@ export default function HomePage() {
   }
 
   function pauseConversation() {
-    abortControllerRef.current?.abort();
-    abortControllerRef.current = null;
+    const slot = getActiveSlot();
+    if (!slot) return;
+
+    slot.paused = true;
+    setPaused(true);
+
+    setPauseFlash(true);
+    window.setTimeout(() => setPauseFlash(false), 800);
+
+    if (slot.abortController && !slot.abortController.signal.aborted) {
+      try {
+        slot.abortController.abort("User paused");
+      } catch {
+        // abort may throw in rare edge cases — ignore
+      }
+    }
+    slot.abortController = null;
+
+    clearSentenceState();
+
+    setTimeline((current) =>
+      current.map((item) =>
+        item.id === "thinking-active"
+          ? { id: "thinking-done", title: t(locale).ui.cancelled, body: "", raw: "", status: "complete" as const }
+          : item
+      )
+    );
+
+    slot.loading = false;
     setLoading(false);
+
+    // revert send button to airplane after brief flash
+    window.setTimeout(() => {
+      setPaused(false);
+      slot.paused = false;
+    }, 800);
+
+    setSlotVersion((v) => v + 1);
+
     if (pendingConvId) {
       setConversations((prev) => prev.filter((c) => c.conversation_id !== pendingConvId));
       setPendingConvId(null);
@@ -555,26 +803,31 @@ export default function HomePage() {
     if (!question) return;
 
     const isNewConversation = !currentConversationId;
+    const convId = currentConversationId ?? "pending";
+    const streamSlotId = convId;
 
     if (isNewConversation) {
       fullReset();
+    } else {
+      // save current slot state, then reset view for this continuation
+      saveCurrentSlot();
+      resetConversation();
     }
 
     clearSentenceState();
-    setTimeline([]);
-    setFinalBody("");
-    setThinkingComplete(false);
-    setElapsed(0);
     setDrawerOpen(false);
-    setTalkingActive(false);
 
+    const slot = ensureSlotForSend(convId);
+    // preserve current conversation title in the view
+    if (!isNewConversation) {
+      setCurrentConversationId(currentConversationId);
+    }
     setSubmittedQuestion(question);
     submittedQuestionRef.current = question;
     setInput("");
     setLoading(true);
 
-    const controller = new AbortController();
-    abortControllerRef.current = controller;
+    const controller = slot.abortController!;
 
     if (isNewConversation) {
       const placeholderId = "pending";
@@ -589,10 +842,14 @@ export default function HomePage() {
         ...prev,
       ]);
       setPendingConvId(placeholderId);
+      slot.plannedConversationId = placeholderId;
     }
 
     try {
-      const body: Record<string, string> = { question, level: discussionLevel };
+      const body: Record<string, string | boolean> = { question, level: discussionLevel };
+      if (discussionLevel === "off") {
+        body.deep_think = deepThink;
+      }
       if (!isNewConversation && currentConversationId) {
         body.conversation_id = currentConversationId;
       }
@@ -606,47 +863,218 @@ export default function HomePage() {
 
       if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`);
 
+      if (controller.signal.aborted) return;
+
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
       let done = false;
 
+      function streamEventHandler(message: StreamEvent) {
+        if (activeSlotIdRef.current !== streamSlotId) {
+          const bgSlot = slotMapRef.current.get(streamSlotId);
+          if (bgSlot && bgSlot.loading) {
+            applyEventToSlot(bgSlot, message);
+            if (
+              message.event === "thinking_complete" ||
+              message.event === "conversation_complete" ||
+              message.event === "error"
+            ) {
+              setSlotVersion((v) => v + 1);
+            }
+          }
+          return;
+        }
+        handleStreamEvent(message);
+      }
+
       while (!done) {
-        const read = await reader.read();
-        done = read.done;
-        buffer += decoder.decode(read.value, { stream: !done });
-        const parsed = parseSseChunk(buffer);
-        buffer = parsed.rest;
-        for (const event of parsed.events) {
-          handleStreamEvent(event);
+        try {
+          const read = await reader.read();
+          done = read.done;
+          buffer += decoder.decode(read.value, { stream: !done });
+          const parsed = parseSseChunk(buffer);
+          buffer = parsed.rest;
+          for (const event of parsed.events) {
+            streamEventHandler(event);
+          }
+        } catch (readError: unknown) {
+          if (readError instanceof DOMException && readError.name === "AbortError") {
+            done = true;
+            break;
+          }
+          throw readError;
         }
       }
+    } catch (e: unknown) {
+      if (e instanceof DOMException && e.name === "AbortError") {
+        // stream aborted by user — pauseConversation handles UI feedback
+      } else {
+        throw e;
+      }
     } finally {
-      setLoading(false);
+      slot.loading = false;
+      if (activeSlotIdRef.current === streamSlotId) {
+        setLoading(false);
+      }
+      setSlotVersion((v) => v + 1);
       abortControllerRef.current = null;
+    }
+  }
+
+  function applyEventToSlot(slot: StreamSlot, message: StreamEvent) {
+    if (message.event === "talking_active") {
+      slot.talkingActive = true;
+      slot.timeline = slot.timeline.filter(
+        (item) => item.id !== "thinking-active" && item.id !== "thinking-done" && item.id !== "talking-active"
+      );
+      slot.timeline = [...slot.timeline, { id: "talking-active", title: t(locale).thinking.talking, body: "", raw: "", status: "talking" }];
+      return;
+    }
+    if (message.event === "thinking_active") {
+      slot.talkingActive = false;
+      const { label: initialLabel } = nextThinkingLabel(locale, "");
+      slot.timeline = slot.timeline.filter(
+        (item) => item.id !== "thinking-active" && item.id !== "thinking-done" && item.id !== "talking-active"
+      );
+      slot.timeline = [...slot.timeline, { id: "thinking-active", title: initialLabel, body: "", raw: "", status: "active" }];
+      return;
+    }
+    if (message.event === "summary_start") {
+      const id = String(message.data.id ?? crypto.randomUUID());
+      slot.timeline = [
+        ...slot.timeline.filter((item) => item.id !== "thinking-active" && item.id !== "thinking-done" && item.id !== "talking-active"),
+        { id, title: "Thinking", body: "", raw: "", status: "streaming" as const },
+      ];
+      return;
+    }
+    if (message.event === "summary_title") {
+      const id = String(message.data.id ?? "");
+      const title = String(message.data.title ?? "Thinking");
+      slot.timeline = slot.timeline.map((item) => (item.id === id ? { ...item, title, status: "streaming" as const } : item));
+      return;
+    }
+    if (message.event === "summary_delta") {
+      const id = String(message.data.id ?? "");
+      const delta = String(message.data.delta ?? "");
+      slot.timeline = slot.timeline.map((item) => {
+        if (item.id !== id) return item;
+        return { ...item, raw: item.raw + delta };
+      });
+      return;
+    }
+    if (message.event === "summary_complete") {
+      const id = String(message.data.id ?? "");
+      slot.timeline = slot.timeline.map((item) => {
+        if (item.id !== id) return item;
+        return { ...item, body: item.raw.trim(), status: "complete" as const };
+      });
+      return;
+    }
+    if (message.event === "thinking_complete") {
+      slot.thinkingComplete = true;
+      slot.loading = false;
+      return;
+    }
+    if (message.event === "final_delta") {
+      const delta = String(message.data.delta ?? "");
+      slot.finalBody = slot.finalBody + delta;
+      return;
+    }
+    if (message.event === "conversation_complete") {
+      slot.finalBody = String(message.data.final_body ?? slot.finalBody);
+      slot.loading = false;
+      slot.thinkingComplete = true;
+      return;
+    }
+    if (message.event === "conversation_title") {
+      const title = String(message.data.title ?? "");
+      if (slot.conversation) {
+        slot.conversation = { ...slot.conversation, title };
+      }
+      return;
+    }
+    if (message.event === "error") {
+      slot.loading = false;
+      return;
     }
   }
 
   function handleStreamEvent(message: StreamEvent) {
     if (message.event === "talking_active") {
       setTalkingActive(true);
+      if (thinkingLabelRef.current) {
+        clearTimeout(thinkingLabelRef.current);
+        thinkingLabelRef.current = null;
+      }
+      if (brailleTimerRef.current) {
+        clearInterval(brailleTimerRef.current);
+        brailleTimerRef.current = null;
+      }
       setTimeline((current) => {
         const filtered = current.filter(
           (item) => item.id !== "thinking-active" && item.id !== "thinking-done" && item.id !== "talking-active"
         );
-        return [...filtered, { id: "talking-active", title: "讨论中", body: "", raw: "", status: "talking" }];
+        return [...filtered, { id: "talking-active", title: t(locale).thinking.talking, body: "", raw: "", status: "talking" }];
       });
       return;
     }
 
     if (message.event === "thinking_active") {
       setTalkingActive(false);
+      const now = Date.now();
+      const STABLE_LABEL_WINDOW = 10000;
+      const reuseLabel = lastThinkingLabelRef.current && now - lastThinkingActiveTimeRef.current < STABLE_LABEL_WINDOW;
+      if (!reuseLabel) {
+        if (thinkingLabelRef.current) {
+          clearTimeout(thinkingLabelRef.current);
+        }
+        lastThinkingLabelRef.current = "";
+        const { label: initialLabel } = nextThinkingLabel(locale, lastThinkingLabelRef.current);
+        lastThinkingLabelRef.current = initialLabel;
+      }
+      lastThinkingActiveTimeRef.current = now;
+      const displayedLabel = lastThinkingLabelRef.current;
       setTimeline((current) => {
         const filtered = current.filter(
           (item) => item.id !== "thinking-active" && item.id !== "thinking-done" && item.id !== "talking-active"
         );
-        return [...filtered, { id: "thinking-active", title: "思考中", body: "", raw: "", status: "active" }];
+        return [...filtered, { id: "thinking-active", title: BRAILLE_SPINNER[0] + " " + displayedLabel, body: "", raw: "", status: "active" }];
       });
+      brailleFrameRef.current = 0;
+      if (brailleTimerRef.current) {
+        clearInterval(brailleTimerRef.current);
+      }
+      brailleTimerRef.current = setInterval(() => {
+        brailleFrameRef.current = (brailleFrameRef.current + 1) % BRAILLE_SPINNER.length;
+        setTimeline((current) =>
+          current.map((item) =>
+            item.id === "thinking-active" ? {
+              ...item,
+              title: BRAILLE_SPINNER[brailleFrameRef.current] + " " + item.title.replace(/^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]\s/, "")
+            } : item
+          )
+        );
+      }, 120);
+      if (!reuseLabel) {
+        const scheduleLabelSwitch = () => {
+          const delay = 10000 + Math.random() * 5000;
+          thinkingLabelRef.current = setTimeout(() => {
+            const { label: nextLabel } = nextThinkingLabel(locale, lastThinkingLabelRef.current);
+            lastThinkingLabelRef.current = nextLabel;
+            setTimeline((current) =>
+              current.map((item) =>
+                item.id === "thinking-active" ? {
+                  ...item,
+                  title: BRAILLE_SPINNER[brailleFrameRef.current] + " " + nextLabel
+                } : item
+              )
+            );
+            scheduleLabelSwitch();
+          }, delay);
+        };
+        scheduleLabelSwitch();
+      }
       return;
     }
 
@@ -683,22 +1111,19 @@ export default function HomePage() {
       const delta = String(message.data.delta ?? "");
 
       rawBodyBySummary.current[id] = (rawBodyBySummary.current[id] ?? "") + delta;
+      const raw = rawBodyBySummary.current[id];
+      const earlyTitle = raw.match(/^###\s+(.+)\n/m)?.[1]?.trim();
+
       setTimeline((current) =>
         current.map((item) => {
           if (item.id !== id) return item;
-          return { ...item, raw: item.raw + delta };
+          const next = { ...item, raw: item.raw + delta };
+          if (earlyTitle && next.title === "Thinking") {
+            next.title = earlyTitle;
+          }
+          return next;
         })
       );
-
-      const raw = rawBodyBySummary.current[id];
-      const earlyTitle = raw.match(/^###\s+(.+)\n/m)?.[1]?.trim();
-      if (earlyTitle) {
-        setTimeline((current) =>
-          current.map((item) =>
-            item.id === id && item.title === "Thinking" ? { ...item, title: earlyTitle } : item
-          )
-        );
-      }
 
       processSentenceBuffer(id);
       return;
@@ -737,9 +1162,18 @@ export default function HomePage() {
         clearTimeout(sentenceTimerRef.current);
         sentenceTimerRef.current = null;
       }
+      if (thinkingLabelRef.current) {
+        clearTimeout(thinkingLabelRef.current);
+        thinkingLabelRef.current = null;
+      }
+      if (brailleTimerRef.current) {
+        clearInterval(brailleTimerRef.current);
+        brailleTimerRef.current = null;
+      }
+      const doneLabel = t(locale).thinking.done;
       setTimeline((current) => [
         ...current.filter((item) => item.id !== "thinking-active" && item.id !== "thinking-done" && item.id !== "talking-active"),
-        { id: "thinking-done", title: "已完成思考", body: "", raw: "", status: "done" },
+        { id: "thinking-done", title: doneLabel, body: "", raw: "", status: "done" },
       ]);
       return;
     }
@@ -846,7 +1280,7 @@ export default function HomePage() {
     const payload = (await response.json()) as ProviderConnectivityResponse;
     setProviderStatus((current) => ({
       ...current,
-      [providerId]: response.ok ? statusText(payload.message) : "测试失败，请检查后端服务",
+      [providerId]: response.ok ? localeStatusText(locale, payload.message) : locale === "zh-CN" ? "测试失败，请检查后端服务" : "Test failed, check backend service",
     }));
   }
 
@@ -860,7 +1294,7 @@ export default function HomePage() {
   const statusItem = visibleTimeline.find(
     (item) => item.status === "active" || item.status === "talking" || item.status === "done"
   );
-  const activeTitle = statusItem?.title ?? currentReasoning?.title ?? (thinkingComplete ? "已完成思考" : "Thinking");
+  const activeTitle = statusItem?.title ?? currentReasoning?.title ?? (thinkingComplete ? t(locale).thinking.complete : t(locale).thinking.active);
   const hasRun = Boolean(submittedQuestion || conversation || loading || messagePairs.length > 0);
 
   return (
@@ -869,6 +1303,8 @@ export default function HomePage() {
         agents={agents}
         conversations={conversations}
         activeConversationId={conversation?.conversation_id ?? null}
+        slotMapRef={slotMapRef}
+        slotVersion={slotVersion}
         onNewConversation={fullReset}
         onSelectConversation={(id) => void loadConversation(id)}
         onRenameConversation={(id, name) => void renameConversation(id, name)}
@@ -902,10 +1338,15 @@ export default function HomePage() {
                 timeline={visibleTimeline}
                 finalBody={finalBody}
                 messagePairs={messagePairs}
+                locale={locale}
                 onToggleThinking={() => setDrawerOpen((prev) => !prev)}
+                onViewPairThinking={(pair) => {
+                  setDrawerTimeline(pair.timeline);
+                  setDrawerOpen(true);
+                }}
               />
             ) : (
-              <div className="new-chat-prompt">今天想解决什么？</div>
+              <div className="new-chat-prompt">{t(locale).ui.newChatPrompt}</div>
             )}
           </div>
         </div>
@@ -914,15 +1355,20 @@ export default function HomePage() {
           <Composer
             input={input}
             loading={loading}
+            paused={paused}
+            pauseFlash={pauseFlash}
             discussionLevel={discussionLevel}
+            deepThink={deepThink}
+            locale={locale}
             setInput={setInput}
             setDiscussionLevel={setDiscussionLevel}
+            setDeepThink={setDeepThink}
             onSubmit={() => void sendQuestion()}
             onPause={pauseConversation}
           />
         </div>
 
-        {(loading || conversation) && !drawerOpen ? (
+        {(loading || conversation || submittedQuestion) && !drawerOpen ? (
           <button className="thinking-trigger" onClick={() => setDrawerOpen((prev) => !prev)} aria-label="Toggle thinking timeline">
             <span className="breathing-dot h-1.5 w-1.5 rounded-full bg-ink/55" />
             <span>{activeTitle}</span>
@@ -935,8 +1381,12 @@ export default function HomePage() {
           loading={loading}
           elapsed={elapsed}
           thinkingComplete={thinkingComplete}
-          timeline={visibleTimeline}
-          onClose={() => setDrawerOpen(false)}
+          timeline={drawerTimeline ?? visibleTimeline}
+          locale={locale}
+          onClose={() => {
+            setDrawerOpen(false);
+            setDrawerTimeline(null);
+          }}
         />
       ) : null}
 
@@ -944,12 +1394,15 @@ export default function HomePage() {
         <SettingsOverlay
           agents={agents}
           agentsError={agentsError}
+          globalSkills={globalSkills}
           providers={providers}
           providerForms={providerForms}
           providerKeys={providerKeys}
           providerSecretStatus={providerSecretStatus}
           providerStatus={providerStatus}
           settingsTab={settingsTab}
+          locale={locale}
+          setLocale={setLocale}
           setProviderForms={setProviderForms}
           setProviderKeys={setProviderKeys}
           setSettingsOpen={setSettingsOpen}
@@ -976,6 +1429,7 @@ export default function HomePage() {
           mode={expertModalMode}
           agent={editingAgent}
           providers={providers}
+          globalSkills={globalSkills}
           onClose={() => setExpertModalOpen(false)}
           onSave={async (data) => {
             if (expertModalMode === "create") {
@@ -994,6 +1448,8 @@ function Sidebar({
   agents,
   conversations,
   activeConversationId,
+  slotMapRef,
+  slotVersion,
   onNewConversation,
   onSelectConversation,
   onRenameConversation,
@@ -1003,6 +1459,8 @@ function Sidebar({
   agents: AgentView[];
   conversations: ConversationListItem[];
   activeConversationId: string | null;
+  slotMapRef: React.MutableRefObject<Map<string, StreamSlot>>;
+  slotVersion: number;
   onNewConversation: () => void;
   onSelectConversation: (id: string) => void;
   onRenameConversation: (id: string, name: string) => void;
@@ -1050,6 +1508,15 @@ function Sidebar({
     return groups.filter((g) => g.items.length > 0);
   }, [conversations]);
 
+  const loadingConvIds = useMemo(() => {
+    const ids = new Set<string>();
+    slotMapRef.current.forEach((slot, cid) => {
+      if (slot.loading) ids.add(cid);
+    });
+    return ids;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [slotVersion]);
+
   function startRename(item: ConversationListItem, e: React.MouseEvent) {
     e.stopPropagation();
     setEditingId(item.conversation_id);
@@ -1091,6 +1558,7 @@ function Sidebar({
               <div className="px-2 py-1 text-xs text-muted">{group.label}</div>
               {group.items.map((item) => (
                 <div key={item.conversation_id} className="sidebar-link-row">
+                  {loadingConvIds.has(item.conversation_id) ? <span className="sidebar-spinner" /> : null}
                   {editingId === item.conversation_id ? (
                     <input
                       ref={editInputRef}
@@ -1187,7 +1655,9 @@ function ConversationView({
   timeline,
   finalBody,
   messagePairs,
+  locale,
   onToggleThinking,
+  onViewPairThinking,
 }: {
   conversation: ConversationResponse | null;
   loading: boolean;
@@ -1197,20 +1667,34 @@ function ConversationView({
   timeline: TimelineItem[];
   finalBody: string;
   messagePairs: MessagePair[];
+  locale: Locale;
   onToggleThinking: () => void;
+  onViewPairThinking: (pair: MessagePair) => void;
 }) {
-  function renderTurn(pair: MessagePair) {
+  const tr = t(locale);
+
+  function renderTurn(pair: MessagePair, idx: number) {
     const cleanBody = markdownBody(pair.finalBody) || pair.finalBody;
+    const hasTimeline = pair.timeline.length > 0;
+    const wasCancelled = hasTimeline && !cleanBody;
     return (
-      <div key={pair.question} className="conversation-stack">
+      <div key={`turn-${idx}`} className="conversation-stack">
         <div className="user-message">{pair.question}</div>
         <div className="assistant-row">
           <div className="assistant-content">
-            <span className="thinking-title text-muted text-xs">已完成思考</span>
+            {hasTimeline ? (
+              <button className="thinking-block" onClick={() => onViewPairThinking(pair)}>
+                <span className="thinking-title">
+                  {pair.timeline[pair.timeline.length - 1]?.title ?? tr.thinking.complete}
+                </span>
+              </button>
+            ) : null}
             {cleanBody ? (
               <div className="answer-body markdown-body mt-2">
                 <Markdown content={cleanBody} />
               </div>
+            ) : wasCancelled ? (
+              <div className="cancelled-badge mt-2 text-xs text-muted">{tr.ui.cancelled}</div>
             ) : null}
           </div>
         </div>
@@ -1230,14 +1714,14 @@ function ConversationView({
   const hasActiveTimelineItems = timeline.some((item) => item.status !== "complete");
   const isHistoryView = Boolean(conversation && !loading && !hasActiveTimelineItems);
   const isDone = thinkingComplete || statusItem?.status === "done";
-  const showPreview = !isDone && latest && latest.body.trim();
+  const showPreview = latest && latest.body.trim();
   const showCurrentTurn = !isHistoryView && (question || timeline.length > 0 || finalBody);
-  const previewTitle = lastCompleteTitle ?? statusItem?.title ?? latest?.title ?? "Thinking";
+  const previewTitle = lastCompleteTitle ?? statusItem?.title ?? latest?.title ?? tr.thinking.active;
   const previewBody = latest ? markdownBody(latest.body) : "";
 
   return (
     <div>
-      {messagePairs.map((pair) => renderTurn(pair))}
+      {messagePairs.map((pair, idx) => renderTurn(pair, idx))}
 
       {showCurrentTurn ? (
         <div className="conversation-stack">
@@ -1246,9 +1730,9 @@ function ConversationView({
           <div className="assistant-row">
             <div className="assistant-content">
               <button className="thinking-block" onClick={onToggleThinking}>
-                <span className={cn("thinking-title", !isDone && "thinking-title-active", isDone && !!lastCompleteTitle && "thinking-title-active")}>
+                <span className={cn("thinking-title", !isDone && "thinking-title-active")}>
                   {isDone
-                    ? `已完成思考（总用时：${formatDuration(elapsed)}）`
+                    ? `${tr.thinking.complete}（${locale === "zh-CN" ? "总用时：" : ""}${formatDuration(elapsed)}）`
                     : previewTitle}
                 </span>
               </button>
@@ -1283,17 +1767,27 @@ function Markdown({ content }: { content: string }) {
 function Composer({
   input,
   loading,
+  paused,
+  pauseFlash,
   discussionLevel,
+  deepThink,
+  locale,
   setInput,
   setDiscussionLevel,
+  setDeepThink,
   onSubmit,
   onPause,
 }: {
   input: string;
   loading: boolean;
+  paused: boolean;
+  pauseFlash: boolean;
   discussionLevel: DiscussionLevel;
+  deepThink: boolean;
+  locale: Locale;
   setInput: Dispatch<SetStateAction<string>>;
   setDiscussionLevel: Dispatch<SetStateAction<DiscussionLevel>>;
+  setDeepThink: Dispatch<SetStateAction<boolean>>;
   onSubmit: () => void;
   onPause: () => void;
 }) {
@@ -1314,7 +1808,7 @@ function Composer({
         }}
         rows={3}
         className="max-h-40 min-h-20 w-full resize-none border-0 bg-transparent text-[15px] leading-7 outline-none"
-        placeholder="向圆桌提出你的问题..."
+        placeholder={t(locale).ui.composerPlaceholder}
       />
       <div className="flex items-center justify-between gap-3">
         <div className="flex items-center gap-2">
@@ -1347,16 +1841,41 @@ function Composer({
               </div>
             ) : null}
           </div>
+          {discussionLevel === "off" ? (
+            <button
+              className={cn(
+                "discussion-level-trigger",
+                deepThink && "discussion-level-trigger-active"
+              )}
+              onClick={() => setDeepThink((prev) => !prev)}
+              type="button"
+              title={t(locale).ui.deepThink}
+            >
+              {t(locale).ui.deepThink}
+              {deepThink ? (
+                <span className="discussion-level-check" style={{ marginLeft: 4 }}>✓</span>
+              ) : null}
+            </button>
+          ) : null}
         </div>
         <div className="flex items-center gap-2">
           <button
-            className={cn("send-button", loading && "send-button-stop")}
-            onClick={loading ? onPause : onSubmit}
-            disabled={!loading && !input.trim()}
+            className={cn(
+              "send-button",
+              paused && pauseFlash && "send-button-pause-flash",
+              paused && !pauseFlash && "send-button-paused"
+            )}
+            onClick={
+              paused ? undefined : (loading ? onPause : onSubmit)
+            }
+            disabled={paused || (!loading && !input.trim())}
             type="button"
-            style={loading ? { border: "2px solid rgba(0,0,0,0.12)" } : undefined}
+            aria-label={loading ? (locale === "zh-CN" ? "停止生成" : "Stop") : (locale === "zh-CN" ? "发送" : "Send")}
+            title={loading ? (locale === "zh-CN" ? "停止生成" : "Stop") : (locale === "zh-CN" ? "发送" : "Send")}
           >
-            {loading ? (
+            {paused ? (
+              <span className="pause-status-text">{t(locale).ui.paused}</span>
+            ) : loading ? (
               <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor">
                 <rect x="1.5" y="1.5" width="9" height="9" rx="2" />
               </svg>
@@ -1379,26 +1898,31 @@ function ThinkingDrawer({
   elapsed,
   thinkingComplete,
   timeline,
+  locale,
   onClose,
 }: {
   loading: boolean;
   elapsed: number;
   thinkingComplete: boolean;
   timeline: TimelineItem[];
+  locale: Locale;
   onClose: () => void;
 }) {
+  const tr = t(locale);
   return (
     <aside className="thinking-drawer">
       <div className="mb-6 flex items-center justify-between">
         <div>
-          <div className="text-[15px] font-semibold">思考过程</div>
+          <div className="text-[15px] font-semibold">{tr.ui.thinkingProcess}</div>
           <div className="mt-1 text-xs text-muted">
             {thinkingComplete
-              ? `已完成思考（总用时：${formatDuration(elapsed)}）`
-              : `已进行 ${formatDuration(elapsed)}`}
+              ? `${tr.thinking.complete}（${locale === "zh-CN" ? "总用时：" : ""}${formatDuration(elapsed)}）`
+              : loading
+                ? `${locale === "zh-CN" ? "已进行 " : ""}${formatDuration(elapsed)}`
+                : null}
           </div>
         </div>
-        <button className="small-button" onClick={onClose}>收起</button>
+        <button className="small-button" onClick={onClose}>{tr.ui.collapse}</button>
       </div>
 
       <div className="reasoning-timeline">
@@ -1421,9 +1945,9 @@ function ThinkingDrawer({
                     "thinking-title-active"
                 )}
               >
-                {item.status === "active" ? `思考中（已进行 ${formatDuration(elapsed)}）` : null}
-                {item.status === "talking" ? `讨论中（已进行 ${formatDuration(elapsed)}）` : null}
-                {item.status === "done" ? `已完成思考（总用时：${formatDuration(elapsed)}）` : null}
+                {item.status === "active" ? item.title ? `${item.title}（${locale === "zh-CN" ? "已进行 " : ""}${formatDuration(elapsed)}）` : null : null}
+                {item.status === "talking" ? `${tr.thinking.talking}（${locale === "zh-CN" ? "已进行 " : ""}${formatDuration(elapsed)}）` : null}
+                {item.status === "done" ? `${tr.thinking.done}（${locale === "zh-CN" ? "总用时：" : ""}${formatDuration(elapsed)}）` : null}
                 {item.status !== "active" && item.status !== "done" && item.status !== "talking" ? item.title : null}
               </div>
               {item.status === "complete" || item.status === "streaming" ? (
@@ -1442,12 +1966,15 @@ function ThinkingDrawer({
 function SettingsOverlay({
   agents,
   agentsError,
+  globalSkills,
   providers,
   providerForms,
   providerKeys,
   providerSecretStatus,
   providerStatus,
   settingsTab,
+  locale,
+  setLocale,
   setProviderForms,
   setProviderKeys,
   setSettingsOpen,
@@ -1461,12 +1988,15 @@ function SettingsOverlay({
 }: {
   agents: AgentView[];
   agentsError: string | null;
+  globalSkills: string[];
   providers: ProviderProfile[];
   providerForms: Record<string, ProviderProfile>;
   providerKeys: Record<string, string>;
   providerSecretStatus: Record<string, boolean>;
   providerStatus: Record<string, string>;
   settingsTab: SettingsTab;
+  locale: Locale;
+  setLocale: Dispatch<SetStateAction<Locale>>;
   setProviderForms: Dispatch<SetStateAction<Record<string, ProviderProfile>>>;
   setProviderKeys: Dispatch<SetStateAction<Record<string, string>>>;
   setSettingsOpen: Dispatch<SetStateAction<boolean>>;
@@ -1479,11 +2009,12 @@ function SettingsOverlay({
   onDeleteExpert: (name: string) => void;
 }) {
   const [confirmDeleteName, setConfirmDeleteName] = useState<string | null>(null);
+  const skillCountLabel = locale === "zh-CN" ? `${globalSkills.length} 个全局 Skills` : `${globalSkills.length} global Skills`;
   return (
     <div className="settings-backdrop">
       <div className="hidden w-[260px] border-r border-line bg-white px-4 py-5 md:block">
-        <div className="mb-5 text-[15px] font-medium">设置</div>
-        {settingsTabs.map((tab) => (
+        <div className="mb-5 text-[15px] font-medium">{t(locale).ui.settings}</div>
+        {settingsTabs(locale).map((tab) => (
           <button
             key={tab.id}
             className={cn("settings-tab", settingsTab === tab.id && "settings-tab-active")}
@@ -1497,14 +2028,14 @@ function SettingsOverlay({
       <div className="flex-1 overflow-auto px-5 py-5 md:px-7">
         <div className="mb-5 flex items-start justify-between gap-4">
           <div>
-            <div className="text-xl font-medium">{settingsTitle(settingsTab)}</div>
-            <div className="mt-1 max-w-[640px] text-sm leading-6 text-muted">{settingsSubtitle(settingsTab)}</div>
+            <div className="text-xl font-medium">{settingsTitle(settingsTab, locale)}</div>
+            <div className="mt-1 max-w-[640px] text-sm leading-6 text-muted">{settingsSubtitle(settingsTab, locale)}</div>
           </div>
-          <button className="small-button" onClick={() => setSettingsOpen(false)}>关闭</button>
+          <button className="small-button" onClick={() => setSettingsOpen(false)}>{locale === "zh-CN" ? "关闭" : "Close"}</button>
         </div>
 
         <div className="mb-4 flex gap-2 overflow-x-auto md:hidden">
-          {settingsTabs.map((tab) => (
+          {settingsTabs(locale).map((tab) => (
             <button
               key={tab.id}
               className={cn(
@@ -1574,12 +2105,15 @@ function SettingsOverlay({
 
         {settingsTab === "experts" ? (
           <>
-            <button
-              className="small-button-primary mb-4"
-              onClick={onAddExpert}
-            >
-              + 添加专家
-            </button>
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+              <div className="text-xs text-muted">{skillCountLabel}</div>
+              <button
+                className="small-button-primary"
+                onClick={onAddExpert}
+              >
+                + 添加专家
+              </button>
+            </div>
             {agents.length ? (
               <div className="grid gap-4 md:grid-cols-2">
                 {agents.map((agent) => {
@@ -1620,15 +2154,49 @@ function SettingsOverlay({
               </div>
             ) : (
               <section className="settings-card text-sm leading-7 text-muted">
-                没有加载到专家。点击上方按钮添加。{agentsError ? `错误：${agentsError}` : ""}
+                {t(locale).ui.noExperts}{agentsError ? `${locale === "zh-CN" ? "错误：" : "Error: "}${agentsError}` : ""}
               </section>
             )}
           </>
         ) : null}
 
         {settingsTab !== "providers" && settingsTab !== "experts" ? (
-          <section className="settings-card text-sm leading-7 text-muted">
-            该部分保留为 MVP 设置中心骨架。后续会接入真实表单、技能授权和数据清理动作。
+          <section className="settings-card">
+            {settingsTab === "general" ? (
+              <div className="space-y-5">
+                <div>
+                  <div className="mb-2 text-sm font-medium">{t(locale).ui.language}</div>
+                  <div className="flex gap-2">
+                    <button
+                      className={cn(
+                        "rounded-md border px-3 py-1.5 text-sm",
+                        locale === "zh-CN" ? "border-ink bg-ink text-white" : "border-line bg-white text-muted"
+                      )}
+                      onClick={() => {
+                        setLocale("zh-CN");
+                        saveLocale("zh-CN");
+                      }}
+                    >
+                      简体中文
+                    </button>
+                    <button
+                      className={cn(
+                        "rounded-md border px-3 py-1.5 text-sm",
+                        locale === "en" ? "border-ink bg-ink text-white" : "border-line bg-white text-muted"
+                      )}
+                      onClick={() => {
+                        setLocale("en");
+                        saveLocale("en");
+                      }}
+                    >
+                      English
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="text-sm leading-7 text-muted">{locale === "zh-CN" ? "该部分保留为 MVP 设置中心骨架。" : "This section is reserved as an MVP settings skeleton."}</div>
+            )}
           </section>
         ) : null}
       </div>
@@ -1636,9 +2204,9 @@ function SettingsOverlay({
       {confirmDeleteName ? (
         <div className="sidebar-confirm-overlay" onClick={() => setConfirmDeleteName(null)}>
           <div className="sidebar-confirm-box" onClick={(e) => e.stopPropagation()}>
-            <div className="text-sm mb-3">确定要删除专家 "{confirmDeleteName}" 吗？</div>
+            <div className="text-sm mb-3">{locale === "zh-CN" ? `确定要删除专家 "${confirmDeleteName}" 吗？` : `Are you sure you want to delete "${confirmDeleteName}"?`}</div>
             <div className="flex gap-2 justify-end">
-              <button className="small-button" onClick={() => setConfirmDeleteName(null)}>取消</button>
+              <button className="small-button" onClick={() => setConfirmDeleteName(null)}>{locale === "zh-CN" ? "取消" : "Cancel"}</button>
               <button
                 className="small-button-primary"
                 onClick={() => {
@@ -1646,7 +2214,7 @@ function SettingsOverlay({
                   setConfirmDeleteName(null);
                 }}
               >
-                删除
+                {locale === "zh-CN" ? "删除" : "Delete"}
               </button>
             </div>
           </div>
@@ -1656,20 +2224,20 @@ function SettingsOverlay({
   );
 }
 
-function settingsTitle(tab: SettingsTab) {
-  if (tab === "providers") return "模型提供商";
-  if (tab === "experts") return "专家小组";
-  if (tab === "skills") return "Skills";
-  if (tab === "data") return "数据与日志";
-  return "通用";
+function settingsTitle(tab: SettingsTab, locale: Locale) {
+  if (tab === "providers") return t(locale).ui.providers;
+  if (tab === "experts") return t(locale).ui.experts;
+  if (tab === "skills") return t(locale).ui.skills;
+  if (tab === "data") return t(locale).ui.data;
+  return t(locale).ui.general;
 }
 
-function settingsSubtitle(tab: SettingsTab) {
-  if (tab === "providers") return "开发阶段可在前端配置并保存 API Key。密钥只存本机 runtime/data，用于本地开发。";
-  if (tab === "experts") return "默认专家从 runtime/agents 自动加载。角色和提示词定义身份，Skills 只定义可复用能力。";
-  if (tab === "skills") return "全局 Skills 是能力模块，不是身份标签。专家通过 yaml 白名单或禁用列表控制访问。";
-  if (tab === "data") return "只持久化用户可见投影，不保存原始专家讨论。";
-  return "圆桌骑士的基础偏好设置。";
+function settingsSubtitle(tab: SettingsTab, locale: Locale) {
+  if (tab === "providers") return locale === "zh-CN" ? "开发阶段可在前端配置并保存 API Key。密钥只存本机 runtime/data，用于本地开发。" : "Configure and save API Keys in the frontend. Keys are stored locally in runtime/data for local dev.";
+  if (tab === "experts") return locale === "zh-CN" ? "默认专家从 runtime/agents 自动加载。角色和提示词定义身份，Skills 只定义可复用能力。" : "Default experts auto-load from runtime/agents. Roles and prompts define identity, Skills define reusable capabilities.";
+  if (tab === "skills") return locale === "zh-CN" ? "全局 Skills 是能力模块，不是身份标签。专家通过 yaml 白名单或禁用列表控制访问。" : "Global Skills are capability modules, not identity tags. Experts control access via yaml allowlist or denylist.";
+  if (tab === "data") return locale === "zh-CN" ? "只持久化用户可见投影，不保存原始专家讨论。" : "Only persist user-visible projection, not raw expert discussions.";
+  return locale === "zh-CN" ? "圆桌骑士的基础偏好设置。" : "Basic KORT preferences.";
 }
 
 function ProviderField({
@@ -1703,16 +2271,61 @@ function ProviderField({
   );
 }
 
+function SkillPicker({
+  skills,
+  value,
+  disabled,
+  emptyText,
+  onChange,
+}: {
+  skills: string[];
+  value: string[];
+  disabled?: boolean;
+  emptyText: string;
+  onChange: (next: string[]) => void;
+}) {
+  if (!skills.length) {
+    return <div className="skill-picker-empty">{emptyText}</div>;
+  }
+
+  const selected = new Set(value);
+  return (
+    <div className="skill-picker">
+      {skills.map((skill) => {
+        const checked = selected.has(skill);
+        return (
+          <label key={skill} className={cn("skill-chip", checked && "skill-chip-active", disabled && "skill-chip-disabled")}>
+            <input
+              type="checkbox"
+              checked={checked}
+              disabled={disabled}
+              onChange={(event) => {
+                const next = event.target.checked
+                  ? [...value, skill]
+                  : value.filter((item) => item !== skill);
+                onChange(next);
+              }}
+            />
+            <span>{skill}</span>
+          </label>
+        );
+      })}
+    </div>
+  );
+}
+
 function ExpertModal({
   mode,
   agent,
   providers,
+  globalSkills,
   onClose,
   onSave,
 }: {
   mode: "create" | "edit";
   agent: AgentView | null;
   providers: ProviderProfile[];
+  globalSkills: string[];
   onClose: () => void;
   onSave: (data: {
     name: string;
@@ -1721,6 +2334,8 @@ function ExpertModal({
     provider_profile: string;
     model: string;
     system_prompt: string;
+    allowed_global_skills: string[];
+    disabled_global_skills: string[];
     priority: number;
   }) => Promise<void>;
 }) {
@@ -1732,6 +2347,8 @@ function ExpertModal({
   const [model, setModel] = useState(agent?.model ?? "");
   const [systemPrompt, setSystemPrompt] = useState(agent?.system_prompt ?? "");
   const [role, setRole] = useState(agent?.role ?? "expert");
+  const [allowedSkills, setAllowedSkills] = useState<string[]>(agent?.allowed_global_skills ?? []);
+  const [disabledSkills, setDisabledSkills] = useState<string[]>(agent?.disabled_global_skills ?? []);
   const [priority, setPriority] = useState(agent?.priority ?? 50);
   const [saving, setSaving] = useState(false);
 
@@ -1757,6 +2374,8 @@ function ExpertModal({
         provider_profile: providerProfile,
         model: selectedProvider?.default_model ?? "",
         system_prompt: systemPrompt,
+        allowed_global_skills: allowedSkills,
+        disabled_global_skills: disabledSkills,
         priority,
       });
       onClose();
@@ -1767,37 +2386,16 @@ function ExpertModal({
 
   const isValidName = /^[a-z][a-z0-9-]*$/.test(name);
 
-  const overlayStyle: React.CSSProperties = {
-    position: "fixed",
-    inset: 0,
-    zIndex: 40,
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    background: "rgba(0, 0, 0, 0.3)",
-  };
-
-  const panelStyle: React.CSSProperties = {
-    background: "#fff",
-    borderRadius: "12px",
-    boxShadow: "0 16px 48px rgba(0, 0, 0, 0.15)",
-    maxWidth: "520px",
-    width: "90%",
-    maxHeight: "85vh",
-    overflow: "auto",
-    padding: "24px",
-  };
-
   return (
-    <div style={overlayStyle} onClick={onClose}>
-      <div style={panelStyle} onClick={(e) => e.stopPropagation()}>
-        <div style={{ fontSize: "18px", fontWeight: 600, marginBottom: "20px" }}>
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="expert-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-title">
           {mode === "create" ? "添加专家" : "编辑专家"}
         </div>
-        <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
+        <div className="modal-form-grid">
           {/* name */}
-          <label style={{ display: "flex", flexDirection: "column", gap: "4px", fontSize: "14px" }}>
-            <span style={{ fontWeight: 500 }}>
+          <label className="settings-field">
+            <span className="settings-label">
               名称{mode === "edit" ? "（只读）" : ""}
             </span>
             <input
@@ -1808,15 +2406,15 @@ function ExpertModal({
               placeholder="小写字母开头，仅小写字母、数字、连字符"
             />
             {name && !isValidName ? (
-              <span style={{ fontSize: "12px", color: "#d92d20" }}>
+              <span className="settings-error">
                 格式不符（需匹配 ^[a-z][a-z0-9-]*$）
               </span>
             ) : null}
           </label>
 
           {/* nickname */}
-          <label style={{ display: "flex", flexDirection: "column", gap: "4px", fontSize: "14px" }}>
-            <span style={{ fontWeight: 500 }}>昵称</span>
+          <label className="settings-field">
+            <span className="settings-label">昵称</span>
             <input
               className="settings-input"
               value={nickname}
@@ -1827,8 +2425,8 @@ function ExpertModal({
           </label>
 
           {/* provider_profile */}
-          <label style={{ display: "flex", flexDirection: "column", gap: "4px", fontSize: "14px" }}>
-            <span style={{ fontWeight: 500 }}>模型提供商</span>
+          <label className="settings-field">
+            <span className="settings-label">模型提供商</span>
             <select
               className="settings-input"
               value={providerProfile}
@@ -1846,8 +2444,8 @@ function ExpertModal({
           </label>
 
           {/* system_prompt */}
-          <label style={{ display: "flex", flexDirection: "column", gap: "4px", fontSize: "14px" }}>
-            <span style={{ fontWeight: 500 }}>系统提示词</span>
+          <label className="settings-field">
+            <span className="settings-label">系统提示词</span>
             <textarea
               className="settings-input"
               value={systemPrompt}
@@ -1859,8 +2457,8 @@ function ExpertModal({
           </label>
 
           {/* role */}
-          <label style={{ display: "flex", flexDirection: "column", gap: "4px", fontSize: "14px" }}>
-            <span style={{ fontWeight: 500 }}>角色</span>
+          <label className="settings-field">
+            <span className="settings-label">角色</span>
             <select
               className="settings-input"
               value={role}
@@ -1874,9 +2472,37 @@ function ExpertModal({
             </select>
           </label>
 
+          <div className="settings-field">
+            <span className="settings-label">允许的全局 Skills</span>
+            <SkillPicker
+              skills={globalSkills}
+              value={allowedSkills}
+              disabled={isSystem}
+              emptyText="未发现全局 Skills"
+              onChange={(next) => {
+                setAllowedSkills(next);
+                setDisabledSkills((current) => current.filter((skill) => !next.includes(skill)));
+              }}
+            />
+          </div>
+
+          <div className="settings-field">
+            <span className="settings-label">禁用的全局 Skills</span>
+            <SkillPicker
+              skills={globalSkills}
+              value={disabledSkills}
+              disabled={isSystem}
+              emptyText="未禁用 Skills"
+              onChange={(next) => {
+                setDisabledSkills(next);
+                setAllowedSkills((current) => current.filter((skill) => !next.includes(skill)));
+              }}
+            />
+          </div>
+
           {/* priority */}
-          <label style={{ display: "flex", flexDirection: "column", gap: "4px", fontSize: "14px" }}>
-            <span style={{ fontWeight: 500 }}>优先级 (0-100)</span>
+          <label className="settings-field">
+            <span className="settings-label">优先级 (0-100)</span>
             <input
               className="settings-input"
               type="number"
@@ -1891,7 +2517,7 @@ function ExpertModal({
           </label>
         </div>
 
-        <div style={{ display: "flex", gap: "8px", justifyContent: "flex-end", marginTop: "24px" }}>
+        <div className="modal-actions">
           <button className="small-button" onClick={onClose}>
             取消
           </button>

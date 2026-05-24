@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 
 import httpx
 
@@ -120,3 +120,73 @@ class OpenAICompatibleClient:
             raise ModelCallError(f"Model stream failed with HTTP {exc.response.status_code}: {detail}") from exc
         except httpx.HTTPError as exc:
             raise ModelCallError(f"Model stream failed: {exc}") from exc
+
+    async def stream_model_with_thinking(
+        self,
+        provider: ProviderProfile,
+        prompt: str,
+        system_prompt: str,
+        *,
+        disable_thinking: bool = False,
+    ) -> AsyncIterator[dict[str, str]]:
+        """Stream a model response, splitting think (reasoning_content) from answer (content).
+
+        Yields dicts with ``type`` (``"think"`` or ``"answer"``) and ``text`` (the token).
+        """
+        if provider.api_style != "openai":
+            raise ModelCallError(f"Provider {provider.provider_id} is not OpenAI-compatible yet.")
+
+        api_key = self.secrets.get(provider.provider_id) or os.getenv(provider.env_key_name, "")
+        if not api_key.strip() and provider.provider_type != "ollama":
+            raise ModelCallError(f"Provider {provider.provider_id} has no saved API key.")
+
+        headers: dict[str, str] = {"Content-Type": "application/json"}
+        if api_key.strip():
+            headers["Authorization"] = f"Bearer {api_key.strip()}"
+
+        base_url = provider.base_url.rstrip("/")
+        url = f"{base_url}/chat/completions"
+        payload: dict = {
+            "model": provider.default_model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.4,
+            "stream": True,
+        }
+
+        if disable_thinking:
+            payload["thinking"] = {"type": "disabled"}
+
+        async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
+            try:
+                async with client.stream("POST", url, headers=headers, json=payload) as response:
+                    response.raise_for_status()
+                    async for line in response.aiter_lines():
+                        if not line.startswith("data:"):
+                            continue
+
+                        payload_text = line.removeprefix("data:").strip()
+                        if payload_text == "[DONE]":
+                            break
+
+                        try:
+                            data = json.loads(payload_text)
+                        except ValueError:
+                            continue
+
+                        delta = data.get("choices", [{}])[0].get("delta", {})
+
+                        reasoning = delta.get("reasoning_content")
+                        if isinstance(reasoning, str) and reasoning:
+                            yield {"type": "think", "text": reasoning}
+
+                        content = delta.get("content")
+                        if isinstance(content, str) and content:
+                            yield {"type": "answer", "text": content}
+            except httpx.HTTPStatusError as exc:
+                detail = sanitize_error_text(exc.response.text)
+                raise ModelCallError(f"Model stream failed with HTTP {exc.response.status_code}: {detail}") from exc
+            except httpx.HTTPError as exc:
+                raise ModelCallError(f"Model stream failed: {exc}") from exc

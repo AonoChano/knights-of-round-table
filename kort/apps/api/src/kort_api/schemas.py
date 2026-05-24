@@ -154,6 +154,7 @@ class ConversationRequest(BaseModel):
     question: str = Field(min_length=1, max_length=4000)
     level: str = Field(default="auto", pattern=r"^(off|auto|low|medium|high)$")
     conversation_id: str | None = Field(default=None)
+    deep_think: bool = False
 
 
 class ConversationRenameRequest(BaseModel):

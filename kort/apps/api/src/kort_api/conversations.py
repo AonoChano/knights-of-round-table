@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import queue
+import threading
 from collections.abc import Iterator
 from pathlib import Path
 from uuid import uuid4
 
-from .orchestration import run_discussion_stream
+from fastapi import HTTPException
+
+from .orchestration import run_discussion_stream, run_solo_thinking_stream
 from .schemas import (
     AgentDefinition,
     ConversationListItem,
@@ -18,7 +23,43 @@ from .schemas import (
     StageSummary,
     utc_now,
 )
-from .storage import read_json, write_json
+
+
+def _async_gen_to_sync(async_gen_func, *args, **kwargs) -> Iterator[str]:
+    """Bridge an async generator to a sync iterator via a daemon thread.
+
+    The async generator is consumed inside ``asyncio.run()`` on a dedicated
+    thread.  Items are pushed into a thread-safe queue that the caller drains.
+    """
+    q: queue.Queue[tuple[str, object]] = queue.Queue()
+
+    async def _runner() -> None:
+        try:
+            async for item in async_gen_func(*args, **kwargs):
+                q.put(("item", item))
+        except Exception as exc:
+            q.put(("error", exc))
+        finally:
+            q.put(("done", None))
+
+    def _thread_target() -> None:
+        asyncio.run(_runner())
+
+    thread = threading.Thread(target=_thread_target, daemon=True)
+    thread.start()
+
+    while True:
+        try:
+            kind, value = q.get(timeout=300)
+        except queue.Empty:
+            raise RuntimeError("Async generator bridge timed out")
+        if kind == "done":
+            break
+        if kind == "error":
+            # value is an Exception instance
+            raise value  # type: ignore[misc]
+        # kind == "item"
+        yield value  # type: ignore[misc]
 
 
 def _merge_streamed_summaries(events: list[StageSummary]) -> list[StageSummary]:
@@ -31,45 +72,74 @@ def _merge_streamed_summaries(events: list[StageSummary]) -> list[StageSummary]:
 class ConversationStore:
     def __init__(self, path: Path) -> None:
         self.path = path
+        if self.path.is_file():
+            old_file = self.path
+            self.path = self.path.with_name(self.path.stem)
+            self.path.mkdir(parents=True, exist_ok=True)
+            self._migrate_from_file(old_file)
+        else:
+            self.path.mkdir(parents=True, exist_ok=True)
+
+    def _migrate_from_file(self, file_path: Path) -> None:
+        try:
+            data = json.loads(file_path.read_text(encoding="utf-8"))
+            records = data if isinstance(data, list) else []
+            for entry in records:
+                try:
+                    record = ConversationRecord.model_validate(entry)
+                    fpath = self.path / f"{record.conversation_id}.json"
+                    fpath.write_text(json.dumps(record.model_dump(), ensure_ascii=False, indent=2), encoding="utf-8")
+                except Exception:
+                    pass
+            file_path.unlink()
+        except Exception:
+            pass
 
     def list_records(self) -> list[ConversationRecord]:
-        raw = read_json(self.path, default=[])
-        seen_ids: set[str] = set()
-        unique: list[ConversationRecord] = []
-        for item in raw:
+        records: list[ConversationRecord] = []
+        if not self.path.exists():
+            return records
+        for file_path in sorted(self.path.glob("*.json")):
             try:
-                r = ConversationRecord.model_validate(item)
-                if r.conversation_id not in seen_ids:
-                    seen_ids.add(r.conversation_id)
-                    unique.append(r)
+                data = json.loads(file_path.read_text(encoding="utf-8"))
+                record = ConversationRecord.model_validate(data)
+                records.append(record)
             except Exception:
                 pass
-        if len(unique) != len(raw):
-            self.save_records(unique)
-        return unique
+        return records
 
     def get_record(self, conversation_id: str) -> ConversationRecord | None:
-        for record in self.list_records():
-            if record.conversation_id == conversation_id:
-                return record
-        return None
+        file_path = self.path / f"{conversation_id}.json"
+        if not file_path.exists():
+            return None
+        try:
+            data = json.loads(file_path.read_text(encoding="utf-8"))
+            return ConversationRecord.model_validate(data)
+        except Exception:
+            return None
 
     def save_records(self, records: list[ConversationRecord]) -> None:
-        write_json(self.path, [record.model_dump(mode="json") for record in records])
+        for record in records:
+            file_path = self.path / f"{record.conversation_id}.json"
+            file_path.write_text(
+                json.dumps(record.model_dump(mode="json"), ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
 
     def append(self, record: ConversationRecord) -> None:
-        records = self.list_records()
-        records.insert(0, record)
-        self.save_records(records)
+        file_path = self.path / f"{record.conversation_id}.json"
+        file_path.write_text(
+            json.dumps(record.model_dump(mode="json"), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
 
     def _update_record(self, conversation_id: str, updater) -> ConversationRecord | None:
-        records = self.list_records()
-        for i, record in enumerate(records):
-            if record.conversation_id == conversation_id:
-                updater(record)
-                self.save_records(records)
-                return record
-        return None
+        record = self.get_record(conversation_id)
+        if record is None:
+            return None
+        updater(record)
+        self.append(record)
+        return record
 
     def rename(self, conversation_id: str, new_title: str) -> ConversationRecord | None:
         def _apply(record: ConversationRecord) -> None:
@@ -78,11 +148,10 @@ class ConversationStore:
         return self._update_record(conversation_id, _apply)
 
     def delete(self, conversation_id: str) -> bool:
-        records = self.list_records()
-        new_records = [r for r in records if r.conversation_id != conversation_id]
-        if len(new_records) == len(records):
+        file_path = self.path / f"{conversation_id}.json"
+        if not file_path.exists():
             return False
-        self.save_records(new_records)
+        file_path.unlink()
         return True
 
 
@@ -159,65 +228,108 @@ class VisibleConversationService:
         else:
             question_to_ask = request.question
 
-        yield self._sse("conversation_start", {"conversation_id": conversation_id, "question": request.question})
+        try:
+            yield self._sse("conversation_start", {"conversation_id": conversation_id, "question": request.question})
 
-        level_max_rounds: dict[str, int] = {
-            "off": 0,
-            "low": 2,
-            "auto": 4,
-            "medium": 5,
-            "high": 8,
-        }
-        max_rounds = level_max_rounds.get(request.level, 4)
+            collected_summaries: list[StageSummary] = []
+            final_body = ""
 
-        collected_summaries: list[StageSummary] = []
-        final_body = ""
-
-        for sse_event in run_discussion_stream(
-            question=question_to_ask,
-            agents=agents,
-            providers=providers,
-            secrets=secrets,
-            max_rounds=max_rounds,
-        ):
-            yield sse_event
-
-            if sse_event.startswith("event: summary_complete"):
-                collected_summaries.append(
-                    StageSummary.model_validate(json.loads(sse_event.split("data: ", 1)[1]))
+            if request.deep_think and request.level != "off":
+                raise HTTPException(
+                    status_code=422,
+                    detail="deep_think mode requires discussion level to be 'off'",
                 )
 
-            if sse_event.startswith("event: final_delta"):
+            if request.deep_think and request.level == "off":
+                # --- Deep-think (solo model with CoT summaries) ---
+                for sse_event in _async_gen_to_sync(
+                    run_solo_thinking_stream,
+                    question=question_to_ask,
+                    agents=agents,
+                    providers=providers,
+                    secrets=secrets,
+                ):
+                    yield sse_event
+
+                    if sse_event.startswith("event: summary_complete"):
+                        collected_summaries.append(
+                            StageSummary.model_validate(json.loads(sse_event.split("data: ", 1)[1]))
+                        )
+
+                    if sse_event.startswith("event: final_delta"):
+                        try:
+                            final_body += json.loads(sse_event.split("data: ", 1)[1])["delta"]
+                        except (json.JSONDecodeError, KeyError, IndexError):
+                            pass
+            else:
+                # --- Discussion stream ---
+                level_max_rounds: dict[str, int] = {
+                    "off": 0,
+                    "low": 2,
+                    "auto": 4,
+                    "medium": 5,
+                    "high": 8,
+                }
+                max_rounds = level_max_rounds.get(request.level, 4)
+
+                for sse_event in run_discussion_stream(
+                    question=question_to_ask,
+                    agents=agents,
+                    providers=providers,
+                    secrets=secrets,
+                    max_rounds=max_rounds,
+                ):
+                    yield sse_event
+
+                    if sse_event.startswith("event: summary_complete"):
+                        collected_summaries.append(
+                            StageSummary.model_validate(json.loads(sse_event.split("data: ", 1)[1]))
+                        )
+
+                    if sse_event.startswith("event: final_delta"):
+                        try:
+                            final_body += json.loads(sse_event.split("data: ", 1)[1])["delta"]
+                        except (json.JSONDecodeError, KeyError, IndexError):
+                            pass
+
+            collected_summaries = _merge_streamed_summaries(collected_summaries)
+
+            final_answer = FinalAnswer(
+                title="Final answer",
+                body=final_body,
+                confidence=0.82,
+                limitations=(
+                    ["Generated via solo deep-think mode with chain-of-thought summarization."]
+                    if (request.deep_think and request.level == "off")
+                    else ["Generated via LangGraph multi-expert orchestration."]
+                ),
+            )
+
+            new_round = ConversationRound(
+                round_id=str(uuid4()),
+                question=request.question,
+                stage_summaries=collected_summaries,
+                final_answer=final_answer,
+            )
+
+            if existing:
                 try:
-                    final_body += json.loads(sse_event.split("data: ", 1)[1])["delta"]
-                except (json.JSONDecodeError, KeyError, IndexError):
-                    pass
-
-        collected_summaries = _merge_streamed_summaries(collected_summaries)
-
-        final_answer = FinalAnswer(
-            title="Final answer",
-            body=final_body,
-            confidence=0.82,
-            limitations=["Generated via LangGraph multi-expert orchestration."],
-        )
-
-        new_round = ConversationRound(
-            round_id=str(uuid4()),
-            question=request.question,
-            stage_summaries=collected_summaries,
-            final_answer=final_answer,
-        )
-
-        if existing:
-            try:
-                def _append_round(record: ConversationRecord) -> None:
-                    record.rounds.append(new_round)
-                    record.updated_at = utc_now()
-                response_record = self.store._update_record(conversation_id, _append_round)
-                if response_record is None:
-                    response_record = existing
-            except Exception:
+                    def _append_round(record: ConversationRecord) -> None:
+                        record.rounds.append(new_round)
+                        record.updated_at = utc_now()
+                    response_record = self.store._update_record(conversation_id, _append_round)
+                    if response_record is None:
+                        response_record = existing
+                except Exception:
+                    title = request.question[:30] + ("..." if len(request.question) > 30 else "")
+                    response_record = ConversationRecord(
+                        conversation_id=conversation_id,
+                        title=title,
+                        expert_count=expert_count,
+                        rounds=[new_round],
+                    )
+                    self.store.append(response_record)
+            else:
                 title = request.question[:30] + ("..." if len(request.question) > 30 else "")
                 response_record = ConversationRecord(
                     conversation_id=conversation_id,
@@ -226,27 +338,55 @@ class VisibleConversationService:
                     rounds=[new_round],
                 )
                 self.store.append(response_record)
-        else:
-            title = request.question[:30] + ("..." if len(request.question) > 30 else "")
-            response_record = ConversationRecord(
-                conversation_id=conversation_id,
-                title=title,
-                expert_count=expert_count,
-                rounds=[new_round],
-            )
-            self.store.append(response_record)
 
-        yield self._sse(
-            "conversation_complete",
-            ConversationResponse(
-                conversation_id=response_record.conversation_id,
-                created_at=response_record.created_at,
-                updated_at=response_record.updated_at,
-                title=response_record.title,
-                expert_count=response_record.expert_count,
-                rounds=response_record.rounds,
-            ).model_dump(mode="json"),
-        )
+            yield self._sse(
+                "conversation_complete",
+                ConversationResponse(
+                    conversation_id=response_record.conversation_id,
+                    created_at=response_record.created_at,
+                    updated_at=response_record.updated_at,
+                    title=response_record.title,
+                    expert_count=response_record.expert_count,
+                    rounds=response_record.rounds,
+                ).model_dump(mode="json"),
+            )
+        except GeneratorExit:
+            # Client disconnected (e.g. user clicked pause).
+            # Save partial progress so it survives page refreshes.
+            if not collected_summaries and not final_body:
+                pass
+            else:
+                partial_round = ConversationRound(
+                    round_id=str(uuid4()),
+                    question=request.question,
+                    stage_summaries=_merge_streamed_summaries(collected_summaries),
+                    final_answer=FinalAnswer(
+                        title="Partial answer",
+                        body=final_body,
+                        confidence=0.5,
+                        limitations=["Conversation was paused by the user."],
+                    ),
+                )
+                if existing:
+                    try:
+                        def _append_partial(record: ConversationRecord) -> None:
+                            record.rounds.append(partial_round)
+                            record.updated_at = utc_now()
+                        self.store._update_record(conversation_id, _append_partial)
+                    except Exception:
+                        pass
+                else:
+                    title = request.question[:30] + ("..." if len(request.question) > 30 else "")
+                    partial_record = ConversationRecord(
+                        conversation_id=conversation_id,
+                        title=title,
+                        expert_count=expert_count,
+                        rounds=[partial_round],
+                    )
+                    try:
+                        self.store.append(partial_record)
+                    except Exception:
+                        pass
 
     def _sse(self, event: str, payload: dict) -> str:
         return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"

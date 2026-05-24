@@ -63,3 +63,4 @@ kort/runtime/data/*
 # ==========================================
 
 .playwright-cli/
+icons

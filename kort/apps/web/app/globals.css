@@ -515,6 +515,16 @@ button {
   margin: 0;
 }
 
+.reasoning-body h1,
+.reasoning-body h2,
+.reasoning-body h3,
+.reasoning-body h4 {
+  font-size: 13px;
+  font-weight: 600;
+  margin: 0.6em 0 0.3em;
+  line-height: 1.5;
+}
+
 .markdown-body h1,
 .markdown-body h2,
 .markdown-body h3 {
@@ -605,6 +615,7 @@ button {
   background: #171717;
   color: #fff;
   border-radius: 50%;
+  border: 0;
   padding: 0;
   transition: background 180ms ease, transform 180ms ease, opacity 180ms ease;
 }
@@ -628,10 +639,29 @@ button {
   animation: sendSpin 1s linear infinite;
 }
 
-.send-button-stop {
-  border: 2px solid rgba(0, 0, 0, 0.12);
-  border-top-color: #171717;
-  animation: borderSpin 800ms linear infinite;
+.send-button-pause-flash {
+  background: #e67e22 !important;
+  color: #fff !important;
+  border-color: #e67e22 !important;
+  transform: scale(0.92);
+  transition: background 500ms ease-out, border-color 500ms ease-out, color 300ms ease-out;
+}
+
+.send-button-paused {
+  background: #b9b9b4 !important;
+  color: #fff !important;
+  border-color: transparent !important;
+  opacity: 0.55;
+  cursor: default;
+  transform: scale(0.88);
+  pointer-events: none;
+}
+
+.pause-status-text {
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+  user-select: none;
 }
 
 @keyframes borderSpin {
@@ -705,6 +735,104 @@ button {
 
 .settings-input:focus {
   border-color: rgba(0, 0, 0, 0.24);
+}
+
+.settings-field {
+  display: grid;
+  gap: 5px;
+  font-size: 14px;
+}
+
+.settings-label {
+  font-weight: 500;
+}
+
+.settings-error {
+  color: #d92d20;
+  font-size: 12px;
+}
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.3);
+  padding: 18px;
+}
+
+.expert-modal {
+  width: min(640px, 100%);
+  max-height: 88vh;
+  overflow: auto;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.15);
+  padding: 24px;
+}
+
+.modal-title {
+  margin-bottom: 20px;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.modal-form-grid {
+  display: grid;
+  gap: 16px;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 24px;
+}
+
+.skill-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.skill-picker-empty {
+  border: 1px dashed rgba(0, 0, 0, 0.12);
+  border-radius: 8px;
+  color: #6a6a67;
+  font-size: 13px;
+  padding: 10px 12px;
+}
+
+.skill-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 999px;
+  background: #fff;
+  color: #555552;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 6px 10px;
+  user-select: none;
+}
+
+.skill-chip input {
+  display: none;
+}
+
+.skill-chip-active {
+  border-color: #171717;
+  background: #171717;
+  color: #fff;
+}
+
+.skill-chip-disabled {
+  cursor: default;
+  opacity: 0.55;
 }
 
 .breathing-dot {
@@ -865,4 +993,19 @@ button {
 .thinking-drawer::-webkit-scrollbar-thumb {
   background: rgba(0, 0, 0, 0.1);
   border-radius: 10px;
+}
+
+.sidebar-spinner {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  border: 2px solid rgba(0, 0, 0, 0.1);
+  border-top-color: #171717;
+  border-radius: 50%;
+  animation: sidebar-spin 0.6s linear infinite;
+}
+
+@keyframes sidebar-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
 }
