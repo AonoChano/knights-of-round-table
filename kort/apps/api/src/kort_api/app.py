@@ -112,6 +112,21 @@ def list_conversations() -> list[ConversationListItem]:
     return conversation_service.list_conversations()
 
 
+@app.get("/api/conversations/{conversation_id}/stream")
+def stream_existing_conversation(conversation_id: str) -> StreamingResponse:
+    events = conversation_service.stream_existing_job(conversation_id)
+    if events is None:
+        raise HTTPException(status_code=404, detail="Running conversation not found")
+    return StreamingResponse(
+        events,
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @app.get("/api/conversations/{conversation_id}", response_model=ConversationResponse)
 def get_conversation(conversation_id: str) -> ConversationResponse:
     result = conversation_service.get_conversation(conversation_id)

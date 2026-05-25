@@ -25,6 +25,43 @@ from .schemas import (
 )
 
 
+class ConversationJob:
+    def __init__(self, conversation_id: str) -> None:
+        self.conversation_id = conversation_id
+        self.events: list[str] = []
+        self.done = False
+        self.error: Exception | None = None
+        self.condition = threading.Condition()
+
+    def append(self, event: str) -> None:
+        with self.condition:
+            self.events.append(event)
+            self.condition.notify_all()
+
+    def finish(self, error: Exception | None = None) -> None:
+        with self.condition:
+            self.error = error
+            self.done = True
+            self.condition.notify_all()
+
+    def stream(self, start_index: int = 0) -> Iterator[str]:
+        index = start_index
+        while True:
+            with self.condition:
+                while index >= len(self.events) and not self.done:
+                    self.condition.wait(timeout=15)
+                if index < len(self.events):
+                    event = self.events[index]
+                    index += 1
+                elif self.done:
+                    if self.error is not None:
+                        raise self.error
+                    break
+                else:
+                    continue
+            yield event
+
+
 def _async_gen_to_sync(async_gen_func, *args, **kwargs) -> Iterator[str]:
     """Bridge an async generator to a sync iterator via a daemon thread.
 
@@ -158,6 +195,8 @@ class ConversationStore:
 class VisibleConversationService:
     def __init__(self, store: ConversationStore) -> None:
         self.store = store
+        self.jobs: dict[str, ConversationJob] = {}
+        self.jobs_lock = threading.Lock()
 
     def list_conversations(self) -> list[ConversationListItem]:
         records = self.store.list_records()
@@ -200,6 +239,13 @@ class VisibleConversationService:
     def delete_conversation(self, conversation_id: str) -> bool:
         return self.store.delete(conversation_id)
 
+    def stream_existing_job(self, conversation_id: str) -> Iterator[str] | None:
+        with self.jobs_lock:
+            job = self.jobs.get(conversation_id)
+        if job is None:
+            return None
+        return job.stream()
+
     def stream_conversation(
         self,
         request: ConversationRequest,
@@ -215,6 +261,58 @@ class VisibleConversationService:
         else:
             conversation_id = str(uuid4())
             existing = None
+
+        with self.jobs_lock:
+            job = self.jobs.get(conversation_id)
+            if job is None or job.done:
+                job = ConversationJob(conversation_id)
+                self.jobs[conversation_id] = job
+                thread = threading.Thread(
+                    target=self._run_job,
+                    args=(job, request, conversation_id, existing, expert_count, agents, providers, secrets),
+                    daemon=True,
+                )
+                thread.start()
+
+        return job.stream()
+
+    def _run_job(
+        self,
+        job: ConversationJob,
+        request: ConversationRequest,
+        conversation_id: str,
+        existing: ConversationRecord | None,
+        expert_count: int,
+        agents: list[AgentDefinition],
+        providers: list[ProviderProfile],
+        secrets: dict[str, str],
+    ) -> None:
+        try:
+            for event in self._generate_conversation_events(
+                request,
+                conversation_id,
+                existing,
+                expert_count,
+                agents,
+                providers,
+                secrets,
+            ):
+                job.append(event)
+        except Exception as exc:
+            job.finish(exc)
+            return
+        job.finish()
+
+    def _generate_conversation_events(
+        self,
+        request: ConversationRequest,
+        conversation_id: str,
+        existing: ConversationRecord | None,
+        expert_count: int,
+        agents: list[AgentDefinition],
+        providers: list[ProviderProfile],
+        secrets: dict[str, str],
+    ) -> Iterator[str]:
 
         # Build history context prefix from previous conversation rounds
         context_prefix = ""

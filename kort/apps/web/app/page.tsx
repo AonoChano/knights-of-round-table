@@ -159,13 +159,15 @@ type StreamSlot = {
 
 const DISCUSSION_LEVEL_KEY = "kort-discussion-level";
 const DEEP_THINK_KEY = "kort-deep-think";
+const DEFAULT_DISCUSSION_LEVEL: DiscussionLevel = "auto";
+const DEFAULT_LOCALE: Locale = "zh-CN";
 
 function loadDiscussionLevel(): DiscussionLevel {
-  if (typeof window === "undefined") return "auto";
+  if (typeof window === "undefined") return DEFAULT_DISCUSSION_LEVEL;
   const stored = localStorage.getItem(DISCUSSION_LEVEL_KEY);
   return stored === "off" || stored === "auto" || stored === "low" || stored === "medium" || stored === "high"
     ? stored
-    : "auto";
+    : DEFAULT_DISCUSSION_LEVEL;
 }
 
 function saveDiscussionLevel(level: DiscussionLevel): void {
@@ -335,8 +337,8 @@ function HomeExperience() {
   const [finalBody, setFinalBody] = useState("");
   const [timeline, setTimeline] = useState<TimelineItem[]>([]);
   const [talkingActive, setTalkingActive] = useState(false);
-  const [discussionLevel, setDiscussionLevel] = useState<DiscussionLevel>(loadDiscussionLevel);
-  const [deepThink, setDeepThink] = useState(loadDeepThink);
+  const [discussionLevel, setDiscussionLevel] = useState<DiscussionLevel>(DEFAULT_DISCUSSION_LEVEL);
+  const [deepThink, setDeepThink] = useState(false);
   const [conversations, setConversations] = useState<ConversationListItem[]>([]);
   const [messagePairs, setMessagePairs] = useState<MessagePair[]>([]);
   const [currentConversationId, setCurrentConversationId] = useState<string | null>(null);
@@ -345,7 +347,7 @@ function HomeExperience() {
   const [expertModalOpen, setExpertModalOpen] = useState(false);
   const [expertModalMode, setExpertModalMode] = useState<"create" | "edit">("create");
   const [editingAgent, setEditingAgent] = useState<AgentView | null>(null);
-  const [locale, setLocale] = useState<Locale>(loadLocale);
+  const [locale, setLocale] = useState<Locale>(DEFAULT_LOCALE);
   const [paused, setPaused] = useState(false);
   const [pauseFlash, setPauseFlash] = useState(false);
   const [unreadConversationIds, setUnreadConversationIds] = useState<Set<string>>(new Set());
@@ -373,6 +375,7 @@ function HomeExperience() {
   const [slotVersion, setSlotVersion] = useState(0);
   const activeSlotIdRef = useRef<string | null>(null);
   const currentCidRef = useRef<string | null>(null);
+  const preferencesReadyRef = useRef(false);
 
   function getActiveSlot(): StreamSlot | null {
     if (!activeSlotId) return null;
@@ -424,6 +427,7 @@ function HomeExperience() {
     }
     const target = slotMapRef.current.get(slotId) ?? createEmptySlot();
     slotMapRef.current.set(slotId, target);
+    activeSlotIdRef.current = slotId;
     setActiveSlotId(slotId);
     syncSlotToState(target);
     setSlotVersion((v) => v + 1);
@@ -440,6 +444,7 @@ function HomeExperience() {
     slot.abortController = ac;
     slot.loading = true;
     slotMapRef.current.set(slotId, slot);
+    activeSlotIdRef.current = slotId;
     setActiveSlotId(slotId);
     syncSlotToState(slot);
     setSlotVersion((v) => v + 1);
@@ -551,6 +556,13 @@ function HomeExperience() {
   }
 
   useEffect(() => {
+    setDiscussionLevel(loadDiscussionLevel());
+    setDeepThink(loadDeepThink());
+    setLocale(loadLocale());
+    window.setTimeout(() => {
+      preferencesReadyRef.current = true;
+    }, 0);
+
     void loadProviders();
     void loadProviderSecretStatuses();
     void loadAgents();
@@ -592,10 +604,12 @@ function HomeExperience() {
   }, [loading, thinkingComplete]);
 
   useEffect(() => {
+    if (!preferencesReadyRef.current) return;
     saveDiscussionLevel(discussionLevel);
   }, [discussionLevel]);
 
   useEffect(() => {
+    if (!preferencesReadyRef.current) return;
     saveDeepThink(deepThink);
   }, [deepThink]);
 
@@ -722,6 +736,8 @@ function HomeExperience() {
       const response = await fetch(`${API_BASE}/api/conversations/${conversationId}`);
       if (!response.ok) {
         if (response.status === 404) {
+          const resumed = await resumeConversationStream(conversationId);
+          if (resumed) return;
           router.replace("/", { scroll: false });
           setCurrentConversationId(null);
           return;
@@ -757,6 +773,74 @@ function HomeExperience() {
       }
     } catch {
       // silently fail
+    }
+  }
+
+  async function resumeConversationStream(conversationId: string): Promise<boolean> {
+    clearSentenceState();
+    const slot = ensureSlotForSend(conversationId);
+    setCurrentConversationId(conversationId);
+    currentCidRef.current = conversationId;
+    setSubmittedQuestion(null);
+    setFinalBody("");
+    setTimeline([]);
+    setThinkingComplete(false);
+    setLoading(true);
+
+    try {
+      const response = await fetch(`${API_BASE}/api/conversations/${conversationId}/stream`);
+      if (!response.ok || !response.body) {
+        slot.loading = false;
+        setLoading(false);
+        return false;
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let done = false;
+
+      while (!done) {
+        const read = await reader.read();
+        done = read.done;
+        buffer += decoder.decode(read.value, { stream: !done });
+        const parsed = parseSseChunk(buffer);
+        buffer = parsed.rest;
+        for (const event of parsed.events) {
+          if (event.event === "conversation_start") {
+            const question = String(event.data.question ?? "");
+            setSubmittedQuestion(question || null);
+            submittedQuestionRef.current = question || null;
+            continue;
+          }
+          if (activeSlotIdRef.current !== conversationId) {
+            const bgSlot = slotMapRef.current.get(conversationId);
+            if (bgSlot) {
+              applyEventToSlot(bgSlot, event);
+              if (event.event === "conversation_complete") {
+                setUnreadConversationIds((current) => {
+                  const next = new Set(current);
+                  next.add(conversationId);
+                  return next;
+                });
+              }
+            }
+            continue;
+          }
+          handleStreamEvent(event);
+        }
+      }
+      return true;
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") return true;
+      console.error(error);
+      return false;
+    } finally {
+      slot.loading = false;
+      if (activeSlotIdRef.current === conversationId) {
+        setLoading(false);
+      }
+      setSlotVersion((v) => v + 1);
     }
   }
 
