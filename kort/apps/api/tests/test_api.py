@@ -83,6 +83,21 @@ def test_visible_conversation_payload_hides_internal_discussion() -> None:
     assert "event: conversation_complete" in response.text
 
 
+def test_stream_conversation_uses_client_supplied_conversation_id() -> None:
+    conversation_id = "client-generated-conversation"
+    response = client.post(
+        "/api/conversations/stream",
+        json={
+            "conversation_id": conversation_id,
+            "question": "Hello",
+            "level": "off",
+        },
+    )
+
+    assert response.status_code == 200
+    assert f'"conversation_id": "{conversation_id}"' in response.text
+
+
 def test_provider_connectivity_does_not_echo_api_key() -> None:
     response = client.post("/api/providers/deepseek/test", json={"api_key": "secret-test-key"})
     payload = response.json()

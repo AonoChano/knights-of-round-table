@@ -795,6 +795,21 @@ function HomeExperience() {
         return false;
       }
 
+      setConversations((prev) => {
+        if (prev.some((item) => item.conversation_id === conversationId)) return prev;
+        const now = new Date().toISOString();
+        return [
+          {
+            conversation_id: conversationId,
+            title: "正在继续对话...",
+            created_at: now,
+            updated_at: now,
+            expert_count: 0,
+          },
+          ...prev,
+        ];
+      });
+
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
@@ -811,6 +826,15 @@ function HomeExperience() {
             const question = String(event.data.question ?? "");
             setSubmittedQuestion(question || null);
             submittedQuestionRef.current = question || null;
+            if (question) {
+              setConversations((prev) =>
+                prev.map((item) =>
+                  item.conversation_id === conversationId
+                    ? { ...item, title: question.slice(0, 30), updated_at: new Date().toISOString() }
+                    : item
+                )
+              );
+            }
             continue;
           }
           if (activeSlotIdRef.current !== conversationId) {
@@ -926,7 +950,7 @@ function HomeExperience() {
     if (!question) return;
 
     const isNewConversation = !currentConversationId;
-    const convId = currentConversationId ?? "pending";
+    const convId = currentConversationId ?? crypto.randomUUID();
     let streamSlotId = convId;
 
     if (isNewConversation) {
@@ -941,10 +965,9 @@ function HomeExperience() {
     setDrawerOpen(false);
 
     const slot = ensureSlotForSend(convId);
-    // preserve current conversation title in the view
-    if (!isNewConversation) {
-      setCurrentConversationId(currentConversationId);
-    }
+    setCurrentConversationId(convId);
+    currentCidRef.current = convId;
+    router.replace(`/?c=${convId}`, { scroll: false });
     setSubmittedQuestion(question);
     submittedQuestionRef.current = question;
     setInput("");
@@ -953,10 +976,9 @@ function HomeExperience() {
     const controller = slot.abortController!;
 
     if (isNewConversation) {
-      const placeholderId = "pending";
       setConversations((prev) => [
         {
-          conversation_id: placeholderId,
+          conversation_id: convId,
           title: question.slice(0, 30),
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
@@ -964,8 +986,8 @@ function HomeExperience() {
         },
         ...prev,
       ]);
-      setPendingConvId(placeholderId);
-      slot.plannedConversationId = placeholderId;
+      setPendingConvId(convId);
+      slot.plannedConversationId = convId;
     }
 
     try {
@@ -973,9 +995,7 @@ function HomeExperience() {
       if (discussionLevel === "off") {
         body.deep_think = deepThink;
       }
-      if (!isNewConversation && currentConversationId) {
-        body.conversation_id = currentConversationId;
-      }
+      body.conversation_id = convId;
 
       const response = await fetch(`${API_BASE}/api/conversations/stream`, {
         method: "POST",
@@ -996,26 +1016,19 @@ function HomeExperience() {
       function streamEventHandler(message: StreamEvent) {
         if (message.event === "conversation_start") {
           const startedId = String(message.data.conversation_id ?? "");
-          if (isNewConversation && startedId && startedId !== "pending") {
-            const pendingSlot = slotMapRef.current.get("pending");
-            if (pendingSlot) {
-              slotMapRef.current.delete("pending");
-              slotMapRef.current.set(startedId, pendingSlot);
-              activeSlotIdRef.current = startedId;
-              setActiveSlotId(startedId);
-              streamSlotId = startedId;
+          if (startedId && startedId !== streamSlotId) {
+            const activeSlot = slotMapRef.current.get(streamSlotId);
+            if (activeSlot) {
+              slotMapRef.current.delete(streamSlotId);
+              slotMapRef.current.set(startedId, activeSlot);
             }
+            streamSlotId = startedId;
+            activeSlotIdRef.current = startedId;
+            setActiveSlotId(startedId);
             setPendingConvId(startedId);
             setCurrentConversationId(startedId);
             currentCidRef.current = startedId;
             router.replace(`/?c=${startedId}`, { scroll: false });
-            setConversations((prev) =>
-              prev.map((item) =>
-                item.conversation_id === "pending"
-                  ? { ...item, conversation_id: startedId }
-                  : item
-              )
-            );
           }
         }
         if (activeSlotIdRef.current !== streamSlotId) {
