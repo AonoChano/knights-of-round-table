@@ -157,6 +157,7 @@ type StreamSlot = {
   conversation: ConversationResponse | null;
 };
 
+const TRANSIENT_TIMELINE_IDS = new Set(["thinking-active", "thinking-done", "talking-active"]);
 const DISCUSSION_LEVEL_KEY = "kort-discussion-level";
 const DEEP_THINK_KEY = "kort-deep-think";
 const DEFAULT_DISCUSSION_LEVEL: DiscussionLevel = "auto";
@@ -199,6 +200,32 @@ function createEmptySlot(): StreamSlot {
     paused: false,
     conversation: null,
   };
+}
+
+function withoutTransientTimelineItems(items: TimelineItem[]): TimelineItem[] {
+  return items.filter((item) => !TRANSIENT_TIMELINE_IDS.has(item.id));
+}
+
+function upsertSummaryStart(items: TimelineItem[], id: string): TimelineItem[] {
+  const filtered = withoutTransientTimelineItems(items);
+  if (filtered.some((item) => item.id === id)) {
+    return filtered.map((item) =>
+      item.id === id ? { ...item, title: item.title || "Thinking", status: "streaming" as const } : item
+    );
+  }
+  return [...filtered, { id, title: "Thinking", body: "", raw: "", status: "streaming" as const }];
+}
+
+function dedupeTimelineItems(items: TimelineItem[]): TimelineItem[] {
+  const seen = new Set<string>();
+  const deduped: TimelineItem[] = [];
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    if (seen.has(item.id)) continue;
+    seen.add(item.id);
+    deduped.unshift(item);
+  }
+  return deduped;
 }
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
@@ -779,13 +806,32 @@ function HomeExperience() {
   async function resumeConversationStream(conversationId: string): Promise<boolean> {
     clearSentenceState();
     const slot = ensureSlotForSend(conversationId);
+    const resumePlaceholder = locale === "zh-CN" ? "正在恢复这个对话..." : "Restoring this conversation...";
+    const resumeTitle = locale === "zh-CN" ? "正在继续对话..." : "Resuming conversation...";
+    const now = new Date().toISOString();
+    slot.submittedQuestion = resumePlaceholder;
+    slot.plannedConversationId = conversationId;
     setCurrentConversationId(conversationId);
     currentCidRef.current = conversationId;
-    setSubmittedQuestion(null);
+    setSubmittedQuestion(resumePlaceholder);
     setFinalBody("");
     setTimeline([]);
     setThinkingComplete(false);
     setLoading(true);
+    setPendingConvId(conversationId);
+    setConversations((prev) => {
+      if (prev.some((item) => item.conversation_id === conversationId)) return prev;
+      return [
+        {
+          conversation_id: conversationId,
+          title: resumeTitle,
+          created_at: now,
+          updated_at: now,
+          expert_count: 0,
+        },
+        ...prev,
+      ];
+    });
 
     try {
       const response = await fetch(`${API_BASE}/api/conversations/${conversationId}/stream`);
@@ -794,21 +840,6 @@ function HomeExperience() {
         setLoading(false);
         return false;
       }
-
-      setConversations((prev) => {
-        if (prev.some((item) => item.conversation_id === conversationId)) return prev;
-        const now = new Date().toISOString();
-        return [
-          {
-            conversation_id: conversationId,
-            title: "正在继续对话...",
-            created_at: now,
-            updated_at: now,
-            expert_count: 0,
-          },
-          ...prev,
-        ];
-      });
 
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
@@ -824,7 +855,8 @@ function HomeExperience() {
         for (const event of parsed.events) {
           if (event.event === "conversation_start") {
             const question = String(event.data.question ?? "");
-            setSubmittedQuestion(question || null);
+            slot.submittedQuestion = question || resumePlaceholder;
+            setSubmittedQuestion(question || resumePlaceholder);
             submittedQuestionRef.current = question || null;
             if (question) {
               setConversations((prev) =>
@@ -1095,27 +1127,20 @@ function HomeExperience() {
   function applyEventToSlot(slot: StreamSlot, message: StreamEvent) {
     if (message.event === "talking_active") {
       slot.talkingActive = true;
-      slot.timeline = slot.timeline.filter(
-        (item) => item.id !== "thinking-active" && item.id !== "thinking-done" && item.id !== "talking-active"
-      );
+      slot.timeline = withoutTransientTimelineItems(slot.timeline);
       slot.timeline = [...slot.timeline, { id: "talking-active", title: t(locale).thinking.talking, body: "", raw: "", status: "talking" }];
       return;
     }
     if (message.event === "thinking_active") {
       slot.talkingActive = false;
       const { label: initialLabel } = nextThinkingLabel(locale, "");
-      slot.timeline = slot.timeline.filter(
-        (item) => item.id !== "thinking-active" && item.id !== "thinking-done" && item.id !== "talking-active"
-      );
+      slot.timeline = withoutTransientTimelineItems(slot.timeline);
       slot.timeline = [...slot.timeline, { id: "thinking-active", title: initialLabel, body: "", raw: "", status: "active" }];
       return;
     }
     if (message.event === "summary_start") {
       const id = String(message.data.id ?? crypto.randomUUID());
-      slot.timeline = [
-        ...slot.timeline.filter((item) => item.id !== "thinking-active" && item.id !== "thinking-done" && item.id !== "talking-active"),
-        { id, title: "Thinking", body: "", raw: "", status: "streaming" as const },
-      ];
+      slot.timeline = upsertSummaryStart(slot.timeline, id);
       return;
     }
     if (message.event === "summary_title") {
@@ -1183,9 +1208,7 @@ function HomeExperience() {
         brailleTimerRef.current = null;
       }
       setTimeline((current) => {
-        const filtered = current.filter(
-          (item) => item.id !== "thinking-active" && item.id !== "thinking-done" && item.id !== "talking-active"
-        );
+        const filtered = withoutTransientTimelineItems(current);
         return [...filtered, { id: "talking-active", title: t(locale).thinking.talking, body: "", raw: "", status: "talking" }];
       });
       return;
@@ -1207,9 +1230,7 @@ function HomeExperience() {
       lastThinkingActiveTimeRef.current = now;
       const displayedLabel = lastThinkingLabelRef.current;
       setTimeline((current) => {
-        const filtered = current.filter(
-          (item) => item.id !== "thinking-active" && item.id !== "thinking-done" && item.id !== "talking-active"
-        );
+        const filtered = withoutTransientTimelineItems(current);
         return [...filtered, { id: "thinking-active", title: BRAILLE_SPINNER[0] + " " + displayedLabel, body: "", raw: "", status: "active" }];
       });
       brailleFrameRef.current = 0;
@@ -1257,14 +1278,11 @@ function HomeExperience() {
         sentenceTimerRef.current = null;
       }
       activeSummaryRef.current = id;
-      rawBodyBySummary.current[id] = "";
+      rawBodyBySummary.current[id] = rawBodyBySummary.current[id] ?? "";
       sentenceQueueRef.current = [];
       timerElapsedRef.current = false;
 
-      setTimeline((current) => [
-        ...current.filter((item) => item.id !== "thinking-active" && item.id !== "thinking-done" && item.id !== "talking-active"),
-        { id, title: "Thinking", body: "", raw: "", status: "streaming" },
-      ]);
+      setTimeline((current) => upsertSummaryStart(current, id));
       return;
     }
 
@@ -1343,7 +1361,7 @@ function HomeExperience() {
       }
       const doneLabel = t(locale).thinking.done;
       setTimeline((current) => [
-        ...current.filter((item) => item.id !== "thinking-active" && item.id !== "thinking-done" && item.id !== "talking-active"),
+        ...withoutTransientTimelineItems(current),
         { id: "thinking-done", title: doneLabel, body: "", raw: "", status: "done" },
       ]);
       return;
@@ -1456,7 +1474,7 @@ function HomeExperience() {
   }
 
   const visibleTimeline = useMemo(() => {
-    return timeline;
+    return dedupeTimelineItems(timeline);
   }, [timeline]);
 
   const currentReasoning = [...visibleTimeline].reverse().find(
@@ -2113,6 +2131,7 @@ function ThinkingDrawer({
   onClose: () => void;
 }) {
   const tr = t(locale);
+  const visibleTimeline = dedupeTimelineItems(timeline);
   return (
     <aside className="thinking-drawer">
       <div className="mb-6 flex items-center justify-between">
@@ -2130,7 +2149,7 @@ function ThinkingDrawer({
       </div>
 
       <div className="reasoning-timeline">
-        {timeline.map((item, index) => (
+        {visibleTimeline.map((item, index) => (
           <div key={item.id} className="reasoning-node reasoning-node-appear">
             <div
               className={cn(
@@ -2140,7 +2159,7 @@ function ThinkingDrawer({
                 item.status === "done" && "reasoning-dot-done"
               )}
             />
-            {index < timeline.length - 1 ? <div className="reasoning-line" /> : null}
+            {index < visibleTimeline.length - 1 ? <div className="reasoning-line" /> : null}
             <div className="reasoning-content">
               <div
                 className={cn(
