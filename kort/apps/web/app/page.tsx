@@ -809,11 +809,11 @@ function HomeExperience() {
     const resumePlaceholder = locale === "zh-CN" ? "正在恢复这个对话..." : "Restoring this conversation...";
     const resumeTitle = locale === "zh-CN" ? "正在继续对话..." : "Resuming conversation...";
     const now = new Date().toISOString();
-    slot.submittedQuestion = resumePlaceholder;
+    slot.submittedQuestion = null;
     slot.plannedConversationId = conversationId;
     setCurrentConversationId(conversationId);
     currentCidRef.current = conversationId;
-    setSubmittedQuestion(resumePlaceholder);
+    setSubmittedQuestion(null);
     setFinalBody("");
     setTimeline([]);
     setThinkingComplete(false);
@@ -855,8 +855,8 @@ function HomeExperience() {
         for (const event of parsed.events) {
           if (event.event === "conversation_start") {
             const question = String(event.data.question ?? "");
-            slot.submittedQuestion = question || resumePlaceholder;
-            setSubmittedQuestion(question || resumePlaceholder);
+            slot.submittedQuestion = question || null;
+            setSubmittedQuestion(question || null);
             submittedQuestionRef.current = question || null;
             if (question) {
               setConversations((prev) =>
@@ -1217,7 +1217,7 @@ function HomeExperience() {
     if (message.event === "thinking_active") {
       setTalkingActive(false);
       const now = Date.now();
-      const STABLE_LABEL_WINDOW = 10000;
+      const STABLE_LABEL_WINDOW = 15000;
       const reuseLabel = lastThinkingLabelRef.current && now - lastThinkingActiveTimeRef.current < STABLE_LABEL_WINDOW;
       if (!reuseLabel) {
         if (thinkingLabelRef.current) {
@@ -1250,7 +1250,7 @@ function HomeExperience() {
       }, 120);
       if (!reuseLabel) {
         const scheduleLabelSwitch = () => {
-          const delay = 10000 + Math.random() * 5000;
+          const delay = 7000 + Math.random() * 8000;
           thinkingLabelRef.current = setTimeout(() => {
             const { label: nextLabel } = nextThinkingLabel(locale, lastThinkingLabelRef.current);
             lastThinkingLabelRef.current = nextLabel;
