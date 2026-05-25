@@ -1483,7 +1483,7 @@ function HomeExperience() {
   const statusItem = visibleTimeline.find(
     (item) => item.status === "active" || item.status === "talking" || item.status === "done"
   );
-  const activeTitle = statusItem?.title ?? currentReasoning?.title ?? (thinkingComplete ? t(locale).thinking.complete : t(locale).thinking.active);
+  const activeTitle = statusItem?.title ?? currentReasoning?.title ?? (thinkingComplete ? `${t(locale).thinking.complete}（${locale === "zh-CN" ? "总用时：" : ""}${formatDuration(elapsed)}）` : t(locale).thinking.active);
   const hasRun = Boolean(submittedQuestion || conversation || loading || messagePairs.length > 0);
 
   return (
