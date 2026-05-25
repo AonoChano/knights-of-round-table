@@ -221,10 +221,12 @@ button {
   position: relative;
   display: flex;
   align-items: center;
+  min-height: 32px;
 }
 
 .sidebar-link-row .sidebar-link {
   flex: 1;
+  min-width: 0;
 }
 
 .sidebar-link-actions {
@@ -255,7 +257,52 @@ button {
   color: #171717;
 }
 
-.sidebar-link-action-delete:hover {
+.sidebar-status-indicator {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  margin-left: 2px;
+}
+
+.sidebar-unread-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: #c8a46a;
+  box-shadow: 0 0 0 3px rgba(200, 164, 106, 0.16);
+}
+
+.conversation-menu {
+  position: absolute;
+  right: 4px;
+  top: calc(100% + 6px);
+  z-index: 20;
+  min-width: 156px;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.14);
+  padding: 6px;
+}
+
+.conversation-menu-item {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 10px;
+  border-radius: 8px;
+  color: #171717;
+  font-size: 13px;
+  padding: 9px 10px;
+  text-align: left;
+}
+
+.conversation-menu-item:hover {
+  background: rgba(0, 0, 0, 0.04);
+}
+
+.conversation-menu-danger {
   color: #d92d20;
 }
 
@@ -508,10 +555,12 @@ button {
   margin-top: 10px;
   color: #6a6a67;
   font-size: 13px;
+  font-weight: 400;
   line-height: 1.78;
 }
 
 .reasoning-body p {
+  font-weight: 400;
   margin: 0;
 }
 
@@ -635,8 +684,11 @@ button {
   height: 18px;
 }
 
-.send-button-spinner {
-  animation: sendSpin 1s linear infinite;
+.send-button-stop-icon {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  background: currentColor;
 }
 
 .send-button-pause-flash {
@@ -904,7 +956,8 @@ button {
 }
 
 .discussion-level-option {
-  display: flex;
+  display: grid;
+  grid-template-columns: 34px 1fr 16px;
   width: 100%;
   align-items: center;
   gap: 8px;
@@ -920,14 +973,17 @@ button {
   background: rgba(0, 0, 0, 0.04);
 }
 
+.discussion-level-label {
+  font-weight: 500;
+}
+
 .discussion-level-tag {
-  margin-left: 12px;
   color: #6a6a67;
   font-size: 13px;
 }
 
 .discussion-level-check {
-  margin-left: auto;
+  justify-self: end;
   color: #171717;
   font-weight: 600;
 }
@@ -997,10 +1053,10 @@ button {
 
 .sidebar-spinner {
   display: inline-block;
-  width: 16px;
-  height: 16px;
+  width: 14px;
+  height: 14px;
   border: 2px solid rgba(0, 0, 0, 0.1);
-  border-top-color: #171717;
+  border-top-color: #2f7dd3;
   border-radius: 50%;
   animation: sidebar-spin 0.6s linear infinite;
 }

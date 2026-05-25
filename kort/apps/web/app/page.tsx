@@ -157,6 +157,30 @@ type StreamSlot = {
   conversation: ConversationResponse | null;
 };
 
+const DISCUSSION_LEVEL_KEY = "kort-discussion-level";
+const DEEP_THINK_KEY = "kort-deep-think";
+
+function loadDiscussionLevel(): DiscussionLevel {
+  if (typeof window === "undefined") return "auto";
+  const stored = localStorage.getItem(DISCUSSION_LEVEL_KEY);
+  return stored === "off" || stored === "auto" || stored === "low" || stored === "medium" || stored === "high"
+    ? stored
+    : "auto";
+}
+
+function saveDiscussionLevel(level: DiscussionLevel): void {
+  localStorage.setItem(DISCUSSION_LEVEL_KEY, level);
+}
+
+function loadDeepThink(): boolean {
+  if (typeof window === "undefined") return false;
+  return localStorage.getItem(DEEP_THINK_KEY) === "true";
+}
+
+function saveDeepThink(enabled: boolean): void {
+  localStorage.setItem(DEEP_THINK_KEY, String(enabled));
+}
+
 function createEmptySlot(): StreamSlot {
   return {
     abortController: null,
@@ -166,10 +190,10 @@ function createEmptySlot(): StreamSlot {
     finalBody: "",
     timeline: [],
     talkingActive: false,
-    discussionLevel: "auto",
+    discussionLevel: loadDiscussionLevel(),
     submittedQuestion: null,
     plannedConversationId: null,
-    deepThink: false,
+    deepThink: loadDeepThink(),
     paused: false,
     conversation: null,
   };
@@ -311,8 +335,8 @@ function HomeExperience() {
   const [finalBody, setFinalBody] = useState("");
   const [timeline, setTimeline] = useState<TimelineItem[]>([]);
   const [talkingActive, setTalkingActive] = useState(false);
-  const [discussionLevel, setDiscussionLevel] = useState<DiscussionLevel>("auto");
-  const [deepThink, setDeepThink] = useState(false);
+  const [discussionLevel, setDiscussionLevel] = useState<DiscussionLevel>(loadDiscussionLevel);
+  const [deepThink, setDeepThink] = useState(loadDeepThink);
   const [conversations, setConversations] = useState<ConversationListItem[]>([]);
   const [messagePairs, setMessagePairs] = useState<MessagePair[]>([]);
   const [currentConversationId, setCurrentConversationId] = useState<string | null>(null);
@@ -324,6 +348,7 @@ function HomeExperience() {
   const [locale, setLocale] = useState<Locale>(loadLocale);
   const [paused, setPaused] = useState(false);
   const [pauseFlash, setPauseFlash] = useState(false);
+  const [unreadConversationIds, setUnreadConversationIds] = useState<Set<string>>(new Set());
 
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -566,6 +591,14 @@ function HomeExperience() {
     return () => window.clearInterval(timer);
   }, [loading, thinkingComplete]);
 
+  useEffect(() => {
+    saveDiscussionLevel(discussionLevel);
+  }, [discussionLevel]);
+
+  useEffect(() => {
+    saveDeepThink(deepThink);
+  }, [deepThink]);
+
   async function loadProviders() {
     try {
       const response = await fetch(`${API_BASE}/api/providers`);
@@ -665,6 +698,12 @@ function HomeExperience() {
   }
 
   async function loadConversation(conversationId: string) {
+    setUnreadConversationIds((current) => {
+      if (!current.has(conversationId)) return current;
+      const next = new Set(current);
+      next.delete(conversationId);
+      return next;
+    });
     saveCurrentSlot();
     const existingSlot = slotMapRef.current.get(conversationId);
     const hasActiveStream = existingSlot && existingSlot.loading;
@@ -764,7 +803,7 @@ function HomeExperience() {
 
     if (slot.abortController && !slot.abortController.signal.aborted) {
       try {
-        slot.abortController.abort("User paused");
+        slot.abortController.abort();
       } catch {
         // abort may throw in rare edge cases — ignore
       }
@@ -804,7 +843,7 @@ function HomeExperience() {
 
     const isNewConversation = !currentConversationId;
     const convId = currentConversationId ?? "pending";
-    const streamSlotId = convId;
+    let streamSlotId = convId;
 
     if (isNewConversation) {
       fullReset();
@@ -871,16 +910,48 @@ function HomeExperience() {
       let done = false;
 
       function streamEventHandler(message: StreamEvent) {
+        if (message.event === "conversation_start") {
+          const startedId = String(message.data.conversation_id ?? "");
+          if (isNewConversation && startedId && startedId !== "pending") {
+            const pendingSlot = slotMapRef.current.get("pending");
+            if (pendingSlot) {
+              slotMapRef.current.delete("pending");
+              slotMapRef.current.set(startedId, pendingSlot);
+              activeSlotIdRef.current = startedId;
+              setActiveSlotId(startedId);
+              streamSlotId = startedId;
+            }
+            setPendingConvId(startedId);
+            setCurrentConversationId(startedId);
+            currentCidRef.current = startedId;
+            router.replace(`/?c=${startedId}`, { scroll: false });
+            setConversations((prev) =>
+              prev.map((item) =>
+                item.conversation_id === "pending"
+                  ? { ...item, conversation_id: startedId }
+                  : item
+              )
+            );
+          }
+        }
         if (activeSlotIdRef.current !== streamSlotId) {
           const bgSlot = slotMapRef.current.get(streamSlotId);
-          if (bgSlot && bgSlot.loading) {
+          if (bgSlot) {
             applyEventToSlot(bgSlot, message);
+            if (message.event === "conversation_start") return;
             if (
               message.event === "thinking_complete" ||
               message.event === "conversation_complete" ||
               message.event === "error"
             ) {
               setSlotVersion((v) => v + 1);
+            }
+            if (message.event === "conversation_complete") {
+              setUnreadConversationIds((current) => {
+                const next = new Set(current);
+                next.add(streamSlotId);
+                return next;
+              });
             }
           }
           return;
@@ -909,8 +980,10 @@ function HomeExperience() {
     } catch (e: unknown) {
       if (e instanceof DOMException && e.name === "AbortError") {
         // stream aborted by user — pauseConversation handles UI feedback
+      } else if (e instanceof Error && /aborted|abort|paused/i.test(e.message)) {
+        // fetch/read can surface browser-specific abort errors outside DOMException.
       } else {
-        throw e;
+        console.error(e);
       }
     } finally {
       slot.loading = false;
@@ -985,6 +1058,7 @@ function HomeExperience() {
       slot.finalBody = String(message.data.final_body ?? slot.finalBody);
       slot.loading = false;
       slot.thinkingComplete = true;
+      slot.conversation = message.data as unknown as ConversationResponse;
       return;
     }
     if (message.event === "conversation_title") {
@@ -1117,7 +1191,7 @@ function HomeExperience() {
       setTimeline((current) =>
         current.map((item) => {
           if (item.id !== id) return item;
-          const next = { ...item, raw: item.raw + delta };
+          const next = { ...item, raw: item.raw + delta, body: markdownBody(item.raw + delta) };
           if (earlyTitle && next.title === "Thinking") {
             next.title = earlyTitle;
           }
@@ -1302,7 +1376,8 @@ function HomeExperience() {
       <Sidebar
         agents={agents}
         conversations={conversations}
-        activeConversationId={conversation?.conversation_id ?? null}
+        activeConversationId={currentConversationId}
+        unreadConversationIds={unreadConversationIds}
         slotMapRef={slotMapRef}
         slotVersion={slotVersion}
         onNewConversation={fullReset}
@@ -1448,6 +1523,7 @@ function Sidebar({
   agents,
   conversations,
   activeConversationId,
+  unreadConversationIds,
   slotMapRef,
   slotVersion,
   onNewConversation,
@@ -1459,6 +1535,7 @@ function Sidebar({
   agents: AgentView[];
   conversations: ConversationListItem[];
   activeConversationId: string | null;
+  unreadConversationIds: Set<string>;
   slotMapRef: React.MutableRefObject<Map<string, StreamSlot>>;
   slotVersion: number;
   onNewConversation: () => void;
@@ -1470,6 +1547,7 @@ function Sidebar({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [menuConversationId, setMenuConversationId] = useState<string | null>(null);
   const editInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -1478,6 +1556,13 @@ function Sidebar({
       editInputRef.current.select();
     }
   }, [editingId]);
+
+  useEffect(() => {
+    if (!menuConversationId) return;
+    const handlePointerDown = () => setMenuConversationId(null);
+    window.addEventListener("pointerdown", handlePointerDown);
+    return () => window.removeEventListener("pointerdown", handlePointerDown);
+  }, [menuConversationId]);
 
   const grouped = useMemo(() => {
     const now = new Date();
@@ -1536,6 +1621,10 @@ function Sidebar({
     setConfirmDeleteId(item.conversation_id);
   }
 
+  function closeMenu() {
+    setMenuConversationId(null);
+  }
+
   function confirmDelete() {
     if (confirmDeleteId) {
       onDeleteConversation(confirmDeleteId);
@@ -1558,7 +1647,15 @@ function Sidebar({
               <div className="px-2 py-1 text-xs text-muted">{group.label}</div>
               {group.items.map((item) => (
                 <div key={item.conversation_id} className="sidebar-link-row">
-                  {loadingConvIds.has(item.conversation_id) ? <span className="sidebar-spinner" /> : null}
+                  {loadingConvIds.has(item.conversation_id) && activeConversationId !== item.conversation_id ? (
+                    <span className="sidebar-status-indicator">
+                      <span className="sidebar-spinner" />
+                    </span>
+                  ) : unreadConversationIds.has(item.conversation_id) ? (
+                    <span className="sidebar-status-indicator">
+                      <span className="sidebar-unread-dot" />
+                    </span>
+                  ) : null}
                   {editingId === item.conversation_id ? (
                     <input
                       ref={editInputRef}
@@ -1589,19 +1686,31 @@ function Sidebar({
                   <span className="sidebar-link-actions">
                     <button
                       className="sidebar-link-action-btn"
-                      title="重命名"
-                      onClick={(e) => startRename(item, e)}
+                      title="更多"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setMenuConversationId((current) => current === item.conversation_id ? null : item.conversation_id);
+                      }}
                     >
-                      ✎
-                    </button>
-                    <button
-                      className="sidebar-link-action-btn sidebar-link-action-delete"
-                      title="删除"
-                      onClick={(e) => handleDeleteClick(item, e)}
-                    >
-                      ✕
+                      ···
                     </button>
                   </span>
+                  {menuConversationId === item.conversation_id ? (
+                    <div
+                      className="conversation-menu"
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <button className="conversation-menu-item" onClick={(e) => { startRename(item, e); closeMenu(); }}>
+                        <span>✎</span>
+                        <span>重命名</span>
+                      </button>
+                      <button className="conversation-menu-item conversation-menu-danger" onClick={(e) => { handleDeleteClick(item, e); closeMenu(); }}>
+                        <span>⌫</span>
+                        <span>删除</span>
+                      </button>
+                    </div>
+                  ) : null}
                 </div>
               ))}
             </div>
@@ -1831,7 +1940,7 @@ function Composer({
                       setDropdownOpen(false);
                     }}
                   >
-                    <span>{level.label}</span>
+                    <span className="discussion-level-label">{level.label}</span>
                     <span className="discussion-level-tag">{level.id !== "off" ? level.tag : ""}</span>
                     {discussionLevel === level.id ? (
                       <span className="discussion-level-check">✓</span>
@@ -1876,9 +1985,7 @@ function Composer({
             {paused ? (
               <span className="pause-status-text">{t(locale).ui.paused}</span>
             ) : loading ? (
-              <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor">
-                <rect x="1.5" y="1.5" width="9" height="9" rx="2" />
-              </svg>
+              <span className="send-button-stop-icon" />
             ) : (
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
                 strokeLinecap="round" strokeLinejoin="round">
