@@ -40,6 +40,7 @@ build/
 .trae/
 .Agents/
 AGENTS.md
+HARNESS.md
 rules.md
 *.md.skip
 *.prompt

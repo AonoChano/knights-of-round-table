@@ -1,18 +1,18 @@
 export type Locale = "zh-CN" | "en";
 
 const THINKING_L1: Record<Locale, string[]> = {
-  "zh-CN": ["正在执行", "正在处理", "正在编译", "正在登记", "正在校验"],
-  en: ["Executing", "Processing", "Compiling", "Registering", "Validating"],
+  "zh-CN": ["梳理问题", "展开线索", "校准语境", "寻找依据", "提炼重点"],
+  en: ["Framing the question", "Tracing the clues", "Calibrating context", "Looking for evidence", "Extracting the point"],
 };
 
 const THINKING_L2: Record<Locale, string[]> = {
-  "zh-CN": ["正在审议", "正在协商", "正在汇整", "正在交叉核验", "正在协调"],
-  en: ["Deliberating", "Reconciling", "Collating", "Cross-checking", "Negotiating"],
+  "zh-CN": ["权衡解释", "核对假设", "连接上下文", "整理判断", "收束路径"],
+  en: ["Weighing interpretations", "Checking assumptions", "Linking context", "Organizing judgment", "Narrowing the path"],
 };
 
 const THINKING_L3: Record<Locale, string[]> = {
-  "zh-CN": ["正在汇聚", "正在稳定", "正在定稿", "正在落定", "正在封存"],
-  en: ["Consolidating", "Stabilizing", "Finalizing", "Settling", "Sealing"],
+  "zh-CN": ["组织答案", "压缩结论", "确认边界", "补齐细节", "准备回应"],
+  en: ["Structuring the answer", "Compressing the conclusion", "Checking boundaries", "Filling details", "Preparing the response"],
 };
 
 function pickRandomLabel(labels: string[], exclude: string): string {
@@ -41,8 +41,6 @@ export function initialThinkingLabel(locale: Locale): string {
   if (rotate === 1) return THINKING_L2[locale][0];
   return THINKING_L3[locale][0];
 }
-
-export const BRAILLE_SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 export const t = (locale: Locale) =>
 ({

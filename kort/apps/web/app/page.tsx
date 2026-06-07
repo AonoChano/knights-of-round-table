@@ -5,11 +5,42 @@ import "katex/dist/katex.min.css";
 import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import {
+  Bot,
+  Brain,
+  Check,
+  ChevronDown,
+  ChevronRight,
+  CircleStop,
+  Cloud,
+  Copy,
+  Cpu,
+  Database,
+  FlaskConical,
+  KeyRound,
+  MoreHorizontal,
+  Pencil,
+  Save,
+  SendHorizontal,
+  Search,
+  Server,
+  Settings,
+  Share2,
+  SlidersHorizontal,
+  Sparkles,
+  SquarePen,
+  Trash2,
+  UserPlus,
+  UsersRound,
+  Wrench,
+  X,
+} from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
-import { loadLocale, saveLocale, localeStatusText, t, nextThinkingLabel, initialThinkingLabel, BRAILLE_SPINNER } from "./locale";
+import { loadLocale, saveLocale, localeStatusText, t, nextThinkingLabel } from "./locale";
 import type { Locale } from "./locale";
 
 type TimerHandle = ReturnType<typeof setTimeout>;
@@ -106,6 +137,14 @@ type ProviderSecretStatus = {
 };
 
 type SettingsTab = "general" | "providers" | "experts" | "skills" | "data";
+
+const settingsTabIcons: Record<SettingsTab, LucideIcon> = {
+  general: SlidersHorizontal,
+  providers: KeyRound,
+  experts: UsersRound,
+  skills: Wrench,
+  data: Database,
+};
 type DiscussionLevel = "off" | "auto" | "low" | "medium" | "high";
 
 const DISCUSSION_LEVELS: Array<{
@@ -118,6 +157,13 @@ const DISCUSSION_LEVELS: Array<{
   { id: "low", label: "低", tag: "围炉夜话" },
   { id: "medium", label: "中", tag: "覆卮对弈" },
   { id: "high", label: "高", tag: "穷尽棋路" },
+];
+
+const AGENT_ROLE_OPTIONS = [
+  { id: "expert", label: "Expert" },
+  { id: "critic", label: "Critic" },
+  { id: "summarizer", label: "Summarizer" },
+  { id: "synthesizer", label: "Synthesizer" },
 ];
 
 type ProviderTextField =
@@ -157,7 +203,7 @@ type StreamSlot = {
   conversation: ConversationResponse | null;
 };
 
-const TRANSIENT_TIMELINE_IDS = new Set(["thinking-active", "thinking-done", "talking-active"]);
+const TRANSIENT_TIMELINE_IDS = new Set(["thinking-active", "talking-active"]);
 const DISCUSSION_LEVEL_KEY = "kort-discussion-level";
 const DEEP_THINK_KEY = "kort-deep-think";
 const DEFAULT_DISCUSSION_LEVEL: DiscussionLevel = "auto";
@@ -287,6 +333,30 @@ function formatDuration(totalSeconds: number) {
   return `${minutes} min ${seconds}s`;
 }
 
+function thinkingElapsedLabel(locale: Locale, elapsed: number, complete: boolean) {
+  const duration = formatDuration(elapsed);
+  if (locale === "zh-CN") {
+    return complete ? `已思考 ${duration}` : `思考中 ${duration}`;
+  }
+  return complete ? `Thought for ${duration}` : `Thinking ${duration}`;
+}
+
+function appendThinkingDoneNode(items: TimelineItem[], locale: Locale, elapsedSeconds?: number): TimelineItem[] {
+  return [
+    ...items.filter((item) => item.id !== "thinking-done"),
+    {
+      id: "thinking-done",
+      title:
+        typeof elapsedSeconds === "number"
+          ? thinkingElapsedLabel(locale, elapsedSeconds, true)
+          : t(locale).thinking.done,
+      body: "",
+      raw: "",
+      status: "done" as const,
+    },
+  ];
+}
+
 function parseSseChunk(buffer: string): { events: StreamEvent[]; rest: string } {
   const events: StreamEvent[] = [];
   const normalized = buffer.replace(/\r\n/g, "\n");
@@ -385,8 +455,6 @@ function HomeExperience() {
   const thinkingLabelRef = useRef<TimerHandle | null>(null);
   const lastThinkingLabelRef = useRef("");
   const lastThinkingActiveTimeRef = useRef(0);
-  const brailleFrameRef = useRef(0);
-  const brailleTimerRef = useRef<TimerHandle | null>(null);
 
   const sentenceQueueRef = useRef<string[]>([]);
   const sentenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -486,10 +554,6 @@ function HomeExperience() {
     if (thinkingLabelRef.current) {
       clearTimeout(thinkingLabelRef.current);
       thinkingLabelRef.current = null;
-    }
-    if (brailleTimerRef.current) {
-      clearInterval(brailleTimerRef.current);
-      brailleTimerRef.current = null;
     }
     sentenceQueueRef.current = [];
     activeSummaryRef.current = "";
@@ -783,13 +847,13 @@ function HomeExperience() {
       }
       if (payload.rounds?.length) {
         const pairs: MessagePair[] = payload.rounds.map((round) => {
-          const timelineItems: TimelineItem[] = (round.stage_summaries ?? []).map((s) => ({
+          const timelineItems: TimelineItem[] = appendThinkingDoneNode((round.stage_summaries ?? []).map((s) => ({
             id: s.id,
             title: markdownTitle(s.details, s.title),
             body: markdownBody(s.details),
             raw: s.details,
             status: "complete" as const,
-          }));
+          })), locale);
           return {
             question: round.question,
             timeline: timelineItems,
@@ -955,7 +1019,7 @@ function HomeExperience() {
     setTimeline((current) =>
       current.map((item) =>
         item.id === "thinking-active"
-          ? { id: "thinking-done", title: t(locale).ui.cancelled, body: "", raw: "", status: "complete" as const }
+          ? { id: "thinking-cancelled", title: t(locale).ui.cancelled, body: "", raw: "", status: "complete" as const }
           : item
       )
     );
@@ -1169,6 +1233,8 @@ function HomeExperience() {
     if (message.event === "thinking_complete") {
       slot.thinkingComplete = true;
       slot.loading = false;
+      slot.talkingActive = false;
+      slot.timeline = appendThinkingDoneNode(withoutTransientTimelineItems(slot.timeline), locale, slot.elapsed);
       return;
     }
     if (message.event === "final_delta") {
@@ -1181,6 +1247,7 @@ function HomeExperience() {
       slot.loading = false;
       slot.thinkingComplete = true;
       slot.conversation = message.data as unknown as ConversationResponse;
+      slot.timeline = appendThinkingDoneNode(withoutTransientTimelineItems(slot.timeline), locale, slot.elapsed);
       return;
     }
     if (message.event === "conversation_title") {
@@ -1202,10 +1269,6 @@ function HomeExperience() {
       if (thinkingLabelRef.current) {
         clearTimeout(thinkingLabelRef.current);
         thinkingLabelRef.current = null;
-      }
-      if (brailleTimerRef.current) {
-        clearInterval(brailleTimerRef.current);
-        brailleTimerRef.current = null;
       }
       setTimeline((current) => {
         const filtered = withoutTransientTimelineItems(current);
@@ -1231,26 +1294,11 @@ function HomeExperience() {
       const displayedLabel = lastThinkingLabelRef.current;
       setTimeline((current) => {
         const filtered = withoutTransientTimelineItems(current);
-        return [...filtered, { id: "thinking-active", title: BRAILLE_SPINNER[0] + " " + displayedLabel, body: "", raw: "", status: "active" }];
+        return [...filtered, { id: "thinking-active", title: displayedLabel, body: "", raw: "", status: "active" }];
       });
-      brailleFrameRef.current = 0;
-      if (brailleTimerRef.current) {
-        clearInterval(brailleTimerRef.current);
-      }
-      brailleTimerRef.current = setInterval(() => {
-        brailleFrameRef.current = (brailleFrameRef.current + 1) % BRAILLE_SPINNER.length;
-        setTimeline((current) =>
-          current.map((item) =>
-            item.id === "thinking-active" ? {
-              ...item,
-              title: BRAILLE_SPINNER[brailleFrameRef.current] + " " + item.title.replace(/^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]\s/, "")
-            } : item
-          )
-        );
-      }, 120);
       if (!reuseLabel) {
         const scheduleLabelSwitch = () => {
-          const delay = 7000 + Math.random() * 8000;
+          const delay = 22000 + Math.random() * 14000;
           thinkingLabelRef.current = setTimeout(() => {
             const { label: nextLabel } = nextThinkingLabel(locale, lastThinkingLabelRef.current);
             lastThinkingLabelRef.current = nextLabel;
@@ -1258,7 +1306,7 @@ function HomeExperience() {
               current.map((item) =>
                 item.id === "thinking-active" ? {
                   ...item,
-                  title: BRAILLE_SPINNER[brailleFrameRef.current] + " " + nextLabel
+                  title: nextLabel
                 } : item
               )
             );
@@ -1355,15 +1403,9 @@ function HomeExperience() {
         clearTimeout(thinkingLabelRef.current);
         thinkingLabelRef.current = null;
       }
-      if (brailleTimerRef.current) {
-        clearInterval(brailleTimerRef.current);
-        brailleTimerRef.current = null;
-      }
-      const doneLabel = t(locale).thinking.done;
-      setTimeline((current) => [
-        ...withoutTransientTimelineItems(current),
-        { id: "thinking-done", title: doneLabel, body: "", raw: "", status: "done" },
-      ]);
+      setTimeline((current) =>
+        appendThinkingDoneNode(withoutTransientTimelineItems(current), locale, elapsed)
+      );
       return;
     }
 
@@ -1383,13 +1425,13 @@ function HomeExperience() {
       setFinalBody("");
       if (question && conv.rounds.length > 0) {
         const lastRound = conv.rounds[conv.rounds.length - 1];
-        const timelineItems: TimelineItem[] = (lastRound.stage_summaries ?? []).map((s) => ({
+        const timelineItems: TimelineItem[] = appendThinkingDoneNode((lastRound.stage_summaries ?? []).map((s) => ({
           id: s.id,
           title: markdownTitle(s.details, s.title),
           body: markdownBody(s.details),
           raw: s.details,
           status: "complete" as const,
-        }));
+        })), locale, elapsed);
         setMessagePairs((prev) => [
           ...prev,
           {
@@ -1477,13 +1519,6 @@ function HomeExperience() {
     return dedupeTimelineItems(timeline);
   }, [timeline]);
 
-  const currentReasoning = [...visibleTimeline].reverse().find(
-    (item) => item.status === "streaming" || item.status === "complete"
-  );
-  const statusItem = visibleTimeline.find(
-    (item) => item.status === "active" || item.status === "talking" || item.status === "done"
-  );
-  const activeTitle = statusItem?.title ?? currentReasoning?.title ?? (thinkingComplete ? `${t(locale).thinking.complete}（${locale === "zh-CN" ? "总用时：" : ""}${formatDuration(elapsed)}）` : t(locale).thinking.active);
   const hasRun = Boolean(submittedQuestion || conversation || loading || messagePairs.length > 0);
 
   return (
@@ -1512,7 +1547,10 @@ function HomeExperience() {
             <small>ready</small>
           </button>
           <div className="flex items-center gap-2">
-            <button className="small-button">分享</button>
+            <button className="small-button small-button-icon">
+              <Share2 size={15} aria-hidden="true" />
+              <span>分享</span>
+            </button>
           </div>
         </header>
 
@@ -1558,12 +1596,6 @@ function HomeExperience() {
           />
         </div>
 
-        {(loading || conversation || submittedQuestion) && !drawerOpen ? (
-          <button className="thinking-trigger" onClick={() => setDrawerOpen((prev) => !prev)} aria-label="Toggle thinking timeline">
-            <span className="breathing-dot h-1.5 w-1.5 rounded-full bg-ink/55" />
-            <span>{activeTitle}</span>
-          </button>
-        ) : null}
       </section>
 
       {drawerOpen ? (
@@ -1753,8 +1785,9 @@ function Sidebar({
         <div className="flex items-center justify-between px-1">
           <div className="logo-mark">K</div>
         </div>
-        <button className="sidebar-primary" onClick={onNewConversation}>
-          新建对话
+        <button className="sidebar-primary sidebar-primary-action" onClick={onNewConversation}>
+          <SquarePen size={16} aria-hidden="true" />
+          <span>新建对话</span>
         </button>
         <div className="space-y-1">
           {grouped.map((group) => (
@@ -1807,7 +1840,7 @@ function Sidebar({
                         setMenuConversationId((current) => current === item.conversation_id ? null : item.conversation_id);
                       }}
                     >
-                      ···
+                      <MoreHorizontal size={16} aria-hidden="true" />
                     </button>
                   </span>
                   {menuConversationId === item.conversation_id ? (
@@ -1817,11 +1850,11 @@ function Sidebar({
                       onClick={(e) => e.stopPropagation()}
                     >
                       <button className="conversation-menu-item" onClick={(e) => { startRename(item, e); closeMenu(); }}>
-                        <span>✎</span>
+                        <Pencil size={14} aria-hidden="true" />
                         <span>重命名</span>
                       </button>
                       <button className="conversation-menu-item conversation-menu-danger" onClick={(e) => { handleDeleteClick(item, e); closeMenu(); }}>
-                        <span>⌫</span>
+                        <Trash2 size={14} aria-hidden="true" />
                         <span>删除</span>
                       </button>
                     </div>
@@ -1839,7 +1872,10 @@ function Sidebar({
       <div className="space-y-2">
         <button className="sidebar-primary group" onClick={() => openSettings("experts")}>
           <div className="flex items-center justify-between">
-            <span>Discussion ready</span>
+            <span className="inline-flex items-center gap-2">
+              <UsersRound size={15} aria-hidden="true" />
+              Discussion ready
+            </span>
             <span className="breathing-dot h-1.5 w-1.5 rounded-full bg-[#2f7d32]" />
           </div>
           <div className="mt-2 hidden text-xs leading-5 text-muted group-hover:block">
@@ -1848,10 +1884,11 @@ function Sidebar({
         </button>
         <button className="sidebar-user" onClick={() => openSettings("general")}>
           <div className="avatar-button">A</div>
-          <div className="text-left">
+          <div className="min-w-0 flex-1 text-left">
             <div className="text-sm font-medium">Alex</div>
             <div className="text-xs text-muted">Settings</div>
           </div>
+          <Settings size={15} aria-hidden="true" />
         </button>
       </div>
 
@@ -1907,16 +1944,20 @@ function ConversationView({
         <div className="assistant-row">
           <div className="assistant-content">
             {hasTimeline ? (
-              <button className="thinking-block" onClick={() => onViewPairThinking(pair)}>
+              <button className="thinking-block" onClick={() => onViewPairThinking(pair)} type="button">
                 <span className="thinking-title">
                   {pair.timeline[pair.timeline.length - 1]?.title ?? tr.thinking.complete}
                 </span>
+                <ChevronRight className="thinking-chevron" size={14} aria-hidden="true" />
               </button>
             ) : null}
             {cleanBody ? (
-              <div className="answer-body markdown-body mt-2">
-                <Markdown content={cleanBody} />
-              </div>
+              <>
+                <div className="answer-body markdown-body mt-2">
+                  <Markdown content={cleanBody} />
+                </div>
+                <MessageActions body={cleanBody} locale={locale} />
+              </>
             ) : wasCancelled ? (
               <div className="cancelled-badge mt-2 text-xs text-muted">{tr.ui.cancelled}</div>
             ) : null}
@@ -1929,18 +1970,22 @@ function ConversationView({
   const latest = [...timeline].reverse().find(
     (item) => item.status === "streaming" || item.status === "complete"
   );
-  const statusItem = timeline.find(
+  const statusItem = [...timeline].reverse().find(
     (item) => item.status === "active" || item.status === "talking" || item.status === "done"
   );
   const lastCompleteTitle = [...timeline].reverse().find(
     (item) => item.status === "complete"
   )?.title;
-  const hasActiveTimelineItems = timeline.some((item) => item.status !== "complete");
-  const isHistoryView = Boolean(conversation && !loading && !hasActiveTimelineItems);
+  const hasLiveTimelineItems = timeline.some(
+    (item) => item.status === "active" || item.status === "talking" || item.status === "streaming"
+  );
+  const isHistoryView = Boolean(conversation && !loading && !hasLiveTimelineItems);
   const isDone = thinkingComplete || statusItem?.status === "done";
-  const showPreview = latest && latest.body.trim();
+  const showPreview = !isDone && latest && latest.body.trim();
   const showCurrentTurn = !isHistoryView && (question || timeline.length > 0 || finalBody);
-  const previewTitle = lastCompleteTitle ?? statusItem?.title ?? latest?.title ?? tr.thinking.active;
+  const previewTitle = isDone
+    ? thinkingElapsedLabel(locale, elapsed, true)
+    : statusItem?.title ?? lastCompleteTitle ?? latest?.title ?? tr.thinking.active;
   const previewBody = latest ? markdownBody(latest.body) : "";
 
   return (
@@ -1953,12 +1998,13 @@ function ConversationView({
 
           <div className="assistant-row">
             <div className="assistant-content">
-              <button className="thinking-block" onClick={onToggleThinking}>
+              <button className={cn("thinking-block", !isDone && "thinking-block-active")} onClick={onToggleThinking} type="button">
                 <span className={cn("thinking-title", !isDone && "thinking-title-active")}>
                   {isDone
-                    ? `${tr.thinking.complete}（${locale === "zh-CN" ? "总用时：" : ""}${formatDuration(elapsed)}）`
+                    ? thinkingElapsedLabel(locale, elapsed, true)
                     : previewTitle}
                 </span>
+                <ChevronRight className="thinking-chevron" size={14} aria-hidden="true" />
               </button>
 
               {showPreview && previewBody ? (
@@ -1968,14 +2014,43 @@ function ConversationView({
               ) : null}
 
               {finalBody ? (
-                <div className="answer-body markdown-body">
-                  <Markdown content={finalBody} />
-                </div>
+                <>
+                  <div className="answer-body markdown-body">
+                    <Markdown content={finalBody} />
+                  </div>
+                  <MessageActions body={finalBody} locale={locale} />
+                </>
               ) : null}
             </div>
           </div>
         </div>
       ) : null}
+    </div>
+  );
+}
+
+function MessageActions({ body, locale }: { body: string; locale: Locale }) {
+  const [copied, setCopied] = useState(false);
+
+  async function copyBody() {
+    if (!body.trim() || !navigator.clipboard) return;
+    await navigator.clipboard.writeText(body);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1400);
+  }
+
+  return (
+    <div className="message-actions" aria-label={locale === "zh-CN" ? "回答操作" : "Message actions"}>
+      <button
+        className="message-action-button"
+        onClick={() => void copyBody()}
+        type="button"
+        title={locale === "zh-CN" ? "复制" : "Copy"}
+      >
+        <Copy size={15} aria-hidden="true" />
+        <span className="sr-only">{locale === "zh-CN" ? "复制" : "Copy"}</span>
+      </button>
+      {copied ? <span className="message-action-status">{locale === "zh-CN" ? "已复制" : "Copied"}</span> : null}
     </div>
   );
 }
@@ -2030,8 +2105,8 @@ function Composer({
             onSubmit();
           }
         }}
-        rows={3}
-        className="max-h-40 min-h-20 w-full resize-none border-0 bg-transparent text-[15px] leading-7 outline-none"
+        rows={1}
+        className="composer-textarea"
         placeholder={t(locale).ui.composerPlaceholder}
       />
       <div className="flex items-center justify-between gap-3">
@@ -2058,7 +2133,7 @@ function Composer({
                     <span className="discussion-level-label">{level.label}</span>
                     <span className="discussion-level-tag">{level.id !== "off" ? level.tag : ""}</span>
                     {discussionLevel === level.id ? (
-                      <span className="discussion-level-check">✓</span>
+                      <Check className="discussion-level-check" size={14} aria-hidden="true" />
                     ) : null}
                   </button>
                 ))}
@@ -2075,9 +2150,10 @@ function Composer({
               type="button"
               title={t(locale).ui.deepThink}
             >
+              <Brain size={14} aria-hidden="true" />
               {t(locale).ui.deepThink}
-              {deepThink ? (
-                <span className="discussion-level-check" style={{ marginLeft: 4 }}>✓</span>
+            {deepThink ? (
+                <Check className="discussion-level-check discussion-level-check-inline" size={14} aria-hidden="true" />
               ) : null}
             </button>
           ) : null}
@@ -2100,13 +2176,9 @@ function Composer({
             {paused ? (
               <span className="pause-status-text">{t(locale).ui.paused}</span>
             ) : loading ? (
-              <span className="send-button-stop-icon" />
+              <CircleStop size={16} aria-hidden="true" />
             ) : (
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
-                strokeLinecap="round" strokeLinejoin="round">
-                <path d="M22 2L11 13" />
-                <path d="M22 2L15 22L11 13L2 9L22 2Z" />
-              </svg>
+              <SendHorizontal size={18} aria-hidden="true" />
             )}
           </button>
         </div>
@@ -2132,55 +2204,60 @@ function ThinkingDrawer({
 }) {
   const tr = t(locale);
   const visibleTimeline = dedupeTimelineItems(timeline);
+  const doneItem = [...visibleTimeline].reverse().find((item) => item.status === "done");
+  const drawerComplete = thinkingComplete || Boolean(doneItem);
+  const doneTitle = doneItem?.title || thinkingElapsedLabel(locale, elapsed, true);
   return (
-    <aside className="thinking-drawer">
-      <div className="mb-6 flex items-center justify-between">
+    <aside className="thinking-drawer" aria-label={tr.ui.thinkingProcess}>
+      <div className="thinking-drawer-header">
         <div>
-          <div className="text-[15px] font-semibold">{tr.ui.thinkingProcess}</div>
-          <div className="mt-1 text-xs text-muted">
-            {thinkingComplete
-              ? `${tr.thinking.complete}（${locale === "zh-CN" ? "总用时：" : ""}${formatDuration(elapsed)}）`
+          <div className="thinking-drawer-title">{tr.ui.thinkingProcess}</div>
+          <div className="thinking-drawer-meta">
+            {drawerComplete
+              ? doneTitle
               : loading
-                ? `${locale === "zh-CN" ? "已进行 " : ""}${formatDuration(elapsed)}`
+                ? thinkingElapsedLabel(locale, elapsed, false)
                 : null}
           </div>
         </div>
         <button className="small-button" onClick={onClose}>{tr.ui.collapse}</button>
       </div>
 
-      <div className="reasoning-timeline">
-        {visibleTimeline.map((item, index) => (
-          <div key={item.id} className="reasoning-node reasoning-node-appear">
-            <div
-              className={cn(
-                "reasoning-dot",
-                (item.status === "active" || item.status === "streaming") && "reasoning-dot-active",
-                item.status === "talking" && "reasoning-dot-talking",
-                item.status === "done" && "reasoning-dot-done"
-              )}
-            />
-            {index < visibleTimeline.length - 1 ? <div className="reasoning-line" /> : null}
-            <div className="reasoning-content">
+      <div className="thinking-drawer-body">
+        <div className="reasoning-timeline">
+          {visibleTimeline.map((item, index) => (
+            <div key={item.id} className="reasoning-node reasoning-node-appear">
               <div
                 className={cn(
-                  "reasoning-title",
-                  (item.status === "active" || item.status === "streaming" || item.status === "talking") &&
-                    "thinking-title-active"
+                  "reasoning-dot",
+                  (item.status === "active" || item.status === "streaming") && "reasoning-dot-active",
+                  item.status === "talking" && "reasoning-dot-talking",
+                  item.status === "done" && "reasoning-dot-done"
                 )}
-              >
-                {item.status === "active" ? item.title ? `${item.title}（${locale === "zh-CN" ? "已进行 " : ""}${formatDuration(elapsed)}）` : null : null}
-                {item.status === "talking" ? `${tr.thinking.talking}（${locale === "zh-CN" ? "已进行 " : ""}${formatDuration(elapsed)}）` : null}
-                {item.status === "done" ? `${tr.thinking.done}（${locale === "zh-CN" ? "总用时：" : ""}${formatDuration(elapsed)}）` : null}
-                {item.status !== "active" && item.status !== "done" && item.status !== "talking" ? item.title : null}
-              </div>
-              {item.status === "complete" || item.status === "streaming" ? (
-                <div className="reasoning-body markdown-body">
-                  <Markdown content={item.body} />
+              />
+              {index < visibleTimeline.length - 1 ? <div className="reasoning-line" /> : null}
+              <div className="reasoning-content">
+                <div
+                  className={cn(
+                    "reasoning-title",
+                    (item.status === "active" || item.status === "streaming" || item.status === "talking") &&
+                      "thinking-title-active"
+                  )}
+                >
+                  {item.status === "active" ? item.title ? `${item.title} · ${thinkingElapsedLabel(locale, elapsed, false)}` : null : null}
+                  {item.status === "talking" ? `${tr.thinking.talking} · ${thinkingElapsedLabel(locale, elapsed, false)}` : null}
+                  {item.status === "done" ? (item.title || doneTitle) : null}
+                  {item.status !== "active" && item.status !== "done" && item.status !== "talking" ? item.title : null}
                 </div>
-              ) : null}
+                {item.status === "complete" || item.status === "streaming" ? (
+                  <div className="reasoning-body markdown-body">
+                    <Markdown content={item.body} />
+                  </div>
+                ) : null}
+              </div>
             </div>
-          </div>
-        ))}
+          ))}
+        </div>
       </div>
     </aside>
   );
@@ -2235,41 +2312,57 @@ function SettingsOverlay({
   const skillCountLabel = locale === "zh-CN" ? `${globalSkills.length} 个全局 Skills` : `${globalSkills.length} global Skills`;
   return (
     <div className="settings-backdrop">
-      <div className="hidden w-[260px] border-r border-line bg-white px-4 py-5 md:block">
-        <div className="mb-5 text-[15px] font-medium">{t(locale).ui.settings}</div>
-        {settingsTabs(locale).map((tab) => (
-          <button
-            key={tab.id}
-            className={cn("settings-tab", settingsTab === tab.id && "settings-tab-active")}
-            onClick={() => setSettingsTab(tab.id)}
-          >
-            {tab.label}
-          </button>
-        ))}
+      <div className="settings-shell" role="dialog" aria-modal="true" aria-label={t(locale).ui.settings}>
+      <div className="settings-nav">
+        <div className="settings-nav-title">
+          <Settings size={16} aria-hidden="true" />
+          <span>{t(locale).ui.settings}</span>
+        </div>
+        {settingsTabs(locale).map((tab) => {
+          const TabIcon = settingsTabIcons[tab.id];
+          return (
+            <button
+              key={tab.id}
+              className={cn("settings-tab", settingsTab === tab.id && "settings-tab-active")}
+              onClick={() => setSettingsTab(tab.id)}
+            >
+              <TabIcon className="settings-tab-icon" size={16} aria-hidden="true" />
+              <span>{tab.label}</span>
+            </button>
+          );
+        })}
       </div>
 
-      <div className="flex-1 overflow-auto px-5 py-5 md:px-7">
-        <div className="mb-5 flex items-start justify-between gap-4">
+      <div className="settings-content">
+        <div className="settings-header">
           <div>
             <div className="text-xl font-medium">{settingsTitle(settingsTab, locale)}</div>
             <div className="mt-1 max-w-[640px] text-sm leading-6 text-muted">{settingsSubtitle(settingsTab, locale)}</div>
           </div>
-          <button className="small-button" onClick={() => setSettingsOpen(false)}>{locale === "zh-CN" ? "关闭" : "Close"}</button>
+          <button
+            className="icon-button settings-close-button"
+            onClick={() => setSettingsOpen(false)}
+            aria-label={locale === "zh-CN" ? "关闭设置" : "Close settings"}
+            title={locale === "zh-CN" ? "关闭" : "Close"}
+          >
+            <X size={18} aria-hidden="true" />
+          </button>
         </div>
 
-        <div className="mb-4 flex gap-2 overflow-x-auto md:hidden">
-          {settingsTabs(locale).map((tab) => (
-            <button
-              key={tab.id}
-              className={cn(
-                "shrink-0 rounded-md border border-line px-3 py-2 text-sm",
-                settingsTab === tab.id ? "bg-accent text-white" : "bg-white text-muted"
-              )}
-              onClick={() => setSettingsTab(tab.id)}
-            >
-              {tab.label}
-            </button>
-          ))}
+        <div className="settings-mobile-tabs">
+          {settingsTabs(locale).map((tab) => {
+            const TabIcon = settingsTabIcons[tab.id];
+            return (
+              <button
+                key={tab.id}
+                className={cn("settings-mobile-tab", settingsTab === tab.id && "settings-mobile-tab-active")}
+                onClick={() => setSettingsTab(tab.id)}
+              >
+                <TabIcon size={15} aria-hidden="true" />
+                <span>{tab.label}</span>
+              </button>
+            );
+          })}
         </div>
 
         {settingsTab === "providers" ? (
@@ -2287,9 +2380,18 @@ function SettingsOverlay({
                       </div>
                     </div>
                     <div className="flex flex-wrap gap-2">
-                      <button className="small-button" onClick={() => void testProvider(provider.provider_id)}>测试</button>
-                      <button className="small-button" onClick={() => void saveProviderSecret(provider.provider_id)}>保存 Key</button>
-                      <button className="small-button-primary" onClick={() => void saveProvider(provider.provider_id)}>保存配置</button>
+                      <button className="small-button small-button-icon" onClick={() => void testProvider(provider.provider_id)}>
+                        <FlaskConical size={14} aria-hidden="true" />
+                        <span>测试</span>
+                      </button>
+                      <button className="small-button small-button-icon" onClick={() => void saveProviderSecret(provider.provider_id)}>
+                        <KeyRound size={14} aria-hidden="true" />
+                        <span>保存 Key</span>
+                      </button>
+                      <button className="small-button-primary small-button-icon" onClick={() => void saveProvider(provider.provider_id)}>
+                        <Save size={14} aria-hidden="true" />
+                        <span>保存配置</span>
+                      </button>
                     </div>
                   </div>
 
@@ -2331,10 +2433,11 @@ function SettingsOverlay({
             <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
               <div className="text-xs text-muted">{skillCountLabel}</div>
               <button
-                className="small-button-primary"
+                className="small-button-primary small-button-icon"
                 onClick={onAddExpert}
               >
-                + 添加专家
+                <UserPlus size={14} aria-hidden="true" />
+                <span>添加专家</span>
               </button>
             </div>
             {agents.length ? (
@@ -2360,14 +2463,17 @@ function SettingsOverlay({
                         <div>私有 Skills: {agent.private_skill_count}</div>
                       </div>
                       <div className="mt-3 flex gap-2">
-                        <button className="small-button" onClick={() => onEditExpert(agent)}>编辑</button>
+                        <button className="small-button small-button-icon" onClick={() => onEditExpert(agent)}>
+                          <Pencil size={14} aria-hidden="true" />
+                          <span>编辑</span>
+                        </button>
                         {!isSystem ? (
                           <button
-                            className="small-button"
-                            style={{ color: "#d92d20", borderColor: "rgba(217,45,32,0.3)" }}
+                            className="small-button small-button-danger small-button-icon"
                             onClick={() => setConfirmDeleteName(agent.name)}
                           >
-                            删除
+                            <Trash2 size={14} aria-hidden="true" />
+                            <span>删除</span>
                           </button>
                         ) : null}
                       </div>
@@ -2422,6 +2528,7 @@ function SettingsOverlay({
             )}
           </section>
         ) : null}
+      </div>
       </div>
 
       {confirmDeleteName ? (
@@ -2537,6 +2644,117 @@ function SkillPicker({
   );
 }
 
+function providerIcon(provider: ProviderProfile | undefined): LucideIcon {
+  const id = `${provider?.provider_id ?? ""} ${provider?.provider_type ?? ""}`.toLowerCase();
+  if (id.includes("openai")) return Sparkles;
+  if (id.includes("anthropic")) return Bot;
+  if (id.includes("deepseek")) return Brain;
+  if (id.includes("ollama") || id.includes("local")) return Server;
+  if (id.includes("cloud")) return Cloud;
+  return Cpu;
+}
+
+function ProviderIcon({ provider }: { provider: ProviderProfile | undefined }) {
+  const Icon = providerIcon(provider);
+  return (
+    <span className="provider-select-icon" aria-hidden="true">
+      <Icon size={16} />
+    </span>
+  );
+}
+
+function ProviderSelect({
+  providers,
+  value,
+  disabled,
+  onChange,
+}: {
+  providers: ProviderProfile[];
+  value: string;
+  disabled?: boolean;
+  onChange: (providerId: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const enabledProviders = providers.filter((provider) => provider.enabled);
+  const selectedProvider = enabledProviders.find((provider) => provider.provider_id === value);
+  const normalizedQuery = query.trim().toLowerCase();
+  const visibleProviders = normalizedQuery
+    ? enabledProviders.filter((provider) =>
+        `${provider.label} ${provider.provider_id} ${provider.provider_type}`
+          .toLowerCase()
+          .includes(normalizedQuery)
+      )
+    : enabledProviders;
+
+  function chooseProvider(providerId: string) {
+    onChange(providerId);
+    setOpen(false);
+    setQuery("");
+  }
+
+  return (
+    <div className="provider-select">
+      <button
+        className={cn("provider-select-trigger", open && "provider-select-trigger-open")}
+        type="button"
+        disabled={disabled || enabledProviders.length === 0}
+        onClick={() => setOpen((current) => !current)}
+      >
+        <ProviderIcon provider={selectedProvider} />
+        <span className="provider-select-current">
+          <span className="provider-select-name">
+            {selectedProvider?.label ?? "暂无提供商"}
+          </span>
+          <span className="provider-select-id">
+            {selectedProvider ? selectedProvider.provider_id : "请先配置提供商"}
+          </span>
+        </span>
+        <ChevronDown className="provider-select-chevron" size={16} aria-hidden="true" />
+      </button>
+
+      {open ? (
+        <div className="provider-select-popover">
+          <label className="provider-select-search">
+            <Search size={15} aria-hidden="true" />
+            <input
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="搜索提供商"
+              autoFocus
+            />
+          </label>
+          <div className="provider-select-list">
+            {visibleProviders.map((provider) => (
+              <button
+                key={provider.provider_id}
+                className={cn(
+                  "provider-select-option",
+                  provider.provider_id === value && "provider-select-option-active"
+                )}
+                type="button"
+                onClick={() => chooseProvider(provider.provider_id)}
+              >
+                <ProviderIcon provider={provider} />
+                <span className="provider-select-option-text">
+                  <span className="provider-select-name">{provider.label}</span>
+                  <span className="provider-select-id">{provider.provider_id}</span>
+                </span>
+                {provider.provider_id === value ? (
+                  <Check className="provider-select-check" size={15} aria-hidden="true" />
+                ) : null}
+              </button>
+            ))}
+            {visibleProviders.length === 0 ? (
+              <div className="provider-select-empty">没有匹配的提供商</div>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function ExpertModal({
   mode,
   agent,
@@ -2586,6 +2804,15 @@ function ExpertModal({
     }
   }, [providerProfile, selectedProvider, model]);
 
+  function handleProviderChange(nextProviderId: string) {
+    const nextProvider = providers.find((provider) => provider.provider_id === nextProviderId);
+    const currentDefault = selectedProvider?.default_model ?? "";
+    setProviderProfile(nextProviderId);
+    if (!model || model === currentDefault) {
+      setModel(nextProvider?.default_model ?? "");
+    }
+  }
+
   async function handleSave() {
     if (!name.trim()) return;
     setSaving(true);
@@ -2595,7 +2822,7 @@ function ExpertModal({
         nickname: nickname.trim(),
         role,
         provider_profile: providerProfile,
-        model: selectedProvider?.default_model ?? "",
+        model: model.trim() || selectedProvider?.default_model || "",
         system_prompt: systemPrompt,
         allowed_global_skills: allowedSkills,
         disabled_global_skills: disabledSkills,
@@ -2650,20 +2877,24 @@ function ExpertModal({
           {/* provider_profile */}
           <label className="settings-field">
             <span className="settings-label">模型提供商</span>
-            <select
-              className="settings-input"
+            <ProviderSelect
+              providers={providers}
               value={providerProfile}
-              onChange={(e) => setProviderProfile(e.target.value)}
-            >
-              {providers.length === 0 ? (
-                <option value="">无可用提供商</option>
-              ) : null}
-              {providers.filter(p => p.enabled).map((p) => (
-                <option key={p.provider_id} value={p.provider_id}>
-                  {p.label} ({p.provider_id})
-                </option>
-              ))}
-            </select>
+              disabled={isSystem}
+              onChange={handleProviderChange}
+            />
+          </label>
+
+          {/* model */}
+          <label className="settings-field">
+            <span className="settings-label">模型</span>
+            <input
+              className="settings-input"
+              value={model}
+              onChange={(e) => setModel(e.target.value)}
+              disabled={isSystem}
+              placeholder={selectedProvider?.default_model ?? "model id"}
+            />
           </label>
 
           {/* system_prompt */}
@@ -2680,20 +2911,24 @@ function ExpertModal({
           </label>
 
           {/* role */}
-          <label className="settings-field">
+          <div className="settings-field">
             <span className="settings-label">角色</span>
-            <select
-              className="settings-input"
-              value={role}
-              onChange={(e) => setRole(e.target.value)}
-              disabled={isSystem}
-            >
-              <option value="expert">Expert</option>
-              <option value="critic">Critic</option>
-              <option value="summarizer">Summarizer</option>
-              <option value="synthesizer">Synthesizer</option>
-            </select>
-          </label>
+            <div className="role-segmented" role="radiogroup" aria-label="角色">
+              {AGENT_ROLE_OPTIONS.map((option) => (
+                <button
+                  key={option.id}
+                  className={cn("role-segment", role === option.id && "role-segment-active")}
+                  type="button"
+                  role="radio"
+                  aria-checked={role === option.id}
+                  disabled={isSystem}
+                  onClick={() => setRole(option.id)}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+          </div>
 
           <div className="settings-field">
             <span className="settings-label">允许的全局 Skills</span>
