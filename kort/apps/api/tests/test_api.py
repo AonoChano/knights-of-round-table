@@ -4,6 +4,8 @@ from fastapi.testclient import TestClient
 
 from kort_api.app import app
 from kort_api.config import settings
+from kort_api.request_router import RouteDecision, route_request
+from kort_api.schemas import ConversationRequest
 
 
 client = TestClient(app)
@@ -63,6 +65,14 @@ def _clear_test_secret(provider_id: str) -> None:
         path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _event_names(stream_text: str) -> list[str]:
+    return [
+        line.removeprefix("event:").strip()
+        for line in stream_text.splitlines()
+        if line.startswith("event:")
+    ]
+
+
 # ---------------------------------------------------------------------------
 # existing tests
 # ---------------------------------------------------------------------------
@@ -81,6 +91,85 @@ def test_visible_conversation_payload_hides_internal_discussion() -> None:
     assert "raw_discussion" not in response.text
     assert "discussion_transcript" not in response.text
     assert "event: conversation_complete" in response.text
+
+
+def test_request_router_directs_simple_auto_prompt() -> None:
+    decision = route_request(ConversationRequest(question="你好", level="auto"))
+
+    assert decision.kind == "direct"
+    assert decision.reason_code == "auto_trivial"
+
+
+def test_request_router_respects_explicit_panel_and_deep_think() -> None:
+    low = route_request(ConversationRequest(question="你好", level="low"))
+    deep = route_request(ConversationRequest(question="你好", level="off", deep_think=True))
+    substantive_auto = route_request(ConversationRequest(question="SQL 注入怎么防?", level="auto"))
+
+    assert low.kind == "panel"
+    assert low.max_rounds == 2
+    assert deep.kind == "solo_thinking"
+    assert substantive_auto.kind == "panel"
+
+
+def test_auto_greeting_stream_uses_direct_route_without_thinking_events(monkeypatch) -> None:
+    def fake_direct_stream(**_kwargs):
+        yield 'event: final_delta\ndata: {"delta": "你好，我在。"}\n\n'
+
+    monkeypatch.setattr("kort_api.conversations.run_direct_answer_stream", fake_direct_stream)
+
+    response = client.post("/api/conversations/stream", json={"question": "你好", "level": "auto"})
+    events = _event_names(response.text)
+
+    assert response.status_code == 200
+    assert "conversation_start" in events
+    assert "final_delta" in events
+    assert "conversation_complete" in events
+    assert "talking_active" not in events
+    assert "thinking_active" not in events
+    assert "summary_start" not in events
+    assert "summary_complete" not in events
+    assert "thinking_complete" not in events
+
+
+def test_auto_small_talk_can_be_directed_by_classifier(monkeypatch) -> None:
+    def fake_classifier(**_kwargs):
+        return RouteDecision(kind="direct", reason_code="auto_classifier_direct")
+
+    def fake_direct_stream(**_kwargs):
+        yield 'event: final_delta\ndata: {"delta": "我很好，你呢？"}\n\n'
+
+    monkeypatch.setattr("kort_api.conversations.classify_auto_route", fake_classifier)
+    monkeypatch.setattr("kort_api.conversations.run_direct_answer_stream", fake_direct_stream)
+
+    response = client.post("/api/conversations/stream", json={"question": "你今天好吗？", "level": "auto"})
+    events = _event_names(response.text)
+
+    assert response.status_code == 200
+    assert "final_delta" in events
+    assert "conversation_complete" in events
+    assert "talking_active" not in events
+    assert "summary_complete" not in events
+    assert "thinking_complete" not in events
+
+
+def test_explicit_low_level_keeps_panel_route(monkeypatch) -> None:
+    seen: dict[str, int] = {}
+
+    def fake_discussion_stream(**kwargs):
+        seen["max_rounds"] = kwargs["max_rounds"]
+        yield "event: talking_active\ndata: {}\n\n"
+        yield "event: thinking_complete\ndata: {}\n\n"
+        yield 'event: final_delta\ndata: {"delta": "panel answer"}\n\n'
+
+    monkeypatch.setattr("kort_api.conversations.run_discussion_stream", fake_discussion_stream)
+
+    response = client.post("/api/conversations/stream", json={"question": "你好", "level": "low"})
+    events = _event_names(response.text)
+
+    assert response.status_code == 200
+    assert seen["max_rounds"] == 2
+    assert "talking_active" in events
+    assert "thinking_complete" in events
 
 
 def test_stream_conversation_uses_client_supplied_conversation_id() -> None:

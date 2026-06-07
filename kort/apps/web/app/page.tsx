@@ -347,7 +347,7 @@ function defaultNewChatPrompt(locale: Locale) {
 
 function appendThinkingDoneNode(items: TimelineItem[], locale: Locale, elapsedSeconds?: number): TimelineItem[] {
   return [
-    ...items.filter((item) => item.id !== "thinking-done"),
+    ...items.filter((item) => item.id !== "thinking-done" && item.id !== "thinking-cancelled"),
     {
       id: "thinking-done",
       title:
@@ -359,6 +359,42 @@ function appendThinkingDoneNode(items: TimelineItem[], locale: Locale, elapsedSe
       status: "done" as const,
     },
   ];
+}
+
+function appendThinkingCancelledNode(items: TimelineItem[], locale: Locale): TimelineItem[] {
+  const stableItems = withoutTransientTimelineItems(items)
+    .filter((item) => item.id !== "thinking-done" && item.id !== "thinking-cancelled")
+    .map((item) =>
+      item.status === "streaming"
+        ? { ...item, body: item.body || markdownBody(item.raw), status: "complete" as const }
+        : item
+    );
+
+  return [
+    ...stableItems,
+    {
+      id: "thinking-cancelled",
+      title: t(locale).ui.cancelled,
+      body: "",
+      raw: "",
+      status: "done" as const,
+    },
+  ];
+}
+
+function timelineFromStageSummaries(
+  stageSummaries: StageSummary[] | undefined,
+  locale: Locale,
+  elapsedSeconds?: number
+): TimelineItem[] {
+  const items = (stageSummaries ?? []).map((s) => ({
+    id: s.id,
+    title: markdownTitle(s.details, s.title),
+    body: markdownBody(s.details),
+    raw: s.details,
+    status: "complete" as const,
+  }));
+  return items.length > 0 ? appendThinkingDoneNode(items, locale, elapsedSeconds) : [];
 }
 
 function parseSseChunk(buffer: string): { events: StreamEvent[]; rest: string } {
@@ -856,13 +892,7 @@ function HomeExperience() {
       }
       if (payload.rounds?.length) {
         const pairs: MessagePair[] = payload.rounds.map((round) => {
-          const timelineItems: TimelineItem[] = appendThinkingDoneNode((round.stage_summaries ?? []).map((s) => ({
-            id: s.id,
-            title: markdownTitle(s.details, s.title),
-            body: markdownBody(s.details),
-            raw: s.details,
-            status: "complete" as const,
-          })), locale);
+          const timelineItems = timelineFromStageSummaries(round.stage_summaries, locale);
           return {
             question: round.question,
             timeline: timelineItems,
@@ -1008,6 +1038,7 @@ function HomeExperience() {
     const slot = getActiveSlot();
     if (!slot) return;
 
+    flushStateToSlot(slot);
     slot.paused = true;
     setPaused(true);
 
@@ -1025,13 +1056,13 @@ function HomeExperience() {
 
     clearSentenceState();
 
-    setTimeline((current) =>
-      current.map((item) =>
-        item.id === "thinking-active"
-          ? { id: "thinking-cancelled", title: t(locale).ui.cancelled, body: "", raw: "", status: "complete" as const }
-          : item
-      )
-    );
+    const cancelledTimeline = appendThinkingCancelledNode(slot.timeline, locale);
+    slot.timeline = cancelledTimeline;
+    slot.thinkingComplete = true;
+    slot.talkingActive = false;
+    setTimeline(cancelledTimeline);
+    setThinkingComplete(true);
+    setTalkingActive(false);
 
     slot.loading = false;
     setLoading(false);
@@ -1254,9 +1285,11 @@ function HomeExperience() {
     if (message.event === "conversation_complete") {
       slot.finalBody = String(message.data.final_body ?? slot.finalBody);
       slot.loading = false;
-      slot.thinkingComplete = true;
       slot.conversation = message.data as unknown as ConversationResponse;
-      slot.timeline = appendThinkingDoneNode(withoutTransientTimelineItems(slot.timeline), locale, slot.elapsed);
+      const visibleTimeline = withoutTransientTimelineItems(slot.timeline);
+      slot.thinkingComplete = visibleTimeline.length > 0;
+      slot.timeline =
+        visibleTimeline.length > 0 ? appendThinkingDoneNode(visibleTimeline, locale, slot.elapsed) : [];
       return;
     }
     if (message.event === "conversation_title") {
@@ -1434,13 +1467,7 @@ function HomeExperience() {
       setFinalBody("");
       if (question && conv.rounds.length > 0) {
         const lastRound = conv.rounds[conv.rounds.length - 1];
-        const timelineItems: TimelineItem[] = appendThinkingDoneNode((lastRound.stage_summaries ?? []).map((s) => ({
-          id: s.id,
-          title: markdownTitle(s.details, s.title),
-          body: markdownBody(s.details),
-          raw: s.details,
-          status: "complete" as const,
-        })), locale, elapsed);
+        const timelineItems = timelineFromStageSummaries(lastRound.stage_summaries, locale, elapsed);
         setMessagePairs((prev) => [
           ...prev,
           {
@@ -2071,7 +2098,7 @@ function ConversationView({
   const showPreview = !isDone && latest && latest.body.trim();
   const showCurrentTurn = !isHistoryView && (question || timeline.length > 0 || finalBody);
   const previewTitle = isDone
-    ? thinkingElapsedLabel(locale, elapsed, true)
+    ? statusItem?.title ?? thinkingElapsedLabel(locale, elapsed, true)
     : statusItem?.title ?? lastCompleteTitle ?? latest?.title ?? tr.thinking.active;
   const previewBody = latest ? markdownBody(latest.body) : "";
 
@@ -2085,14 +2112,14 @@ function ConversationView({
 
           <div className="assistant-row">
             <div className="assistant-content">
-              <button className={cn("thinking-block", !isDone && "thinking-block-active")} onClick={onToggleThinking} type="button">
-                <span className={cn("thinking-title", !isDone && "thinking-title-active")}>
-                  {isDone
-                    ? thinkingElapsedLabel(locale, elapsed, true)
-                    : previewTitle}
-                </span>
-                <ChevronRight className="thinking-chevron" size={14} aria-hidden="true" />
-              </button>
+              {timeline.length > 0 ? (
+                <button className={cn("thinking-block", !isDone && "thinking-block-active")} onClick={onToggleThinking} type="button">
+                  <span className={cn("thinking-title", !isDone && "thinking-title-active")}>
+                    {previewTitle}
+                  </span>
+                  <ChevronRight className="thinking-chevron" size={14} aria-hidden="true" />
+                </button>
+              ) : null}
 
               {showPreview && previewBody ? (
                 <div className="thinking-preview markdown-body">

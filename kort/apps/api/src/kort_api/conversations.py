@@ -10,7 +10,13 @@ from uuid import uuid4
 
 from fastapi import HTTPException
 
-from .orchestration import run_discussion_stream, run_solo_thinking_stream
+from .orchestration import (
+    classify_auto_route,
+    run_direct_answer_stream,
+    run_discussion_stream,
+    run_solo_thinking_stream,
+)
+from .request_router import route_request
 from .schemas import (
     AgentDefinition,
     ConversationListItem,
@@ -338,7 +344,17 @@ class VisibleConversationService:
                     detail="deep_think mode requires discussion level to be 'off'",
                 )
 
-            if request.deep_think and request.level == "off":
+            route_decision = route_request(request)
+            if request.level == "auto" and route_decision.reason_code == "auto_panel":
+                route_decision = classify_auto_route(
+                    question=request.question,
+                    agents=agents,
+                    providers=providers,
+                    secrets=secrets,
+                    has_history=bool(existing and existing.rounds),
+                )
+
+            if route_decision.kind == "solo_thinking":
                 # --- Deep-think (solo model with CoT summaries) ---
                 for sse_event in _async_gen_to_sync(
                     run_solo_thinking_stream,
@@ -359,23 +375,29 @@ class VisibleConversationService:
                             final_body += json.loads(sse_event.split("data: ", 1)[1])["delta"]
                         except (json.JSONDecodeError, KeyError, IndexError):
                             pass
+            elif route_decision.kind == "direct":
+                # --- Direct answer: no visible thinking projection ---
+                for sse_event in run_direct_answer_stream(
+                    question=question_to_ask,
+                    agents=agents,
+                    providers=providers,
+                    secrets=secrets,
+                ):
+                    yield sse_event
+
+                    if sse_event.startswith("event: final_delta"):
+                        try:
+                            final_body += json.loads(sse_event.split("data: ", 1)[1])["delta"]
+                        except (json.JSONDecodeError, KeyError, IndexError):
+                            pass
             else:
                 # --- Discussion stream ---
-                level_max_rounds: dict[str, int] = {
-                    "off": 0,
-                    "low": 2,
-                    "auto": 4,
-                    "medium": 5,
-                    "high": 8,
-                }
-                max_rounds = level_max_rounds.get(request.level, 4)
-
                 for sse_event in run_discussion_stream(
                     question=question_to_ask,
                     agents=agents,
                     providers=providers,
                     secrets=secrets,
-                    max_rounds=max_rounds,
+                    max_rounds=route_decision.max_rounds,
                 ):
                     yield sse_event
 
@@ -396,11 +418,7 @@ class VisibleConversationService:
                 title="Final answer",
                 body=final_body,
                 confidence=0.82,
-                limitations=(
-                    ["Generated via solo deep-think mode with chain-of-thought summarization."]
-                    if (request.deep_think and request.level == "off")
-                    else ["Generated via LangGraph multi-expert orchestration."]
-                ),
+                limitations=[],
             )
 
             new_round = ConversationRound(

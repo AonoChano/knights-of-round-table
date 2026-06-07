@@ -12,6 +12,7 @@ from uuid import uuid4
 from langgraph.graph import END, StateGraph
 
 from .model_client import ModelCallError, OpenAICompatibleClient
+from .request_router import LEVEL_MAX_ROUNDS, RouteDecision
 from .schemas import AgentDefinition, ProviderProfile
 
 SUMMARY_TITLE_RE = re.compile(r"^###\s+(.+)$", re.MULTILINE)
@@ -461,6 +462,80 @@ def _stream_final_answer(state: DiscussionState) -> Iterator[str]:
         yield "The final response could not be generated."
 
 
+def _parse_route_classifier_output(text: str) -> str | None:
+    cleaned = text.strip()
+    if not cleaned:
+        return None
+
+    json_match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+    payload_text = json_match.group(0) if json_match else cleaned
+    try:
+        payload = json.loads(payload_text)
+    except ValueError:
+        lowered = cleaned.lower()
+        if "direct" in lowered and "panel" not in lowered:
+            return "direct"
+        if "panel" in lowered:
+            return "panel"
+        return None
+
+    route = payload.get("route")
+    if route in {"direct", "panel"}:
+        return route
+    return None
+
+
+def classify_auto_route(
+    question: str,
+    agents: list[AgentDefinition],
+    providers: list[ProviderProfile],
+    secrets: dict[str, str],
+    *,
+    has_history: bool = False,
+) -> RouteDecision:
+    agents_dicts = [a.model_dump(mode="json") for a in agents]
+    providers_dicts = [p.model_dump(mode="json") for p in providers]
+    candidate = _find_enabled_candidate(
+        agents_dicts,
+        providers_dicts,
+        secrets,
+        preferred_roles=("synthesizer", "expert", "summarizer"),
+    )
+    if not candidate:
+        return RouteDecision(kind="panel", reason_code="auto_classifier_unavailable", max_rounds=LEVEL_MAX_ROUNDS["auto"])
+
+    agent, provider = candidate
+    prompt = (
+        "Classify the user's latest message for a chat product that can either answer directly "
+        "or run a costly multi-agent expert panel. Return exactly one JSON object: "
+        '{"route":"direct"} or {"route":"panel"}.\n\n'
+        "Use direct for greetings, thanks, acknowledgements, casual small talk, simple personal check-ins, "
+        "or very simple requests that do not benefit from multi-stage review. This must work across languages.\n"
+        "Use panel for planning, debugging, coding, math, research, comparisons, high-stakes advice, nuanced decisions, "
+        "ambiguous follow-ups that depend on prior work, or anything that benefits from critique.\n"
+        "Do not explain your choice. Do not include hidden reasoning.\n\n"
+        f"Has previous conversation context: {'yes' if has_history else 'no'}\n"
+        f"Latest user message:\n{question.strip()[:1200]}"
+    )
+
+    try:
+        raw = _call_model(
+            agent=agent,
+            provider=provider,
+            system_prompt="You are a strict request router. Output only valid JSON.",
+            user_prompt=prompt,
+            secrets=secrets,
+            disable_thinking=True,
+        )
+    except Exception:
+        return RouteDecision(kind="panel", reason_code="auto_classifier_failed", max_rounds=LEVEL_MAX_ROUNDS["auto"])
+
+    route = _parse_route_classifier_output(raw)
+    if route == "direct":
+        return RouteDecision(kind="direct", reason_code="auto_classifier_direct")
+    return RouteDecision(kind="panel", reason_code="auto_classifier_panel", max_rounds=LEVEL_MAX_ROUNDS["auto"])
+
+
 def build_discussion_graph() -> StateGraph:
     graph = StateGraph(DiscussionState)
 
@@ -545,6 +620,37 @@ def run_discussion(
         "type": "final",
         "body": final_text,
     }
+
+
+def run_direct_answer_stream(
+    question: str,
+    agents: list[AgentDefinition],
+    providers: list[ProviderProfile],
+    secrets: dict[str, str],
+) -> Iterator[str]:
+    agents_dicts = [a.model_dump(mode="json") for a in agents]
+    providers_dicts = [p.model_dump(mode="json") for p in providers]
+
+    state: DiscussionState = {
+        "question": question,
+        "current_round": 0,
+        "max_rounds": 0,
+        "expert_outputs": {},
+        "critic_reviews": {},
+        "discussion_transcript": [],
+        "stage_summaries": [],
+        "should_continue": False,
+        "final_answer_text": "",
+        "agents": agents_dicts,
+        "providers": providers_dicts,
+        "secrets": secrets,
+    }
+
+    def _sse(event: str, payload: dict) -> str:
+        return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+    for chunk in _stream_final_answer(state):
+        yield _sse("final_delta", {"delta": chunk})
 
 
 def run_discussion_stream(
