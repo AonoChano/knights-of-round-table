@@ -16,9 +16,12 @@ import {
   Copy,
   Cpu,
   Database,
+  ExternalLink,
   FlaskConical,
   KeyRound,
   MoreHorizontal,
+  PanelLeftClose,
+  PanelLeftOpen,
   Pencil,
   Save,
   SendHorizontal,
@@ -40,8 +43,8 @@ import ReactMarkdown from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
-import { loadLocale, saveLocale, localeStatusText, t, nextThinkingLabel } from "./locale";
-import type { Locale } from "./locale";
+import { loadLocale, saveLocale, localeStatusText, t, nextThinkingLabel, discussionLevels } from "./locale";
+import type { DiscussionLevel, Locale } from "./locale";
 
 type TimerHandle = ReturnType<typeof setTimeout>;
 
@@ -145,20 +148,6 @@ const settingsTabIcons: Record<SettingsTab, LucideIcon> = {
   skills: Wrench,
   data: Database,
 };
-type DiscussionLevel = "off" | "auto" | "low" | "medium" | "high";
-
-const DISCUSSION_LEVELS: Array<{
-  id: DiscussionLevel;
-  label: string;
-  tag: string;
-}> = [
-  { id: "off", label: "关", tag: "讨论程度" },
-  { id: "auto", label: "自动", tag: "博采众议" },
-  { id: "low", label: "低", tag: "围炉夜话" },
-  { id: "medium", label: "中", tag: "覆卮对弈" },
-  { id: "high", label: "高", tag: "穷尽棋路" },
-];
-
 const AGENT_ROLE_OPTIONS = [
   { id: "expert", label: "Expert" },
   { id: "critic", label: "Critic" },
@@ -252,14 +241,13 @@ function withoutTransientTimelineItems(items: TimelineItem[]): TimelineItem[] {
   return items.filter((item) => !TRANSIENT_TIMELINE_IDS.has(item.id));
 }
 
-function upsertSummaryStart(items: TimelineItem[], id: string): TimelineItem[] {
-  const filtered = withoutTransientTimelineItems(items);
-  if (filtered.some((item) => item.id === id)) {
-    return filtered.map((item) =>
-      item.id === id ? { ...item, title: item.title || "Thinking", status: "streaming" as const } : item
+function upsertSummaryStart(items: TimelineItem[], id: string, fallbackTitle: string): TimelineItem[] {
+  if (items.some((item) => item.id === id)) {
+    return items.map((item) =>
+      item.id === id ? { ...item, title: item.title || fallbackTitle, status: "streaming" as const } : item
     );
   }
-  return [...filtered, { id, title: "Thinking", body: "", raw: "", status: "streaming" as const }];
+  return [...items, { id, title: fallbackTitle, body: "", raw: "", status: "streaming" as const }];
 }
 
 function dedupeTimelineItems(items: TimelineItem[]): TimelineItem[] {
@@ -306,6 +294,15 @@ function cn(...values: Array<string | false | null | undefined>) {
   return values.filter(Boolean).join(" ");
 }
 
+function clientErrorMessage(error: unknown, fallback: string) {
+  if (error instanceof Error && error.message) return error.message;
+  if (typeof Event !== "undefined" && error instanceof Event) {
+    return error.type ? `${fallback} (${error.type})` : fallback;
+  }
+  if (typeof error === "string" && error.trim()) return error;
+  return fallback;
+}
+
 function markdownTitle(markdown: string, fallback: string) {
   const firstHeading = markdown.match(/^###\s+(.+)$/m);
   return firstHeading?.[1]?.trim() || fallback;
@@ -335,10 +332,17 @@ function formatDuration(totalSeconds: number) {
 
 function thinkingElapsedLabel(locale: Locale, elapsed: number, complete: boolean) {
   const duration = formatDuration(elapsed);
-  if (locale === "zh-CN") {
-    return complete ? `已思考 ${duration}` : `思考中 ${duration}`;
-  }
-  return complete ? `Thought for ${duration}` : `Thinking ${duration}`;
+  const copy = t(locale).ui;
+  return complete ? copy.thinkingElapsedComplete(duration) : copy.thinkingElapsedActive(duration);
+}
+
+function randomNewChatPrompt(locale: Locale) {
+  const prompts = t(locale).ui.newChatPrompts;
+  return prompts[Math.floor(Math.random() * prompts.length)] ?? prompts[0] ?? "";
+}
+
+function defaultNewChatPrompt(locale: Locale) {
+  return t(locale).ui.newChatPrompts[0] ?? "";
 }
 
 function appendThinkingDoneNode(items: TimelineItem[], locale: Locale, elapsedSeconds?: number): TimelineItem[] {
@@ -448,6 +452,8 @@ function HomeExperience() {
   const [paused, setPaused] = useState(false);
   const [pauseFlash, setPauseFlash] = useState(false);
   const [unreadConversationIds, setUnreadConversationIds] = useState<Set<string>>(new Set());
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [newChatPrompt, setNewChatPrompt] = useState(() => defaultNewChatPrompt(DEFAULT_LOCALE));
 
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -642,14 +648,17 @@ function HomeExperience() {
     setCurrentConversationId(null);
     setConversation(null);
     setDrawerTimeline(null);
+    setNewChatPrompt(randomNewChatPrompt(locale));
     setSlotVersion((v) => v + 1);
     router.replace("/", { scroll: false });
   }
 
   useEffect(() => {
+    const loadedLocale = loadLocale();
     setDiscussionLevel(loadDiscussionLevel());
     setDeepThink(loadDeepThink());
-    setLocale(loadLocale());
+    setLocale(loadedLocale);
+    setNewChatPrompt(randomNewChatPrompt(loadedLocale));
     window.setTimeout(() => {
       preferencesReadyRef.current = true;
     }, 0);
@@ -738,7 +747,7 @@ function HomeExperience() {
       setAgentsError(null);
     } catch (error) {
       setAgents([]);
-      setAgentsError(error instanceof Error ? error.message : "无法连接后端 API");
+      setAgentsError(error instanceof Error ? error.message : t(locale).ui.loadAgentsFailed);
     }
   }
 
@@ -761,9 +770,9 @@ function HomeExperience() {
         body: JSON.stringify(data),
       });
       if (response.ok) await loadAgents();
-      else setAgentsError(`创建失败 HTTP ${response.status}`);
+      else setAgentsError(t(locale).ui.createAgentFailedHttp(response.status));
     } catch (error) {
-      setAgentsError(error instanceof Error ? error.message : "创建请求失败");
+      setAgentsError(error instanceof Error ? error.message : t(locale).ui.createAgentRequestFailed);
     }
   }
 
@@ -775,9 +784,9 @@ function HomeExperience() {
         body: JSON.stringify(data),
       });
       if (response.ok) await loadAgents();
-      else setAgentsError(`更新失败 HTTP ${response.status}`);
+      else setAgentsError(t(locale).ui.updateAgentFailedHttp(response.status));
     } catch (error) {
-      setAgentsError(error instanceof Error ? error.message : "更新请求失败");
+      setAgentsError(error instanceof Error ? error.message : t(locale).ui.updateAgentRequestFailed);
     }
   }
 
@@ -785,9 +794,9 @@ function HomeExperience() {
     try {
       const response = await fetch(`${API_BASE}/api/agents/${name}`, { method: "DELETE" });
       if (response.ok) await loadAgents();
-      else setAgentsError(`删除失败 HTTP ${response.status}`);
+      else setAgentsError(t(locale).ui.deleteAgentFailedHttp(response.status));
     } catch (error) {
-      setAgentsError(error instanceof Error ? error.message : "删除请求失败");
+      setAgentsError(error instanceof Error ? error.message : t(locale).ui.deleteAgentRequestFailed);
     }
   }
 
@@ -870,8 +879,8 @@ function HomeExperience() {
   async function resumeConversationStream(conversationId: string): Promise<boolean> {
     clearSentenceState();
     const slot = ensureSlotForSend(conversationId);
-    const resumePlaceholder = locale === "zh-CN" ? "正在恢复这个对话..." : "Restoring this conversation...";
-    const resumeTitle = locale === "zh-CN" ? "正在继续对话..." : "Resuming conversation...";
+    const resumePlaceholder = t(locale).ui.restoreConversation;
+    const resumeTitle = t(locale).ui.resumeConversation;
     const now = new Date().toISOString();
     slot.submittedQuestion = null;
     slot.plannedConversationId = conversationId;
@@ -1204,7 +1213,7 @@ function HomeExperience() {
     }
     if (message.event === "summary_start") {
       const id = String(message.data.id ?? crypto.randomUUID());
-      slot.timeline = upsertSummaryStart(slot.timeline, id);
+      slot.timeline = upsertSummaryStart(slot.timeline, id, t(locale).thinking.active);
       return;
     }
     if (message.event === "summary_title") {
@@ -1330,7 +1339,7 @@ function HomeExperience() {
       sentenceQueueRef.current = [];
       timerElapsedRef.current = false;
 
-      setTimeline((current) => upsertSummaryStart(current, id));
+      setTimeline((current) => upsertSummaryStart(current, id, t(locale).thinking.active));
       return;
     }
 
@@ -1355,7 +1364,7 @@ function HomeExperience() {
         current.map((item) => {
           if (item.id !== id) return item;
           const next = { ...item, raw: item.raw + delta, body: markdownBody(item.raw + delta) };
-          if (earlyTitle && next.title === "Thinking") {
+          if (earlyTitle && (next.title === "Thinking" || next.title === t(locale).thinking.active)) {
             next.title = earlyTitle;
           }
           return next;
@@ -1451,68 +1460,92 @@ function HomeExperience() {
   async function saveProvider(providerId: string) {
     const provider = providerForms[providerId];
     if (!provider) return;
+    const copy = t(locale).ui;
 
-    setProviderStatus((current) => ({ ...current, [providerId]: "正在保存配置..." }));
-    const response = await fetch(`${API_BASE}/api/providers/${providerId}`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        label: provider.label,
-        provider_type: provider.provider_type,
-        base_url: provider.base_url,
-        api_style: provider.api_style,
-        default_model: provider.default_model,
-        env_key_name: provider.env_key_name,
-        enabled: provider.enabled,
-        capabilities: provider.capabilities,
-      }),
-    });
+    setProviderStatus((current) => ({ ...current, [providerId]: copy.savingConfig }));
+    try {
+      const response = await fetch(`${API_BASE}/api/providers/${providerId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          label: provider.label,
+          provider_type: provider.provider_type,
+          base_url: provider.base_url,
+          api_style: provider.api_style,
+          default_model: provider.default_model,
+          env_key_name: provider.env_key_name,
+          enabled: provider.enabled,
+          capabilities: provider.capabilities,
+        }),
+      });
 
-    setProviderStatus((current) => ({
-      ...current,
-      [providerId]: response.ok ? "非敏感配置已保存" : "配置保存失败，请检查字段",
-    }));
-    await loadProviders();
+      setProviderStatus((current) => ({
+        ...current,
+        [providerId]: response.ok ? copy.configurationSaved : copy.saveConfigFailedFields,
+      }));
+      await loadProviders();
+    } catch (error) {
+      setProviderStatus((current) => ({
+        ...current,
+        [providerId]: copy.configureSaveFailed(clientErrorMessage(error, copy.networkError)),
+      }));
+    }
   }
 
   async function saveProviderSecret(providerId: string) {
     const apiKey = providerKeys[providerId];
+    const copy = t(locale).ui;
     if (!apiKey?.trim()) {
-      setProviderStatus((current) => ({ ...current, [providerId]: "请先输入 API Key" }));
+      setProviderStatus((current) => ({ ...current, [providerId]: copy.enterApiKeyFirst }));
       return;
     }
 
-    setProviderStatus((current) => ({ ...current, [providerId]: "正在保存 API Key..." }));
-    const response = await fetch(`${API_BASE}/api/providers/${providerId}/secret`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ api_key: apiKey }),
-    });
-    if (response.ok) {
-      setProviderKeys((current) => ({ ...current, [providerId]: "" }));
-      setProviderSecretStatus((current) => ({ ...current, [providerId]: true }));
-      setProviderStatus((current) => ({ ...current, [providerId]: "API Key 已保存到本地运行时" }));
-      return;
+    setProviderStatus((current) => ({ ...current, [providerId]: copy.savingApiKey }));
+    try {
+      const response = await fetch(`${API_BASE}/api/providers/${providerId}/secret`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ api_key: apiKey }),
+      });
+      if (response.ok) {
+        setProviderKeys((current) => ({ ...current, [providerId]: "" }));
+        setProviderSecretStatus((current) => ({ ...current, [providerId]: true }));
+        setProviderStatus((current) => ({ ...current, [providerId]: copy.apiKeySavedRuntime }));
+        return;
+      }
+      setProviderStatus((current) => ({ ...current, [providerId]: copy.apiKeySaveFailed }));
+    } catch (error) {
+      setProviderStatus((current) => ({
+        ...current,
+        [providerId]: `${copy.apiKeySaveFailed}: ${clientErrorMessage(error, copy.networkError)}`,
+      }));
     }
-    setProviderStatus((current) => ({ ...current, [providerId]: "API Key 保存失败" }));
   }
 
   async function testProvider(providerId: string) {
     const provider = providerForms[providerId];
     const apiKey = providerKeys[providerId];
     if (!provider) return;
+    const copy = t(locale).ui;
 
-    setProviderStatus((current) => ({ ...current, [providerId]: "正在测试..." }));
-    const response = await fetch(`${API_BASE}/api/providers/${providerId}/test`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ api_key: apiKey || null }),
-    });
-    const payload = (await response.json()) as ProviderConnectivityResponse;
-    setProviderStatus((current) => ({
-      ...current,
-      [providerId]: response.ok ? localeStatusText(locale, payload.message) : locale === "zh-CN" ? "测试失败，请检查后端服务" : "Test failed, check backend service",
-    }));
+    setProviderStatus((current) => ({ ...current, [providerId]: copy.testing }));
+    try {
+      const response = await fetch(`${API_BASE}/api/providers/${providerId}/test`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ api_key: apiKey || null }),
+      });
+      const payload = (await response.json().catch(() => ({ message: "" }))) as ProviderConnectivityResponse;
+      setProviderStatus((current) => ({
+        ...current,
+        [providerId]: response.ok ? localeStatusText(locale, payload.message) : copy.testFailedBackend,
+      }));
+    } catch (error) {
+      setProviderStatus((current) => ({
+        ...current,
+        [providerId]: copy.testFailed(clientErrorMessage(error, copy.backendUnavailable)),
+      }));
+    }
   }
 
   const visibleTimeline = useMemo(() => {
@@ -1520,20 +1553,32 @@ function HomeExperience() {
   }, [timeline]);
 
   const hasRun = Boolean(submittedQuestion || conversation || loading || messagePairs.length > 0);
+  const tr = t(locale);
+
+  useEffect(() => {
+    if (hasRun) return;
+    setNewChatPrompt((current) => {
+      if (t(locale).ui.newChatPrompts.includes(current)) return current;
+      return randomNewChatPrompt(locale);
+    });
+  }, [hasRun, locale]);
 
   return (
     <main className="app-shell">
       <Sidebar
+        locale={locale}
         agents={agents}
         conversations={conversations}
         activeConversationId={currentConversationId}
         unreadConversationIds={unreadConversationIds}
         slotMapRef={slotMapRef}
         slotVersion={slotVersion}
+        collapsed={sidebarCollapsed}
         onNewConversation={fullReset}
         onSelectConversation={(id) => void loadConversation(id)}
         onRenameConversation={(id, name) => void renameConversation(id, name)}
         onDeleteConversation={(id) => void deleteConversation(id)}
+        onToggleCollapsed={() => setSidebarCollapsed((current) => !current)}
         openSettings={(tab) => {
           setSettingsTab(tab);
           setSettingsOpen(true);
@@ -1544,12 +1589,12 @@ function HomeExperience() {
         <header className="topbar">
           <button className="brand-button" onClick={fullReset}>
             <span>Round Table</span>
-            <small>ready</small>
+            <small>{tr.ui.statusReady}</small>
           </button>
           <div className="flex items-center gap-2">
             <button className="small-button small-button-icon">
               <Share2 size={15} aria-hidden="true" />
-              <span>分享</span>
+              <span>{tr.ui.share}</span>
             </button>
           </div>
         </header>
@@ -1574,7 +1619,7 @@ function HomeExperience() {
                 }}
               />
             ) : (
-              <div className="new-chat-prompt">{t(locale).ui.newChatPrompt}</div>
+              <div className="new-chat-prompt">{newChatPrompt}</div>
             )}
           </div>
         </div>
@@ -1652,6 +1697,7 @@ function HomeExperience() {
           agent={editingAgent}
           providers={providers}
           globalSkills={globalSkills}
+          locale={locale}
           onClose={() => setExpertModalOpen(false)}
           onSave={async (data) => {
             if (expertModalMode === "create") {
@@ -1667,30 +1713,37 @@ function HomeExperience() {
 }
 
 function Sidebar({
+  locale,
   agents,
   conversations,
   activeConversationId,
   unreadConversationIds,
   slotMapRef,
   slotVersion,
+  collapsed,
   onNewConversation,
   onSelectConversation,
   onRenameConversation,
   onDeleteConversation,
+  onToggleCollapsed,
   openSettings,
 }: {
+  locale: Locale;
   agents: AgentView[];
   conversations: ConversationListItem[];
   activeConversationId: string | null;
   unreadConversationIds: Set<string>;
   slotMapRef: React.MutableRefObject<Map<string, StreamSlot>>;
   slotVersion: number;
+  collapsed: boolean;
   onNewConversation: () => void;
   onSelectConversation: (id: string) => void;
   onRenameConversation: (id: string, name: string) => void;
   onDeleteConversation: (id: string) => void;
+  onToggleCollapsed: () => void;
   openSettings: (tab: SettingsTab) => void;
 }) {
+  const tr = t(locale);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
@@ -1717,9 +1770,9 @@ function Sidebar({
     const yesterdayStart = new Date(todayStart.getTime() - 86400000);
 
     const groups: { label: string; items: ConversationListItem[] }[] = [
-      { label: "今天", items: [] },
-      { label: "昨天", items: [] },
-      { label: "更早", items: [] },
+      { label: tr.ui.conversationToday, items: [] },
+      { label: tr.ui.conversationYesterday, items: [] },
+      { label: tr.ui.conversationEarlier, items: [] },
     ];
 
     const seenIds = new Set<string>();
@@ -1738,7 +1791,7 @@ function Sidebar({
     }
 
     return groups.filter((g) => g.items.length > 0);
-  }, [conversations]);
+  }, [conversations, tr.ui.conversationToday, tr.ui.conversationYesterday, tr.ui.conversationEarlier]);
 
   const loadingConvIds = useMemo(() => {
     const ids = new Set<string>();
@@ -1772,6 +1825,12 @@ function Sidebar({
     setMenuConversationId(null);
   }
 
+  function openConversationInNewTab(item: ConversationListItem, e: React.MouseEvent) {
+    e.stopPropagation();
+    window.open(`/?c=${encodeURIComponent(item.conversation_id)}`, "_blank", "noopener,noreferrer");
+    closeMenu();
+  }
+
   function confirmDelete() {
     if (confirmDeleteId) {
       onDeleteConversation(confirmDeleteId);
@@ -1780,21 +1839,45 @@ function Sidebar({
   }
 
   return (
-    <aside className="sidebar">
-      <div className="space-y-4">
-        <div className="flex items-center justify-between px-1">
-          <div className="logo-mark">K</div>
+    <aside className={cn("sidebar", collapsed && "sidebar-collapsed")} aria-label="Conversation sidebar">
+      <div className="sidebar-main">
+        <div className="sidebar-header">
+          <div className="logo-mark" aria-label="Knights of the Round Table">
+            <img src="/icon.svg" alt="" aria-hidden="true" />
+          </div>
+          <button
+            className="sidebar-collapse-button"
+            type="button"
+            title={collapsed ? tr.ui.expandSidebar : tr.ui.collapseSidebar}
+            aria-label={collapsed ? tr.ui.expandSidebar : tr.ui.collapseSidebar}
+            onClick={onToggleCollapsed}
+          >
+            {collapsed ? <PanelLeftOpen size={17} aria-hidden="true" /> : <PanelLeftClose size={17} aria-hidden="true" />}
+          </button>
         </div>
-        <button className="sidebar-primary sidebar-primary-action" onClick={onNewConversation}>
+        <button
+          className="sidebar-primary sidebar-primary-action"
+          title={tr.ui.newConversation}
+          onClick={onNewConversation}
+        >
           <SquarePen size={16} aria-hidden="true" />
-          <span>新建对话</span>
+          <span className="sidebar-expanded-only">{tr.ui.newConversation}</span>
         </button>
-        <div className="space-y-1">
+        <div className="sidebar-history sidebar-expanded-only">
           {grouped.map((group) => (
             <div key={group.label}>
-              <div className="px-2 py-1 text-xs text-muted">{group.label}</div>
+              <div className="sidebar-date-divider">
+                <span>{group.label}</span>
+              </div>
               {group.items.map((item) => (
-                <div key={item.conversation_id} className="sidebar-link-row">
+                <div
+                  key={item.conversation_id}
+                  className={cn(
+                    "sidebar-link-row",
+                    activeConversationId === item.conversation_id && "sidebar-link-row-active",
+                    menuConversationId === item.conversation_id && "sidebar-link-row-menu-open"
+                  )}
+                >
                   {loadingConvIds.has(item.conversation_id) && activeConversationId !== item.conversation_id ? (
                     <span className="sidebar-status-indicator">
                       <span className="sidebar-spinner" />
@@ -1831,10 +1914,10 @@ function Sidebar({
                       {item.title}
                     </button>
                   )}
-                  <span className="sidebar-link-actions">
+                  <span className="sidebar-link-actions" onPointerDown={(e) => e.stopPropagation()}>
                     <button
                       className="sidebar-link-action-btn"
-                      title="更多"
+                      title={tr.ui.more}
                       onClick={(e) => {
                         e.stopPropagation();
                         setMenuConversationId((current) => current === item.conversation_id ? null : item.conversation_id);
@@ -1849,13 +1932,17 @@ function Sidebar({
                       onPointerDown={(e) => e.stopPropagation()}
                       onClick={(e) => e.stopPropagation()}
                     >
+                      <button className="conversation-menu-item" onClick={(e) => openConversationInNewTab(item, e)}>
+                        <ExternalLink size={14} aria-hidden="true" />
+                        <span>{tr.ui.openInNewTab}</span>
+                      </button>
                       <button className="conversation-menu-item" onClick={(e) => { startRename(item, e); closeMenu(); }}>
                         <Pencil size={14} aria-hidden="true" />
-                        <span>重命名</span>
+                        <span>{tr.ui.rename}</span>
                       </button>
                       <button className="conversation-menu-item conversation-menu-danger" onClick={(e) => { handleDeleteClick(item, e); closeMenu(); }}>
                         <Trash2 size={14} aria-hidden="true" />
-                        <span>删除</span>
+                        <span>{tr.ui.delete}</span>
                       </button>
                     </div>
                   ) : null}
@@ -1864,41 +1951,41 @@ function Sidebar({
             </div>
           ))}
           {conversations.length === 0 && (
-            <div className="px-2 py-3 text-xs text-muted">暂无对话历史</div>
+            <div className="px-2 py-3 text-xs text-muted">{tr.ui.noConversationHistory}</div>
           )}
         </div>
       </div>
 
-      <div className="space-y-2">
-        <button className="sidebar-primary group" onClick={() => openSettings("experts")}>
+      <div className="sidebar-bottom">
+        <button className="sidebar-primary sidebar-status-card group sidebar-expanded-only" onClick={() => openSettings("experts")}>
           <div className="flex items-center justify-between">
             <span className="inline-flex items-center gap-2">
               <UsersRound size={15} aria-hidden="true" />
-              Discussion ready
+              {tr.ui.discussionReady}
             </span>
             <span className="breathing-dot h-1.5 w-1.5 rounded-full bg-[#2f7d32]" />
           </div>
           <div className="mt-2 hidden text-xs leading-5 text-muted group-hover:block">
-            {agents.length || 0} profiles available
+            {tr.ui.profilesAvailable(agents.length || 0)}
           </div>
         </button>
-        <button className="sidebar-user" onClick={() => openSettings("general")}>
+        <button className="sidebar-user" title={tr.ui.settingsUser} onClick={() => openSettings("general")}>
           <div className="avatar-button">A</div>
-          <div className="min-w-0 flex-1 text-left">
+          <div className="min-w-0 flex-1 text-left sidebar-expanded-only">
             <div className="text-sm font-medium">Alex</div>
-            <div className="text-xs text-muted">Settings</div>
+            <div className="text-xs text-muted">{tr.ui.settingsUser}</div>
           </div>
-          <Settings size={15} aria-hidden="true" />
+          <Settings className="sidebar-expanded-only" size={15} aria-hidden="true" />
         </button>
       </div>
 
       {confirmDeleteId ? (
         <div className="sidebar-confirm-overlay" onClick={() => setConfirmDeleteId(null)}>
           <div className="sidebar-confirm-box" onClick={(e) => e.stopPropagation()}>
-            <div className="text-sm mb-3">确定要删除这个对话吗？</div>
+            <div className="text-sm mb-3">{tr.ui.confirmDeleteConversation}</div>
             <div className="flex gap-2 justify-end">
-              <button className="small-button" onClick={() => setConfirmDeleteId(null)}>取消</button>
-              <button className="small-button-primary" onClick={confirmDelete}>删除</button>
+              <button className="small-button" onClick={() => setConfirmDeleteId(null)}>{tr.ui.cancel}</button>
+              <button className="small-button-primary" onClick={confirmDelete}>{tr.ui.delete}</button>
             </div>
           </div>
         </div>
@@ -2031,26 +2118,31 @@ function ConversationView({
 
 function MessageActions({ body, locale }: { body: string; locale: Locale }) {
   const [copied, setCopied] = useState(false);
+  const copy = t(locale).ui;
 
   async function copyBody() {
     if (!body.trim() || !navigator.clipboard) return;
-    await navigator.clipboard.writeText(body);
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1400);
+    try {
+      await navigator.clipboard.writeText(body);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1400);
+    } catch (error) {
+      console.warn(clientErrorMessage(error, t(locale).ui.copyFailed));
+    }
   }
 
   return (
-    <div className="message-actions" aria-label={locale === "zh-CN" ? "回答操作" : "Message actions"}>
+    <div className="message-actions" aria-label={copy.messageActions}>
       <button
         className="message-action-button"
         onClick={() => void copyBody()}
         type="button"
-        title={locale === "zh-CN" ? "复制" : "Copy"}
+        title={copy.copy}
       >
         <Copy size={15} aria-hidden="true" />
-        <span className="sr-only">{locale === "zh-CN" ? "复制" : "Copy"}</span>
+        <span className="sr-only">{copy.copy}</span>
       </button>
-      {copied ? <span className="message-action-status">{locale === "zh-CN" ? "已复制" : "Copied"}</span> : null}
+      {copied ? <span className="message-action-status">{copy.copied}</span> : null}
     </div>
   );
 }
@@ -2062,6 +2154,8 @@ function Markdown({ content }: { content: string }) {
     </ReactMarkdown>
   );
 }
+
+const COMPOSER_TEXTAREA_MAX_HEIGHT = 176;
 
 function Composer({
   input,
@@ -2091,12 +2185,27 @@ function Composer({
   onPause: () => void;
 }) {
   const [dropdownOpen, setDropdownOpen] = useState(false);
-  const active = DISCUSSION_LEVELS.find((d) => d.id === discussionLevel) ?? DISCUSSION_LEVELS[0];
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const levels = useMemo(() => discussionLevels(locale), [locale]);
+  const active = levels.find((d) => d.id === discussionLevel) ?? levels[0];
   const isActive = discussionLevel !== "off";
+  const copy = t(locale).ui;
+
+  useEffect(() => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+
+    textarea.style.height = "auto";
+    const nextHeight = Math.min(textarea.scrollHeight, COMPOSER_TEXTAREA_MAX_HEIGHT);
+    textarea.style.height = `${nextHeight}px`;
+    textarea.style.overflowY =
+      textarea.scrollHeight > COMPOSER_TEXTAREA_MAX_HEIGHT ? "auto" : "hidden";
+  }, [input]);
 
   return (
     <div className="composer-shell">
       <textarea
+        ref={textareaRef}
         value={input}
         onChange={(event) => setInput(event.target.value)}
         onKeyDown={(event) => {
@@ -2109,29 +2218,35 @@ function Composer({
         className="composer-textarea"
         placeholder={t(locale).ui.composerPlaceholder}
       />
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-2">
-          <div className="relative">
+      <div className="composer-toolbar">
+        <div className="composer-corner-controls">
+          <div className="composer-corner-control">
             <button
               className={cn("discussion-level-trigger", isActive && "discussion-level-trigger-active")}
               onClick={() => setDropdownOpen((prev) => !prev)}
               type="button"
+              aria-haspopup="menu"
+              aria-expanded={dropdownOpen}
             >
-              {active.tag}
+              <span className="discussion-trigger-label">{active.tag}</span>
+              <span className="discussion-trigger-code">[{active.code}]</span>
             </button>
             {dropdownOpen ? (
-              <div className="discussion-level-dropdown">
-                {DISCUSSION_LEVELS.map((level) => (
+              <div className="discussion-level-dropdown" role="menu">
+                {levels.map((level) => (
                   <button
                     key={level.id}
                     className="discussion-level-option"
+                    type="button"
+                    role="menuitemradio"
+                    aria-checked={discussionLevel === level.id}
                     onClick={() => {
                       setDiscussionLevel(level.id);
                       setDropdownOpen(false);
                     }}
                   >
                     <span className="discussion-level-label">{level.label}</span>
-                    <span className="discussion-level-tag">{level.id !== "off" ? level.tag : ""}</span>
+                    <span className="discussion-level-tag">{level.tag}</span>
                     {discussionLevel === level.id ? (
                       <Check className="discussion-level-check" size={14} aria-hidden="true" />
                     ) : null}
@@ -2152,36 +2267,32 @@ function Composer({
             >
               <Brain size={14} aria-hidden="true" />
               {t(locale).ui.deepThink}
-            {deepThink ? (
+              {deepThink ? (
                 <Check className="discussion-level-check discussion-level-check-inline" size={14} aria-hidden="true" />
               ) : null}
             </button>
           ) : null}
         </div>
-        <div className="flex items-center gap-2">
-          <button
-            className={cn(
-              "send-button",
-              paused && pauseFlash && "send-button-pause-flash",
-              paused && !pauseFlash && "send-button-paused"
-            )}
-            onClick={
-              paused ? undefined : (loading ? onPause : onSubmit)
-            }
-            disabled={paused || (!loading && !input.trim())}
-            type="button"
-            aria-label={loading ? (locale === "zh-CN" ? "停止生成" : "Stop") : (locale === "zh-CN" ? "发送" : "Send")}
-            title={loading ? (locale === "zh-CN" ? "停止生成" : "Stop") : (locale === "zh-CN" ? "发送" : "Send")}
-          >
-            {paused ? (
-              <span className="pause-status-text">{t(locale).ui.paused}</span>
-            ) : loading ? (
-              <CircleStop size={16} aria-hidden="true" />
-            ) : (
-              <SendHorizontal size={18} aria-hidden="true" />
-            )}
-          </button>
-        </div>
+        <button
+          className={cn(
+            "send-button",
+            paused && pauseFlash && "send-button-pause-flash",
+            paused && !pauseFlash && "send-button-paused"
+          )}
+          onClick={paused ? undefined : loading ? onPause : onSubmit}
+          disabled={paused || (!loading && !input.trim())}
+          type="button"
+          aria-label={loading ? copy.stop : copy.send}
+          title={loading ? copy.stop : copy.send}
+        >
+          {paused ? (
+            <span className="pause-status-text">{t(locale).ui.paused}</span>
+          ) : loading ? (
+            <CircleStop size={16} aria-hidden="true" />
+          ) : (
+            <SendHorizontal size={18} aria-hidden="true" />
+          )}
+        </button>
       </div>
     </div>
   );
@@ -2309,7 +2420,8 @@ function SettingsOverlay({
   onDeleteExpert: (name: string) => void;
 }) {
   const [confirmDeleteName, setConfirmDeleteName] = useState<string | null>(null);
-  const skillCountLabel = locale === "zh-CN" ? `${globalSkills.length} 个全局 Skills` : `${globalSkills.length} global Skills`;
+  const copy = t(locale).ui;
+  const skillCountLabel = copy.globalSkillsCount(globalSkills.length);
   return (
     <div className="settings-backdrop">
       <div className="settings-shell" role="dialog" aria-modal="true" aria-label={t(locale).ui.settings}>
@@ -2342,8 +2454,8 @@ function SettingsOverlay({
           <button
             className="icon-button settings-close-button"
             onClick={() => setSettingsOpen(false)}
-            aria-label={locale === "zh-CN" ? "关闭设置" : "Close settings"}
-            title={locale === "zh-CN" ? "关闭" : "Close"}
+            aria-label={copy.closeSettings}
+            title={copy.close}
           >
             <X size={18} aria-hidden="true" />
           </button>
@@ -2376,32 +2488,32 @@ function SettingsOverlay({
                     <div>
                       <div className="font-medium">{form.label}</div>
                       <div className="mt-1 text-xs text-muted">
-                        {provider.provider_id} · {keyConfigured ? "API Key 已配置" : "API Key 未配置"}
+                        {provider.provider_id} · {keyConfigured ? copy.apiKeyConfigured : copy.apiKeyMissing}
                       </div>
                     </div>
                     <div className="flex flex-wrap gap-2">
                       <button className="small-button small-button-icon" onClick={() => void testProvider(provider.provider_id)}>
                         <FlaskConical size={14} aria-hidden="true" />
-                        <span>测试</span>
+                        <span>{copy.test}</span>
                       </button>
                       <button className="small-button small-button-icon" onClick={() => void saveProviderSecret(provider.provider_id)}>
                         <KeyRound size={14} aria-hidden="true" />
-                        <span>保存 Key</span>
+                        <span>{copy.saveKey}</span>
                       </button>
                       <button className="small-button-primary small-button-icon" onClick={() => void saveProvider(provider.provider_id)}>
                         <Save size={14} aria-hidden="true" />
-                        <span>保存配置</span>
+                        <span>{copy.saveConfig}</span>
                       </button>
                     </div>
                   </div>
 
                   <div className="grid gap-3 md:grid-cols-2">
-                    <ProviderField provider={form} field="label" label="显示名称" setProviderForms={setProviderForms} />
-                    <ProviderField provider={form} field="default_model" label="默认模型" setProviderForms={setProviderForms} />
-                    <ProviderField provider={form} field="base_url" label="Base URL" setProviderForms={setProviderForms} />
-                    <ProviderField provider={form} field="api_style" label="API 风格" setProviderForms={setProviderForms} />
-                    <ProviderField provider={form} field="provider_type" label="Provider 类型" setProviderForms={setProviderForms} />
-                    <ProviderField provider={form} field="env_key_name" label="环境变量名" setProviderForms={setProviderForms} />
+                    <ProviderField provider={form} field="label" label={copy.providerField.label} setProviderForms={setProviderForms} />
+                    <ProviderField provider={form} field="default_model" label={copy.providerField.default_model} setProviderForms={setProviderForms} />
+                    <ProviderField provider={form} field="base_url" label={copy.providerField.base_url} setProviderForms={setProviderForms} />
+                    <ProviderField provider={form} field="api_style" label={copy.providerField.api_style} setProviderForms={setProviderForms} />
+                    <ProviderField provider={form} field="provider_type" label={copy.providerField.provider_type} setProviderForms={setProviderForms} />
+                    <ProviderField provider={form} field="env_key_name" label={copy.providerField.env_key_name} setProviderForms={setProviderForms} />
                     <label className="grid gap-1 text-sm md:col-span-2">
                       <span className="font-medium">API Key</span>
                       <input
@@ -2414,13 +2526,13 @@ function SettingsOverlay({
                           }))
                         }
                         className="settings-input"
-                        placeholder={keyConfigured ? "已保存；输入新值可覆盖" : `保存到本地运行时，或使用 ${form.env_key_name}`}
+                        placeholder={keyConfigured ? copy.apiKeyPlaceholderSaved : copy.apiKeyPlaceholderNew(form.env_key_name)}
                       />
                     </label>
                   </div>
 
                   <div className="mt-3 text-xs leading-5 text-muted">
-                    {providerStatus[provider.provider_id] ?? "密钥只保存到本地 runtime/data，不会在 API 响应中回显。"}
+                    {providerStatus[provider.provider_id] ?? copy.apiKeyHint}
                   </div>
                 </section>
               );
@@ -2437,7 +2549,7 @@ function SettingsOverlay({
                 onClick={onAddExpert}
               >
                 <UserPlus size={14} aria-hidden="true" />
-                <span>添加专家</span>
+                <span>{copy.addExpert}</span>
               </button>
             </div>
             {agents.length ? (
@@ -2450,22 +2562,22 @@ function SettingsOverlay({
                       <div className="flex items-center gap-2">
                         <div className="font-medium">{agent.nickname}</div>
                         {isSystem ? (
-                          <span className="rounded border border-line bg-gray-50 px-1.5 py-0.5 text-[11px] text-muted">[系统]</span>
+                          <span className="rounded border border-line bg-gray-50 px-1.5 py-0.5 text-[11px] text-muted">[{copy.system}]</span>
                         ) : null}
                       </div>
                       <div className="mt-1 text-xs text-muted">{agent.name}</div>
                       <div className="mt-4 grid gap-2 text-sm text-muted">
-                        <div>角色: {agent.role}</div>
-                        <div>Provider: {agent.provider_profile}</div>
-                        <div>优先级: {agent.priority}</div>
-                        <div>Skills: {agent.allowed_global_skills.join(", ") || "未配置"}</div>
-                        <div>禁用: {agent.disabled_global_skills.join(", ") || "无"}</div>
-                        <div>私有 Skills: {agent.private_skill_count}</div>
+                        <div>{copy.role}: {agent.role}</div>
+                        <div>{copy.provider}: {agent.provider_profile}</div>
+                        <div>{copy.priority}: {agent.priority}</div>
+                        <div>Skills: {agent.allowed_global_skills.join(", ") || copy.noSkillsConfigured}</div>
+                        <div>{copy.disabled}: {agent.disabled_global_skills.join(", ") || copy.none}</div>
+                        <div>{copy.privateSkills}: {agent.private_skill_count}</div>
                       </div>
                       <div className="mt-3 flex gap-2">
                         <button className="small-button small-button-icon" onClick={() => onEditExpert(agent)}>
                           <Pencil size={14} aria-hidden="true" />
-                          <span>编辑</span>
+                          <span>{copy.edit}</span>
                         </button>
                         {!isSystem ? (
                           <button
@@ -2473,7 +2585,7 @@ function SettingsOverlay({
                             onClick={() => setConfirmDeleteName(agent.name)}
                           >
                             <Trash2 size={14} aria-hidden="true" />
-                            <span>删除</span>
+                            <span>{copy.delete}</span>
                           </button>
                         ) : null}
                       </div>
@@ -2483,7 +2595,7 @@ function SettingsOverlay({
               </div>
             ) : (
               <section className="settings-card text-sm leading-7 text-muted">
-                {t(locale).ui.noExperts}{agentsError ? `${locale === "zh-CN" ? "错误：" : "Error: "}${agentsError}` : ""}
+                {copy.noExperts}{agentsError ? `${copy.errorPrefix}${agentsError}` : ""}
               </section>
             )}
           </>
@@ -2524,7 +2636,7 @@ function SettingsOverlay({
                 </div>
               </div>
             ) : (
-              <div className="text-sm leading-7 text-muted">{locale === "zh-CN" ? "该部分保留为 MVP 设置中心骨架。" : "This section is reserved as an MVP settings skeleton."}</div>
+              <div className="text-sm leading-7 text-muted">{copy.dataSkeleton}</div>
             )}
           </section>
         ) : null}
@@ -2534,9 +2646,9 @@ function SettingsOverlay({
       {confirmDeleteName ? (
         <div className="sidebar-confirm-overlay" onClick={() => setConfirmDeleteName(null)}>
           <div className="sidebar-confirm-box" onClick={(e) => e.stopPropagation()}>
-            <div className="text-sm mb-3">{locale === "zh-CN" ? `确定要删除专家 "${confirmDeleteName}" 吗？` : `Are you sure you want to delete "${confirmDeleteName}"?`}</div>
+            <div className="text-sm mb-3">{copy.confirmDeleteExpert(confirmDeleteName)}</div>
             <div className="flex gap-2 justify-end">
-              <button className="small-button" onClick={() => setConfirmDeleteName(null)}>{locale === "zh-CN" ? "取消" : "Cancel"}</button>
+              <button className="small-button" onClick={() => setConfirmDeleteName(null)}>{copy.cancel}</button>
               <button
                 className="small-button-primary"
                 onClick={() => {
@@ -2544,7 +2656,7 @@ function SettingsOverlay({
                   setConfirmDeleteName(null);
                 }}
               >
-                {locale === "zh-CN" ? "删除" : "Delete"}
+                {copy.delete}
               </button>
             </div>
           </div>
@@ -2563,11 +2675,12 @@ function settingsTitle(tab: SettingsTab, locale: Locale) {
 }
 
 function settingsSubtitle(tab: SettingsTab, locale: Locale) {
-  if (tab === "providers") return locale === "zh-CN" ? "开发阶段可在前端配置并保存 API Key。密钥只存本机 runtime/data，用于本地开发。" : "Configure and save API Keys in the frontend. Keys are stored locally in runtime/data for local dev.";
-  if (tab === "experts") return locale === "zh-CN" ? "默认专家从 runtime/agents 自动加载。角色和提示词定义身份，Skills 只定义可复用能力。" : "Default experts auto-load from runtime/agents. Roles and prompts define identity, Skills define reusable capabilities.";
-  if (tab === "skills") return locale === "zh-CN" ? "全局 Skills 是能力模块，不是身份标签。专家通过 yaml 白名单或禁用列表控制访问。" : "Global Skills are capability modules, not identity tags. Experts control access via yaml allowlist or denylist.";
-  if (tab === "data") return locale === "zh-CN" ? "只持久化用户可见投影，不保存原始专家讨论。" : "Only persist user-visible projection, not raw expert discussions.";
-  return locale === "zh-CN" ? "圆桌骑士的基础偏好设置。" : "Basic KORT preferences.";
+  const copy = t(locale).ui;
+  if (tab === "providers") return copy.settingsSubtitleProviders;
+  if (tab === "experts") return copy.settingsSubtitleExperts;
+  if (tab === "skills") return copy.settingsSubtitleSkills;
+  if (tab === "data") return copy.settingsSubtitleData;
+  return copy.settingsSubtitleGeneral;
 }
 
 function ProviderField({
@@ -2667,13 +2780,16 @@ function ProviderSelect({
   providers,
   value,
   disabled,
+  locale,
   onChange,
 }: {
   providers: ProviderProfile[];
   value: string;
   disabled?: boolean;
+  locale: Locale;
   onChange: (providerId: string) => void;
 }) {
+  const copy = t(locale).ui;
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const enabledProviders = providers.filter((provider) => provider.enabled);
@@ -2704,10 +2820,10 @@ function ProviderSelect({
         <ProviderIcon provider={selectedProvider} />
         <span className="provider-select-current">
           <span className="provider-select-name">
-            {selectedProvider?.label ?? "暂无提供商"}
+            {selectedProvider?.label ?? copy.noProvider}
           </span>
           <span className="provider-select-id">
-            {selectedProvider ? selectedProvider.provider_id : "请先配置提供商"}
+            {selectedProvider ? selectedProvider.provider_id : copy.selectProviderFirst}
           </span>
         </span>
         <ChevronDown className="provider-select-chevron" size={16} aria-hidden="true" />
@@ -2720,7 +2836,7 @@ function ProviderSelect({
             <input
               value={query}
               onChange={(event) => setQuery(event.target.value)}
-              placeholder="搜索提供商"
+              placeholder={copy.searchProviders}
               autoFocus
             />
           </label>
@@ -2746,7 +2862,7 @@ function ProviderSelect({
               </button>
             ))}
             {visibleProviders.length === 0 ? (
-              <div className="provider-select-empty">没有匹配的提供商</div>
+              <div className="provider-select-empty">{copy.noMatchingProviders}</div>
             ) : null}
           </div>
         </div>
@@ -2760,6 +2876,7 @@ function ExpertModal({
   agent,
   providers,
   globalSkills,
+  locale,
   onClose,
   onSave,
 }: {
@@ -2767,6 +2884,7 @@ function ExpertModal({
   agent: AgentView | null;
   providers: ProviderProfile[];
   globalSkills: string[];
+  locale: Locale;
   onClose: () => void;
   onSave: (data: {
     name: string;
@@ -2792,6 +2910,7 @@ function ExpertModal({
   const [disabledSkills, setDisabledSkills] = useState<string[]>(agent?.disabled_global_skills ?? []);
   const [priority, setPriority] = useState(agent?.priority ?? 50);
   const [saving, setSaving] = useState(false);
+  const copy = t(locale).ui;
 
   const isSystem =
     (agent?.name === "summarizer-main" || agent?.name === "synthesizer-main");
@@ -2829,6 +2948,8 @@ function ExpertModal({
         priority,
       });
       onClose();
+    } catch (error) {
+      console.warn(clientErrorMessage(error, copy.expertSaveFailed));
     } finally {
       setSaving(false);
     }
@@ -2840,54 +2961,55 @@ function ExpertModal({
     <div className="modal-overlay" onClick={onClose}>
       <div className="expert-modal" onClick={(e) => e.stopPropagation()}>
         <div className="modal-title">
-          {mode === "create" ? "添加专家" : "编辑专家"}
+          {mode === "create" ? copy.addExpert : copy.editExpert}
         </div>
         <div className="modal-form-grid">
           {/* name */}
           <label className="settings-field">
             <span className="settings-label">
-              名称{mode === "edit" ? "（只读）" : ""}
+              {mode === "edit" ? copy.expertNameReadonly : copy.expertName}
             </span>
             <input
               className="settings-input"
               value={name}
               onChange={(e) => setName(e.target.value)}
               disabled={mode === "edit" || isSystem}
-              placeholder="小写字母开头，仅小写字母、数字、连字符"
+              placeholder={copy.expertNamePlaceholder}
             />
             {name && !isValidName ? (
               <span className="settings-error">
-                格式不符（需匹配 ^[a-z][a-z0-9-]*$）
+                {copy.invalidExpertName}
               </span>
             ) : null}
           </label>
 
           {/* nickname */}
           <label className="settings-field">
-            <span className="settings-label">昵称</span>
+            <span className="settings-label">{copy.nickname}</span>
             <input
               className="settings-input"
               value={nickname}
               onChange={(e) => setNickname(e.target.value)}
               disabled={isSystem}
-              placeholder="显示名称"
+              placeholder={copy.displayName}
             />
           </label>
 
           {/* provider_profile */}
           <label className="settings-field">
-            <span className="settings-label">模型提供商</span>
+            <span className="settings-label">{copy.modelProvider}</span>
             <ProviderSelect
               providers={providers}
               value={providerProfile}
               disabled={isSystem}
+              locale={locale}
               onChange={handleProviderChange}
             />
           </label>
 
           {/* model */}
           <label className="settings-field">
-            <span className="settings-label">模型</span>
+            <span className="settings-label">{copy.model}</span>
             <input
               className="settings-input"
               value={model}
@@ -2899,21 +3021,21 @@ function ExpertModal({
 
           {/* system_prompt */}
           <label className="settings-field">
-            <span className="settings-label">系统提示词</span>
+            <span className="settings-label">{copy.systemPrompt}</span>
             <textarea
               className="settings-input"
               value={systemPrompt}
               onChange={(e) => setSystemPrompt(e.target.value)}
               disabled={isSystem}
               rows={4}
-              placeholder="输入该专家的系统提示词..."
+              placeholder={copy.systemPromptPlaceholder}
             />
           </label>
 
           {/* role */}
           <div className="settings-field">
-            <span className="settings-label">角色</span>
-            <div className="role-segmented" role="radiogroup" aria-label="角色">
+            <span className="settings-label">{copy.role}</span>
+            <div className="role-segmented" role="radiogroup" aria-label={copy.role}>
               {AGENT_ROLE_OPTIONS.map((option) => (
                 <button
                   key={option.id}
@@ -2931,12 +3053,12 @@ function ExpertModal({
           </div>
 
           <div className="settings-field">
-            <span className="settings-label">允许的全局 Skills</span>
+            <span className="settings-label">{copy.allowedGlobalSkills}</span>
             <SkillPicker
               skills={globalSkills}
               value={allowedSkills}
               disabled={isSystem}
-              emptyText="未发现全局 Skills"
+              emptyText={copy.noGlobalSkills}
               onChange={(next) => {
                 setAllowedSkills(next);
                 setDisabledSkills((current) => current.filter((skill) => !next.includes(skill)));
@@ -2945,12 +3067,12 @@ function ExpertModal({
           </div>
 
           <div className="settings-field">
-            <span className="settings-label">禁用的全局 Skills</span>
+            <span className="settings-label">{copy.disabledGlobalSkills}</span>
             <SkillPicker
               skills={globalSkills}
               value={disabledSkills}
               disabled={isSystem}
-              emptyText="未禁用 Skills"
+              emptyText={copy.noDisabledSkills}
               onChange={(next) => {
                 setDisabledSkills(next);
                 setAllowedSkills((current) => current.filter((skill) => !next.includes(skill)));
@@ -2960,7 +3082,7 @@ function ExpertModal({
 
           {/* priority */}
           <label className="settings-field">
-            <span className="settings-label">优先级 (0-100)</span>
+            <span className="settings-label">{copy.priorityRange}</span>
             <input
               className="settings-input"
               type="number"
@@ -2977,14 +3099,14 @@ function ExpertModal({
 
         <div className="modal-actions">
           <button className="small-button" onClick={onClose}>
-            取消
+            {copy.cancel}
           </button>
           <button
             className="small-button-primary"
             onClick={() => void handleSave()}
             disabled={saving || !name.trim() || !isValidName}
           >
-            {saving ? "保存中..." : mode === "create" ? "创建" : "保存"}
+            {saving ? copy.saving : mode === "create" ? copy.create : copy.save}
           </button>
         </div>
       </div>
