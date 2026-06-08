@@ -16,7 +16,8 @@
     "react-markdown": "^10.1.0",
     "rehype-katex": "^7.0.1",
     "remark-gfm": "^4.0.1",
-    "remark-math": "^6.0.0"
+    "remark-math": "^6.0.0",
+    "simple-icons": "^16.23.0"
   },
   "devDependencies": {
     "@types/node": "22.15.21",

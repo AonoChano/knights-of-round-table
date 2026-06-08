@@ -3,18 +3,15 @@
 import "katex/dist/katex.min.css";
 
 import { Suspense, useEffect, useMemo, useRef, useState } from "react";
-import type { CSSProperties, Dispatch, SetStateAction } from "react";
+import type { Dispatch, SetStateAction } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
-  Bot,
   Brain,
   Check,
   ChevronDown,
   ChevronRight,
   CircleStop,
-  Cloud,
   Copy,
-  Cpu,
   Database,
   ExternalLink,
   FlaskConical,
@@ -26,11 +23,9 @@ import {
   Save,
   SendHorizontal,
   Search,
-  Server,
   Settings,
   Share2,
   SlidersHorizontal,
-  Sparkles,
   SquarePen,
   Trash2,
   UserPlus,
@@ -43,6 +38,22 @@ import ReactMarkdown from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
+import type { SimpleIcon } from "simple-icons";
+import {
+  siAnthropic,
+  siBaidu,
+  siClaude,
+  siClaudecode,
+  siDeepseek,
+  siGooglegemini,
+  siMinimax,
+  siMistralai,
+  siMoonshotai,
+  siOllama,
+  siOpenrouter,
+  siPerplexity,
+  siQwen,
+} from "simple-icons";
 import { loadLocale, saveLocale, localeStatusText, t, nextThinkingLabel, discussionLevels } from "./locale";
 import type { DiscussionLevel, Locale } from "./locale";
 
@@ -305,6 +316,18 @@ function clientErrorMessage(error: unknown, fallback: string) {
   }
   if (typeof error === "string" && error.trim()) return error;
   return fallback;
+}
+
+function isExpectedAbortError(error: unknown): boolean {
+  if (typeof DOMException !== "undefined" && error instanceof DOMException && error.name === "AbortError") return true;
+  if (error instanceof Error) {
+    return /abort|aborted|paused|cancelled|canceled/i.test(`${error.name} ${error.message}`);
+  }
+  if (typeof error === "string") return /abort|aborted|paused|cancelled|canceled/i.test(error);
+  if (typeof Event !== "undefined" && error instanceof Event) {
+    return /abort|aborted|cancel/i.test(error.type);
+  }
+  return false;
 }
 
 function parseThinkingTreeNodes(value: unknown): ThinkingTreeNode[] {
@@ -1023,7 +1046,7 @@ function HomeExperience() {
       }
       return true;
     } catch (error) {
-      if (error instanceof DOMException && error.name === "AbortError") return true;
+      if (isExpectedAbortError(error)) return true;
       console.error(error);
       return false;
     } finally {
@@ -1107,10 +1130,7 @@ function HomeExperience() {
 
     setSlotVersion((v) => v + 1);
 
-    if (pendingConvId) {
-      setConversations((prev) => prev.filter((c) => c.conversation_id !== pendingConvId));
-      setPendingConvId(null);
-    }
+    setPendingConvId(null);
   }
 
   async function sendQuestion() {
@@ -1235,7 +1255,7 @@ function HomeExperience() {
             streamEventHandler(event);
           }
         } catch (readError: unknown) {
-          if (readError instanceof DOMException && readError.name === "AbortError") {
+          if (isExpectedAbortError(readError)) {
             done = true;
             break;
           }
@@ -1243,10 +1263,8 @@ function HomeExperience() {
         }
       }
     } catch (e: unknown) {
-      if (e instanceof DOMException && e.name === "AbortError") {
+      if (isExpectedAbortError(e)) {
         // stream aborted by user — pauseConversation handles UI feedback
-      } else if (e instanceof Error && /aborted|abort|paused/i.test(e.message)) {
-        // fetch/read can surface browser-specific abort errors outside DOMException.
       } else {
         console.error(e);
       }
@@ -1825,6 +1843,13 @@ function Sidebar({
     return () => window.removeEventListener("pointerdown", handlePointerDown);
   }, [menuConversationId]);
 
+  useEffect(() => {
+    if (!confirmDeleteId) return;
+    const handlePointerDown = () => setConfirmDeleteId(null);
+    window.addEventListener("pointerdown", handlePointerDown);
+    return () => window.removeEventListener("pointerdown", handlePointerDown);
+  }, [confirmDeleteId]);
+
   const grouped = useMemo(() => {
     const now = new Date();
     const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
@@ -2007,6 +2032,19 @@ function Sidebar({
                       </button>
                     </div>
                   ) : null}
+                  {confirmDeleteId === item.conversation_id ? (
+                    <div
+                      className="sidebar-confirm-popover"
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <div className="sidebar-confirm-title">{tr.ui.confirmDeleteConversation}</div>
+                      <div className="sidebar-confirm-actions">
+                        <button className="small-button" onClick={() => setConfirmDeleteId(null)}>{tr.ui.cancel}</button>
+                        <button className="small-button small-button-danger" onClick={confirmDelete}>{tr.ui.delete}</button>
+                      </div>
+                    </div>
+                  ) : null}
                 </div>
               ))}
             </div>
@@ -2040,17 +2078,6 @@ function Sidebar({
         </button>
       </div>
 
-      {confirmDeleteId ? (
-        <div className="sidebar-confirm-overlay" onClick={() => setConfirmDeleteId(null)}>
-          <div className="sidebar-confirm-box" onClick={(e) => e.stopPropagation()}>
-            <div className="text-sm mb-3">{tr.ui.confirmDeleteConversation}</div>
-            <div className="flex gap-2 justify-end">
-              <button className="small-button" onClick={() => setConfirmDeleteId(null)}>{tr.ui.cancel}</button>
-              <button className="small-button-primary" onClick={confirmDelete}>{tr.ui.delete}</button>
-            </div>
-          </div>
-        </div>
-      ) : null}
     </aside>
   );
 }
@@ -2380,20 +2407,23 @@ function ThinkingDrawer({
   const drawerComplete = thinkingComplete || Boolean(doneItem);
   const doneTitle = doneItem?.title || thinkingElapsedLabel(locale, elapsed, true);
 
-  function renderTreeNodes(nodes: ThinkingTreeNode[], depth = 0) {
-    return nodes.map((node, index) => {
-      const isLast = index === nodes.length - 1;
+  function normalizedText(text: string): string {
+    return text.replace(/\s+/g, " ").trim().toLowerCase();
+  }
+
+  function renderTreeNodes(nodes: ThinkingTreeNode[], parentTitle = "") {
+    return nodes.map((node) => {
       const children = node.children ?? [];
+      const duplicateRootTitle = parentTitle && normalizedText(node.title) === normalizedText(parentTitle);
       return (
-        <div key={node.id} className="reasoning-tree-node" style={{ "--tree-depth": depth } as CSSProperties}>
-          <div className="reasoning-tree-row">
-            <span className="reasoning-tree-branch">{isLast ? "└─" : "├─"}</span>
+        <div key={node.id} className="reasoning-tree-node">
+          {!duplicateRootTitle && node.title ? (
             <span className={cn("reasoning-tree-title", node.status === "done" && "reasoning-tree-title-done")}>
               {node.title}
             </span>
-          </div>
+          ) : null}
           {node.summary ? <div className="reasoning-tree-summary markdown-body"><Markdown content={node.summary} /></div> : null}
-          {children.length > 0 ? renderTreeNodes(children, depth + 1) : null}
+          {children.length > 0 ? <div className="reasoning-tree-children">{renderTreeNodes(children)}</div> : null}
         </div>
       );
     });
@@ -2443,7 +2473,7 @@ function ThinkingDrawer({
                 </div>
                 {item.status === "complete" || item.status === "streaming" ? (
                   item.treeNodes?.length ? (
-                    <div className="reasoning-tree">{renderTreeNodes(item.treeNodes)}</div>
+                    <div className="reasoning-tree">{renderTreeNodes(item.treeNodes, item.title)}</div>
                   ) : (
                     <div className="reasoning-body markdown-body">
                       <Markdown content={item.body} />
@@ -2687,16 +2717,16 @@ function SettingsOverlay({
         ) : null}
 
         {settingsTab !== "providers" && settingsTab !== "experts" ? (
-          <section className="settings-card">
+          <section className="settings-section">
             {settingsTab === "general" ? (
-              <div className="space-y-5">
-                <div>
-                  <div className="mb-2 text-sm font-medium">{t(locale).ui.language}</div>
-                  <div className="flex gap-2">
+              <div className="settings-list">
+                <div className="settings-row">
+                  <div className="settings-row-title">{t(locale).ui.language}</div>
+                  <div className="settings-language-options">
                     <button
                       className={cn(
-                        "rounded-md border px-3 py-1.5 text-sm",
-                        locale === "zh-CN" ? "border-ink bg-ink text-white" : "border-line bg-white text-muted"
+                        "settings-choice",
+                        locale === "zh-CN" && "settings-choice-active"
                       )}
                       onClick={() => {
                         setLocale("zh-CN");
@@ -2707,8 +2737,8 @@ function SettingsOverlay({
                     </button>
                     <button
                       className={cn(
-                        "rounded-md border px-3 py-1.5 text-sm",
-                        locale === "en" ? "border-ink bg-ink text-white" : "border-line bg-white text-muted"
+                        "settings-choice",
+                        locale === "en" && "settings-choice-active"
                       )}
                       onClick={() => {
                         setLocale("en");
@@ -2842,21 +2872,43 @@ function SkillPicker({
   );
 }
 
-function providerIcon(provider: ProviderProfile | undefined): LucideIcon {
+type ProviderIconSpec =
+  | { kind: "brand"; icon: SimpleIcon }
+  | { kind: "letter"; label: string }
+  | { kind: "lucide"; Icon: LucideIcon };
+
+function providerIcon(provider: ProviderProfile | undefined): ProviderIconSpec {
   const id = `${provider?.provider_id ?? ""} ${provider?.provider_type ?? ""}`.toLowerCase();
-  if (id.includes("openai")) return Sparkles;
-  if (id.includes("anthropic")) return Bot;
-  if (id.includes("deepseek")) return Brain;
-  if (id.includes("ollama") || id.includes("local")) return Server;
-  if (id.includes("cloud")) return Cloud;
-  return Cpu;
+  if (id.includes("anthropic")) return { kind: "brand", icon: siAnthropic };
+  if (id.includes("claude-code") || id.includes("claudecode")) return { kind: "brand", icon: siClaudecode };
+  if (id.includes("claude")) return { kind: "brand", icon: siClaude };
+  if (id.includes("deepseek")) return { kind: "brand", icon: siDeepseek };
+  if (id.includes("ollama") || id.includes("local")) return { kind: "brand", icon: siOllama };
+  if (id.includes("openrouter")) return { kind: "brand", icon: siOpenrouter };
+  if (id.includes("gemini") || id.includes("google")) return { kind: "brand", icon: siGooglegemini };
+  if (id.includes("mistral")) return { kind: "brand", icon: siMistralai };
+  if (id.includes("perplexity")) return { kind: "brand", icon: siPerplexity };
+  if (id.includes("moonshot") || id.includes("kimi")) return { kind: "brand", icon: siMoonshotai };
+  if (id.includes("qwen") || id.includes("alibaba")) return { kind: "brand", icon: siQwen };
+  if (id.includes("baidu") || id.includes("ernie")) return { kind: "brand", icon: siBaidu };
+  if (id.includes("minimax")) return { kind: "brand", icon: siMinimax };
+  if (id.includes("openai") || id.includes("chatgpt") || id.includes("gpt")) return { kind: "letter", label: "AI" };
+  return { kind: "lucide", Icon: Brain };
 }
 
 function ProviderIcon({ provider }: { provider: ProviderProfile | undefined }) {
-  const Icon = providerIcon(provider);
+  const spec = providerIcon(provider);
   return (
     <span className="provider-select-icon" aria-hidden="true">
-      <Icon size={16} />
+      {spec.kind === "brand" ? (
+        <svg viewBox="0 0 24 24" width="16" height="16" role="img" focusable="false">
+          <path fill="currentColor" d={spec.icon.path} />
+        </svg>
+      ) : spec.kind === "letter" ? (
+        <span className="provider-select-letter">{spec.label}</span>
+      ) : (
+        <spec.Icon size={16} />
+      )}
     </span>
   );
 }
