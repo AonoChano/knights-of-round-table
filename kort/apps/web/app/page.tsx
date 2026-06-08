@@ -1664,12 +1664,17 @@ function HomeExperience() {
         }}
       />
 
-      <section className="main-shell">
+      <section className={cn("main-shell", !hasRun && "main-shell-empty")}>
         <header className="topbar">
-          <button className="brand-button" onClick={fullReset}>
-            <span>Round Table</span>
-            <small>{tr.ui.statusReady}</small>
-          </button>
+          <div className="topbar-left">
+            <DiscussionModePicker
+              discussionLevel={discussionLevel}
+              deepThink={deepThink}
+              locale={locale}
+              setDiscussionLevel={setDiscussionLevel}
+              setDeepThink={setDeepThink}
+            />
+          </div>
           <div className="flex items-center gap-2">
             <button className="small-button small-button-icon">
               <Share2 size={15} aria-hidden="true" />
@@ -1698,28 +1703,37 @@ function HomeExperience() {
                 }}
               />
             ) : (
-              <div className="new-chat-prompt">{newChatPrompt}</div>
+              <div className="new-chat-start">
+                <div className="new-chat-prompt">{newChatPrompt}</div>
+                <Composer
+                  input={input}
+                  loading={loading}
+                  paused={paused}
+                  pauseFlash={pauseFlash}
+                  locale={locale}
+                  setInput={setInput}
+                  onSubmit={() => void sendQuestion()}
+                  onPause={pauseConversation}
+                />
+              </div>
             )}
           </div>
         </div>
 
-        <div className="composer-dock">
-          <Composer
-            input={input}
-            loading={loading}
-            paused={paused}
-            pauseFlash={pauseFlash}
-            discussionLevel={discussionLevel}
-            deepThink={deepThink}
-            locale={locale}
-            setInput={setInput}
-            setDiscussionLevel={setDiscussionLevel}
-            setDeepThink={setDeepThink}
-            onSubmit={() => void sendQuestion()}
-            onPause={pauseConversation}
-          />
-        </div>
-
+        {hasRun ? (
+          <div className="composer-dock">
+            <Composer
+              input={input}
+              loading={loading}
+              paused={paused}
+              pauseFlash={pauseFlash}
+              locale={locale}
+              setInput={setInput}
+              onSubmit={() => void sendQuestion()}
+              onPause={pauseConversation}
+            />
+          </div>
+        ) : null}
       </section>
 
       {drawerOpen ? (
@@ -1928,8 +1942,20 @@ function Sidebar({
     <aside className={cn("sidebar", collapsed && "sidebar-collapsed")} aria-label="Conversation sidebar">
       <div className="sidebar-main">
         <div className="sidebar-header">
-          <div className="logo-mark" aria-label="Knights of the Round Table">
-            <img src="/icon.svg" alt="" aria-hidden="true" />
+          <div className="sidebar-brand" aria-label="Knights of the Round Table">
+            <div className="logo-mark">
+              <img className="brand-icon" src="/icon.svg" alt="" aria-hidden="true" />
+              <button
+                className="logo-collapse-overlay"
+                type="button"
+                title={collapsed ? tr.ui.expandSidebar : tr.ui.collapseSidebar}
+                aria-label={collapsed ? tr.ui.expandSidebar : tr.ui.collapseSidebar}
+                onClick={onToggleCollapsed}
+              >
+                {collapsed ? <PanelLeftOpen size={17} aria-hidden="true" /> : <PanelLeftClose size={17} aria-hidden="true" />}
+              </button>
+            </div>
+            <img className="sidebar-wordmark sidebar-expanded-only" src="/icon_text_part.svg" alt="Knights of Round Table" />
           </div>
           <button
             className="sidebar-collapse-button"
@@ -2245,17 +2271,94 @@ function Markdown({ content }: { content: string }) {
 
 const COMPOSER_TEXTAREA_MAX_HEIGHT = 176;
 
+function DiscussionModePicker({
+  discussionLevel,
+  deepThink,
+  locale,
+  setDiscussionLevel,
+  setDeepThink,
+}: {
+  discussionLevel: DiscussionLevel;
+  deepThink: boolean;
+  locale: Locale;
+  setDiscussionLevel: Dispatch<SetStateAction<DiscussionLevel>>;
+  setDeepThink: Dispatch<SetStateAction<boolean>>;
+}) {
+  const [dropdownOpen, setDropdownOpen] = useState(false);
+  const levels = useMemo(() => discussionLevels(locale), [locale]);
+  const active = levels.find((d) => d.id === discussionLevel) ?? levels[0];
+  const isActive = discussionLevel !== "off";
+  const modeTitle = `${active.tag} [${active.code}]`;
+
+  return (
+    <div className="discussion-mode">
+      <div className="discussion-mode-control">
+        <button
+          className={cn("discussion-level-trigger", "discussion-level-trigger-topbar", isActive && "discussion-level-trigger-active")}
+          onClick={() => setDropdownOpen((prev) => !prev)}
+          type="button"
+          aria-haspopup="menu"
+          aria-expanded={dropdownOpen}
+          aria-label={modeTitle}
+          title={modeTitle}
+        >
+          <span className="discussion-trigger-label">{active.tag}</span>
+          <span className="discussion-trigger-code">[{active.code}]</span>
+          <ChevronDown className="discussion-trigger-chevron" size={14} aria-hidden="true" />
+        </button>
+        {dropdownOpen ? (
+          <div className="discussion-level-dropdown discussion-level-dropdown-topbar" role="menu">
+            {levels.map((level) => (
+              <button
+                key={level.id}
+                className="discussion-level-option"
+                type="button"
+                role="menuitemradio"
+                aria-checked={discussionLevel === level.id}
+                onClick={() => {
+                  setDiscussionLevel(level.id);
+                  setDropdownOpen(false);
+                }}
+              >
+                <span className="discussion-level-label">{level.label}</span>
+                <span className="discussion-level-tag">{level.tag}</span>
+                {discussionLevel === level.id ? (
+                  <Check className="discussion-level-check" size={14} aria-hidden="true" />
+                ) : null}
+              </button>
+            ))}
+          </div>
+        ) : null}
+      </div>
+      {discussionLevel === "off" ? (
+        <button
+          className={cn(
+            "discussion-level-trigger",
+            "discussion-level-trigger-topbar",
+            deepThink && "discussion-level-trigger-active"
+          )}
+          onClick={() => setDeepThink((prev) => !prev)}
+          type="button"
+          title={t(locale).ui.deepThink}
+        >
+          <Brain size={14} aria-hidden="true" />
+          {t(locale).ui.deepThink}
+          {deepThink ? (
+            <Check className="discussion-level-check discussion-level-check-inline" size={14} aria-hidden="true" />
+          ) : null}
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
 function Composer({
   input,
   loading,
   paused,
   pauseFlash,
-  discussionLevel,
-  deepThink,
   locale,
   setInput,
-  setDiscussionLevel,
-  setDeepThink,
   onSubmit,
   onPause,
 }: {
@@ -2263,20 +2366,12 @@ function Composer({
   loading: boolean;
   paused: boolean;
   pauseFlash: boolean;
-  discussionLevel: DiscussionLevel;
-  deepThink: boolean;
   locale: Locale;
   setInput: Dispatch<SetStateAction<string>>;
-  setDiscussionLevel: Dispatch<SetStateAction<DiscussionLevel>>;
-  setDeepThink: Dispatch<SetStateAction<boolean>>;
   onSubmit: () => void;
   onPause: () => void;
 }) {
-  const [dropdownOpen, setDropdownOpen] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const levels = useMemo(() => discussionLevels(locale), [locale]);
-  const active = levels.find((d) => d.id === discussionLevel) ?? levels[0];
-  const isActive = discussionLevel !== "off";
   const copy = t(locale).ui;
 
   useEffect(() => {
@@ -2292,75 +2387,21 @@ function Composer({
 
   return (
     <div className="composer-shell">
-      <textarea
-        ref={textareaRef}
-        value={input}
-        onChange={(event) => setInput(event.target.value)}
-        onKeyDown={(event) => {
-          if (event.key === "Enter" && !event.shiftKey && !loading) {
-            event.preventDefault();
-            onSubmit();
-          }
-        }}
-        rows={1}
-        className="composer-textarea"
-        placeholder={t(locale).ui.composerPlaceholder}
-      />
-      <div className="composer-toolbar">
-        <div className="composer-corner-controls">
-          <div className="composer-corner-control">
-            <button
-              className={cn("discussion-level-trigger", isActive && "discussion-level-trigger-active")}
-              onClick={() => setDropdownOpen((prev) => !prev)}
-              type="button"
-              aria-haspopup="menu"
-              aria-expanded={dropdownOpen}
-            >
-              <span className="discussion-trigger-label">{active.tag}</span>
-              <span className="discussion-trigger-code">[{active.code}]</span>
-            </button>
-            {dropdownOpen ? (
-              <div className="discussion-level-dropdown" role="menu">
-                {levels.map((level) => (
-                  <button
-                    key={level.id}
-                    className="discussion-level-option"
-                    type="button"
-                    role="menuitemradio"
-                    aria-checked={discussionLevel === level.id}
-                    onClick={() => {
-                      setDiscussionLevel(level.id);
-                      setDropdownOpen(false);
-                    }}
-                  >
-                    <span className="discussion-level-label">{level.label}</span>
-                    <span className="discussion-level-tag">{level.tag}</span>
-                    {discussionLevel === level.id ? (
-                      <Check className="discussion-level-check" size={14} aria-hidden="true" />
-                    ) : null}
-                  </button>
-                ))}
-              </div>
-            ) : null}
-          </div>
-          {discussionLevel === "off" ? (
-            <button
-              className={cn(
-                "discussion-level-trigger",
-                deepThink && "discussion-level-trigger-active"
-              )}
-              onClick={() => setDeepThink((prev) => !prev)}
-              type="button"
-              title={t(locale).ui.deepThink}
-            >
-              <Brain size={14} aria-hidden="true" />
-              {t(locale).ui.deepThink}
-              {deepThink ? (
-                <Check className="discussion-level-check discussion-level-check-inline" size={14} aria-hidden="true" />
-              ) : null}
-            </button>
-          ) : null}
-        </div>
+      <div className="composer-input-row">
+        <textarea
+          ref={textareaRef}
+          value={input}
+          onChange={(event) => setInput(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && !event.shiftKey && !loading) {
+              event.preventDefault();
+              onSubmit();
+            }
+          }}
+          rows={1}
+          className="composer-textarea"
+          placeholder={t(locale).ui.composerPlaceholder}
+        />
         <button
           className={cn(
             "send-button",

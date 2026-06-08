@@ -5,6 +5,10 @@ import { ReactNode } from "react";
 export const metadata: Metadata = {
   title: "KORT",
   description: "Knights of the Round Table",
+  icons: {
+    icon: "/icon.svg",
+    shortcut: "/icon.svg",
+  },
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {

@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 100" width="100%" height="100%">
+    <style>
+        .logo-text { font-family: 'Arial Black', Impact, sans-serif; font-weight: 900; font-size: 32px; fill: currentColor; }
+    </style>
+    <text x="5" y="40" class="logo-text">KNIGHTS OF</text>
+    <text x="5" y="80" class="logo-text">ROUND TABLE</text>
+</svg>
