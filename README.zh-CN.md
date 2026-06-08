@@ -1,11 +1,9 @@
 <div align="center">
-  <img src="kort/apps/web/public/kort-readme-logo.svg" alt="KORT logo" width="300" height="96" />
+  <img src="kort/apps/web/public/kort-readme-logo.svg" alt="KORT logo" width="300" height="96" style="filter: invert(1);" />
 
   <h1>圆桌骑士 KORT</h1>
 
-  <p>
-    一个隐藏原始思维链的多模型专家小组讨论 Web 应用。
-  </p>
+  <p>隐藏思维链的多模型专家讨论 Web 应用。</p>
 
   <p>
     <a href="README.md">English</a>
@@ -29,27 +27,27 @@
 
 ## 项目简介
 
-KORT 让用户的问题进入一个可配置的 AI 专家小组：
+KORT 将用户问题送入可配置的 AI 专家小组：
 
 1. 专家独立分析。
-2. 批判者审视和找茬。
-3. 图编排可进行多轮讨论。
-4. 总结者只生成用户可见的阶段摘要。
+2. 批判者审查和质疑。
+3. 图编排支持多轮讨论。
+4. 总结者只输出用户可见的阶段摘要。
 5. 整合者输出最终答案。
 
-产品边界非常明确：原始专家讨论、provider reasoning content、内部 transcript 只存在于后端运行时状态。用户只能看到 Summarizer 投影出来的阶段摘要和最终答案。
+产品边界：原始专家讨论、provider 推理内容、内部对话记录只存在于后端运行时状态。用户只看到总结者投映的阶段摘要和最终答案。
 
 ## 当前能力
 
 | 模块 | 能力 |
 | --- | --- |
-| 聊天体验 | 类 ChatGPT 的主界面、侧栏历史、固定输入框、流式回答、Markdown/KaTeX |
+| 聊天体验 | ChatGPT 风格主界面、侧栏历史、固定输入框、流式回答、Markdown/KaTeX |
 | 思考体验 | 默认折叠的思考入口、右侧思考抽屉、完成态、结构化思考节点 |
-| 编排 | LangGraph 专家/批判/总结/整合流程，支持可配置讨论深度 |
-| 路由 | 简单问候等请求可跳过完整专家组，避免过度反应 |
+| 编排 | LangGraph 专家/批判/总结/整合流程，支持配置讨论深度 |
+| 路由 | 简单问候等请求可跳过完整专家组 |
 | Agent | 文件系统 Agent，支持角色、提示词、provider、优先级和 Skill 权限 |
-| Provider | 运行时 provider profiles、本地 key 状态、连通性检查、OpenAI-compatible 调用 |
-| 持久化 | 只持久化用户可见投影，不暴露原始隐藏讨论 |
+| Provider | 运行时 provider profiles、本地 key 状态、连通性检查、OpenAI‑compatible 调用 |
+| 持久化 | 只持久化用户可见投映，不暴露原始隐藏讨论 |
 
 ## 快速启动
 
@@ -57,7 +55,7 @@ KORT 让用户的问题进入一个可配置的 AI 专家小组：
 docker compose up --build
 ```
 
-启动后访问：
+访问：
 
 | 服务 | 地址 |
 | --- | --- |
@@ -92,7 +90,7 @@ pnpm install
 pnpm dev
 ```
 
-前端通过 `NEXT_PUBLIC_API_BASE_URL` 连接后端。Docker Compose 默认设置为 `http://localhost:8000`。
+前端通过 `NEXT_PUBLIC_API_BASE_URL` 连接后端。Docker Compose 默认设为 `http://localhost:8000`。
 
 ## 项目结构
 
@@ -118,7 +116,7 @@ kort/
 │   ├── agents/                 # Agent 文件夹和 agent.yaml
 │   ├── providers/              # Provider 元数据
 │   ├── skills/                 # 全局 Skills
-│   └── data/                   # 本地运行时数据，不提交
+│   └── data/                   # 本地运行时数据
 └── docs/
     └── architecture-rules.md
 ```
@@ -130,14 +128,14 @@ kort/
   -> 请求路由器
   -> 直接回答 | 单模型思考 | 专家小组
   -> LangGraph 专家/批判多轮讨论
-  -> Summarizer 可见投影
+  -> Summarizer 可见投映
   -> Synthesizer 最终答案
   -> SSE 流式返回前端
 ```
 
 核心规则：
 
-- Hidden CoT 是产品边界，不是 UI 文案。
+- Hidden CoT 不对用户显示。
 - 用户只能看到 Summarizer 阶段摘要和最终答案。
 - 产品代码在 `kort/apps`，运行时数据在 `kort/runtime`。
 - API Key 只写入本地 runtime data 或环境变量，不提交到仓库。
@@ -167,7 +165,7 @@ kort/
 | `DELETE` | `/api/agents/{name}` | 删除 Agent |
 | `GET` | `/api/skills` | 列出全局 Skills |
 
-每个 Agent 位于 `kort/runtime/agents/{name}/agent.yaml`：
+Agent 文件位于 `kort/runtime/agents/{name}/agent.yaml`：
 
 ```yaml
 name: research-lead
@@ -220,7 +218,7 @@ priority: 20
 | `summarizer-main` | summarizer | `deepseek-chat` |
 | `synthesizer-main` | synthesizer | `deepseek-chat` |
 
-系统 Agent 在 GUI 中受保护，不能随意编辑或删除。
+系统 Agent 在 GUI 中受保护，不可随意编辑或删除。
 
 ## 内置 Skills
 
@@ -233,7 +231,7 @@ priority: 20
 | `stage-summary-projection` | 用户可见阶段摘要格式 |
 | `final-answer-structure` | 最终答案结构模板 |
 
-全局 Skills 可共享。Agent 私有 Skills 可以放在 `kort/runtime/agents/{name}/skills/` 下，通过文件系统管理。
+全局 Skills 可共享。Agent 私有 Skills 放在 `kort/runtime/agents/{name}/skills/` 下，通过文件系统管理。
 
 ## 技术栈
 
@@ -259,9 +257,3 @@ python -m pytest tests
 pnpm --dir kort/apps/web exec tsc --noEmit
 pnpm --dir kort/apps/web build
 ```
-
-## 仓库说明
-
-- `kort/runtime/data/` 是本地运行时状态，不应提交。
-- `.trae/`、`.codex/`、`.claude/`、`AGENTS.md`、`HARNESS.md` 是本地 agent 上下文文件，已按规则 ignored。
-- 公开 README 只描述产品和仓库公共表面，不记录本地 agent 操作细节。
