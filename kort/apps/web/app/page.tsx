@@ -284,16 +284,15 @@ function saveLogLevel(level: LogLevel): void {
 
 async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}, timeoutMs = 8000): Promise<Response> {
   const controller = new AbortController();
-  let timedOut = false;
+  const timeoutError = new RequestTimeoutError(timeoutMs);
   const timeout = window.setTimeout(() => {
-    timedOut = true;
-    controller.abort();
+    controller.abort(timeoutError);
   }, timeoutMs);
 
   try {
     return await fetch(input, { ...init, signal: controller.signal });
   } catch (error) {
-    if (timedOut) throw new RequestTimeoutError(timeoutMs);
+    if (error === timeoutError || controller.signal.reason === timeoutError) throw timeoutError;
     throw error;
   } finally {
     window.clearTimeout(timeout);

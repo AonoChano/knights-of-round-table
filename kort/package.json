@@ -3,9 +3,11 @@
   "private": true,
   "packageManager": "pnpm@10.10.0",
   "scripts": {
-    "dev": "concurrently -n api,web -c blue,green --raw --kill-others-on-fail=false \"pnpm dev:api\" \"pnpm dev:web\"",
-    "dev:api": "cd apps/api && python -m uvicorn kort_api.main:app --app-dir src --reload --port 8000",
+    "dev": "node scripts/dev-stop.mjs --quiet && concurrently -n API,WEB,WARMUP -c blue,green,gray --kill-others-on-fail=false \"pnpm dev:api\" \"pnpm dev:web\" \"node scripts/dev-warmup.mjs\"",
+    "dev:api": "cd apps/api && python -m uvicorn kort_api.main:app --app-dir src --reload --reload-dir src --host 127.0.0.1 --port 8000",
     "dev:web": "pnpm --dir apps/web dev",
+    "dev:stop": "node scripts/dev-stop.mjs",
+    "dev:doctor": "node scripts/dev-stop.mjs --check",
     "build:web": "pnpm --dir apps/web build"
   },
   "devDependencies": {
