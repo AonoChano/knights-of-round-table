@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import queue
 import threading
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from uuid import uuid4
@@ -29,6 +31,8 @@ from .schemas import (
     StageSummary,
     utc_now,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class ConversationJob:
@@ -112,8 +116,14 @@ def _merge_streamed_summaries(events: list[StageSummary]) -> list[StageSummary]:
     return list(seen.values())
 
 
+def _sse_event_name(event: str) -> str:
+    first_line = event.splitlines()[0] if event else ""
+    return first_line.removeprefix("event:").strip() if first_line.startswith("event:") else "unknown"
+
+
 class ConversationStore:
     def __init__(self, path: Path) -> None:
+        original_path = path
         self.path = path
         if self.path.is_file():
             old_file = self.path
@@ -127,8 +137,10 @@ class ConversationStore:
             self.path.mkdir(parents=True, exist_ok=True)
         else:
             self.path.mkdir(parents=True, exist_ok=True)
+        logger.info("conversation_store.ready configured_path=%s resolved_path=%s", original_path, self.path)
 
     def _migrate_from_file(self, file_path: Path) -> None:
+        migrated = 0
         try:
             data = json.loads(file_path.read_text(encoding="utf-8"))
             records = data if isinstance(data, list) else []
@@ -137,23 +149,33 @@ class ConversationStore:
                     record = ConversationRecord.model_validate(entry)
                     fpath = self.path / f"{record.conversation_id}.json"
                     fpath.write_text(json.dumps(record.model_dump(), ensure_ascii=False, indent=2), encoding="utf-8")
+                    migrated += 1
                 except Exception:
-                    pass
+                    logger.warning("conversation_store.migrate_skip_invalid source=%s", file_path)
             file_path.unlink()
-        except Exception:
-            pass
+            logger.info("conversation_store.migrated source=%s count=%s", file_path, migrated)
+        except Exception as exc:
+            logger.warning("conversation_store.migrate_failed source=%s error=%s", file_path, exc)
 
     def list_records(self) -> list[ConversationRecord]:
+        started = time.perf_counter()
         records: list[ConversationRecord] = []
         if not self.path.exists():
+            logger.debug("conversation_store.list_records_missing path=%s", self.path)
             return records
         for file_path in sorted(self.path.glob("*.json")):
             try:
                 data = json.loads(file_path.read_text(encoding="utf-8"))
                 record = ConversationRecord.model_validate(data)
                 records.append(record)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("conversation_store.skip_invalid file=%s error=%s", file_path.name, exc)
+        logger.debug(
+            "conversation_store.list_records count=%s duration_ms=%.1f path=%s",
+            len(records),
+            (time.perf_counter() - started) * 1000,
+            self.path,
+        )
         return records
 
     def get_record(self, conversation_id: str) -> ConversationRecord | None:
@@ -163,7 +185,8 @@ class ConversationStore:
         try:
             data = json.loads(file_path.read_text(encoding="utf-8"))
             return ConversationRecord.model_validate(data)
-        except Exception:
+        except Exception as exc:
+            logger.warning("conversation_store.get_failed conversation_id=%s error=%s", conversation_id, exc)
             return None
 
     def save_records(self, records: list[ConversationRecord]) -> None:
@@ -180,6 +203,7 @@ class ConversationStore:
             json.dumps(record.model_dump(mode="json"), ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        logger.debug("conversation_store.saved conversation_id=%s rounds=%s", record.conversation_id, len(record.rounds))
 
     def _update_record(self, conversation_id: str, updater) -> ConversationRecord | None:
         record = self.get_record(conversation_id)
@@ -211,6 +235,7 @@ class VisibleConversationService:
 
     def list_conversations(self) -> list[ConversationListItem]:
         records = self.store.list_records()
+        logger.info("conversations.list count=%s", len(records))
         return [
             ConversationListItem(
                 conversation_id=item.conversation_id,
@@ -254,7 +279,9 @@ class VisibleConversationService:
         with self.jobs_lock:
             job = self.jobs.get(conversation_id)
         if job is None:
+            logger.info("conversation_job.resume_missing conversation_id=%s", conversation_id)
             return None
+        logger.info("conversation_job.resume conversation_id=%s done=%s event_count=%s", conversation_id, job.done, len(job.events))
         return job.stream()
 
     def stream_conversation(
@@ -278,12 +305,21 @@ class VisibleConversationService:
             if job is None or job.done:
                 job = ConversationJob(conversation_id)
                 self.jobs[conversation_id] = job
+                logger.info(
+                    "conversation_job.start conversation_id=%s level=%s deep_think=%s has_existing=%s",
+                    conversation_id,
+                    request.level,
+                    request.deep_think,
+                    existing is not None,
+                )
                 thread = threading.Thread(
                     target=self._run_job,
                     args=(job, request, conversation_id, existing, expert_count, agents, providers, secrets),
                     daemon=True,
                 )
                 thread.start()
+            else:
+                logger.info("conversation_job.reuse conversation_id=%s event_count=%s", conversation_id, len(job.events))
 
         return job.stream()
 
@@ -308,10 +344,13 @@ class VisibleConversationService:
                 providers,
                 secrets,
             ):
+                logger.debug("conversation_job.event conversation_id=%s event=%s", conversation_id, _sse_event_name(event))
                 job.append(event)
         except Exception as exc:
+            logger.exception("conversation_job.error conversation_id=%s", conversation_id)
             job.finish(exc)
             return
+        logger.info("conversation_job.complete conversation_id=%s event_count=%s", conversation_id, len(job.events))
         job.finish()
 
     def _generate_conversation_events(
@@ -358,6 +397,14 @@ class VisibleConversationService:
                     secrets=secrets,
                     has_history=bool(existing and existing.rounds),
                 )
+            logger.info(
+                "conversation_route conversation_id=%s kind=%s reason=%s max_rounds=%s has_history=%s",
+                conversation_id,
+                route_decision.kind,
+                route_decision.reason_code,
+                route_decision.max_rounds,
+                bool(existing and existing.rounds),
+            )
 
             if route_decision.kind == "solo_thinking":
                 # --- Deep-think (solo model with CoT summaries) ---
@@ -472,6 +519,12 @@ class VisibleConversationService:
                 ).model_dump(mode="json"),
             )
         except GeneratorExit:
+            logger.info(
+                "conversation_job.client_disconnected conversation_id=%s summaries=%s final_chars=%s",
+                conversation_id,
+                len(collected_summaries),
+                len(final_body),
+            )
             # Client disconnected (e.g. user clicked pause).
             # Save partial progress so it survives page refreshes.
             if not collected_summaries and not final_body:

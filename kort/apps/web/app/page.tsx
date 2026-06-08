@@ -7,6 +7,7 @@ import type { Dispatch, SetStateAction } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
   Brain,
+  Bug,
   Check,
   ChevronDown,
   ChevronRight,
@@ -153,7 +154,19 @@ type ProviderSecretStatus = {
   configured: boolean;
 };
 
-type SettingsTab = "general" | "providers" | "experts" | "skills" | "data";
+type LogLevel = "error" | "info" | "debug";
+
+type DeveloperDiagnostics = {
+  app_env: string;
+  api_base_url: string;
+  conversation_store_path: string;
+  conversation_count: number;
+  jobs_total: number;
+  jobs_running: number;
+  log_level: string;
+};
+
+type SettingsTab = "general" | "providers" | "experts" | "skills" | "data" | "developer";
 
 const settingsTabIcons: Record<SettingsTab, LucideIcon> = {
   general: SlidersHorizontal,
@@ -161,6 +174,7 @@ const settingsTabIcons: Record<SettingsTab, LucideIcon> = {
   experts: UsersRound,
   skills: Wrench,
   data: Database,
+  developer: Bug,
 };
 const AGENT_ROLE_OPTIONS = [
   { id: "expert", label: "Expert" },
@@ -210,8 +224,23 @@ type StreamSlot = {
 const TRANSIENT_TIMELINE_IDS = new Set(["thinking-active", "talking-active"]);
 const DISCUSSION_LEVEL_KEY = "kort-discussion-level";
 const DEEP_THINK_KEY = "kort-deep-think";
+const DEVELOPER_MODE_KEY = "kort-developer-mode";
+const LOG_LEVEL_KEY = "kort-log-level";
 const DEFAULT_DISCUSSION_LEVEL: DiscussionLevel = "auto";
 const DEFAULT_LOCALE: Locale = "zh-CN";
+const DEFAULT_LOG_LEVEL: LogLevel = "info";
+const LOG_LEVEL_RANK: Record<LogLevel, number> = {
+  error: 0,
+  info: 1,
+  debug: 2,
+};
+
+class RequestTimeoutError extends Error {
+  constructor(public timeoutMs: number) {
+    super(`Request timed out after ${timeoutMs} ms`);
+    this.name = "RequestTimeoutError";
+  }
+}
 
 function loadDiscussionLevel(): DiscussionLevel {
   if (typeof window === "undefined") return DEFAULT_DISCUSSION_LEVEL;
@@ -232,6 +261,62 @@ function loadDeepThink(): boolean {
 
 function saveDeepThink(enabled: boolean): void {
   localStorage.setItem(DEEP_THINK_KEY, String(enabled));
+}
+
+function loadDeveloperMode(): boolean {
+  if (typeof window === "undefined") return false;
+  return localStorage.getItem(DEVELOPER_MODE_KEY) === "true";
+}
+
+function saveDeveloperMode(enabled: boolean): void {
+  localStorage.setItem(DEVELOPER_MODE_KEY, String(enabled));
+}
+
+function loadLogLevel(): LogLevel {
+  if (typeof window === "undefined") return DEFAULT_LOG_LEVEL;
+  const stored = localStorage.getItem(LOG_LEVEL_KEY);
+  return stored === "error" || stored === "info" || stored === "debug" ? stored : DEFAULT_LOG_LEVEL;
+}
+
+function saveLogLevel(level: LogLevel): void {
+  localStorage.setItem(LOG_LEVEL_KEY, level);
+}
+
+async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}, timeoutMs = 8000): Promise<Response> {
+  const controller = new AbortController();
+  let timedOut = false;
+  const timeout = window.setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } catch (error) {
+    if (timedOut) throw new RequestTimeoutError(timeoutMs);
+    throw error;
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
+
+function logClientEvent(
+  developerMode: boolean,
+  logLevel: LogLevel,
+  level: LogLevel,
+  message: string,
+  data?: Record<string, unknown>
+) {
+  if (!developerMode || LOG_LEVEL_RANK[level] > LOG_LEVEL_RANK[logLevel]) return;
+  const payload = data ? { ...data } : undefined;
+  const prefix = `[KORT ${level.toUpperCase()}] ${message}`;
+  if (level === "error") {
+    console.error(prefix, payload ?? "");
+  } else if (level === "debug") {
+    console.debug(prefix, payload ?? "");
+  } else {
+    console.info(prefix, payload ?? "");
+  }
 }
 
 function createEmptySlot(): StreamSlot {
@@ -302,6 +387,7 @@ function settingsTabs(locale: Locale): Array<{ id: SettingsTab; label: string }>
     { id: "experts", label: t(locale).ui.experts },
     { id: "skills", label: t(locale).ui.skills },
     { id: "data", label: t(locale).ui.data },
+    { id: "developer", label: t(locale).ui.developer },
   ];
 }
 
@@ -533,6 +619,7 @@ function HomeExperience() {
   const [deepThink, setDeepThink] = useState(false);
   const [conversations, setConversations] = useState<ConversationListItem[]>([]);
   const [conversationsError, setConversationsError] = useState<string | null>(null);
+  const [conversationsLoading, setConversationsLoading] = useState(true);
   const [messagePairs, setMessagePairs] = useState<MessagePair[]>([]);
   const [currentConversationId, setCurrentConversationId] = useState<string | null>(null);
   const [pendingConvId, setPendingConvId] = useState<string | null>(null);
@@ -546,6 +633,10 @@ function HomeExperience() {
   const [unreadConversationIds, setUnreadConversationIds] = useState<Set<string>>(new Set());
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [newChatPrompt, setNewChatPrompt] = useState(() => defaultNewChatPrompt(DEFAULT_LOCALE));
+  const [developerMode, setDeveloperMode] = useState(false);
+  const [logLevel, setLogLevel] = useState<LogLevel>(DEFAULT_LOG_LEVEL);
+  const [developerStatus, setDeveloperStatus] = useState<string | null>(null);
+  const [developerDiagnostics, setDeveloperDiagnostics] = useState<DeveloperDiagnostics | null>(null);
 
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -749,6 +840,8 @@ function HomeExperience() {
     const loadedLocale = loadLocale();
     setDiscussionLevel(loadDiscussionLevel());
     setDeepThink(loadDeepThink());
+    setDeveloperMode(loadDeveloperMode());
+    setLogLevel(loadLogLevel());
     setLocale(loadedLocale);
     setNewChatPrompt(randomNewChatPrompt(loadedLocale));
     window.setTimeout(() => {
@@ -805,6 +898,26 @@ function HomeExperience() {
     saveDeepThink(deepThink);
   }, [deepThink]);
 
+  useEffect(() => {
+    if (!preferencesReadyRef.current) return;
+    saveDeveloperMode(developerMode);
+  }, [developerMode]);
+
+  useEffect(() => {
+    if (!preferencesReadyRef.current) return;
+    saveLogLevel(logLevel);
+    void updateServerLogLevel(logLevel);
+  }, [logLevel]);
+
+  useEffect(() => {
+    if (!settingsOpen || settingsTab !== "developer" || developerDiagnostics) return;
+    void loadDeveloperDiagnostics();
+  }, [settingsOpen, settingsTab, developerDiagnostics]);
+
+  function clientLog(level: LogLevel, message: string, data?: Record<string, unknown>) {
+    logClientEvent(developerMode, logLevel, level, message, data);
+  }
+
   async function loadProviders() {
     try {
       const response = await fetch(`${API_BASE}/api/providers`);
@@ -854,6 +967,58 @@ function HomeExperience() {
     }
   }
 
+  async function loadDeveloperDiagnostics() {
+    const copy = t(locale).ui;
+    setDeveloperStatus(copy.loadingDiagnostics);
+    clientLog("info", "developer diagnostics requested", { apiBase: API_BASE });
+    try {
+      const response = await fetchWithTimeout(`${API_BASE}/api/developer/runtime`, {}, 6000);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const payload = (await response.json()) as DeveloperDiagnostics;
+      setDeveloperDiagnostics(payload);
+      setDeveloperStatus(copy.diagnosticsUpdated);
+      clientLog("debug", "developer diagnostics loaded", {
+        conversationCount: payload.conversation_count,
+        jobsRunning: payload.jobs_running,
+        backendLogLevel: payload.log_level,
+      });
+    } catch (error) {
+      const message =
+        error instanceof RequestTimeoutError
+          ? copy.requestTimedOut(Math.round(error.timeoutMs / 1000))
+          : clientErrorMessage(error, copy.backendUnavailable);
+      setDeveloperStatus(message);
+      clientLog("error", "developer diagnostics failed", { error: message });
+    }
+  }
+
+  async function updateServerLogLevel(level: LogLevel) {
+    const copy = t(locale).ui;
+    try {
+      const response = await fetchWithTimeout(
+        `${API_BASE}/api/developer/log-level`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ level: level.toUpperCase() }),
+        },
+        6000
+      );
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const payload = (await response.json()) as { level: string };
+      setDeveloperStatus(copy.logLevelSaved);
+      setDeveloperDiagnostics((current) => current ? { ...current, log_level: payload.level } : current);
+      clientLog("info", "server log level updated", { level: payload.level });
+    } catch (error) {
+      const message =
+        error instanceof RequestTimeoutError
+          ? copy.requestTimedOut(Math.round(error.timeoutMs / 1000))
+          : clientErrorMessage(error, copy.backendUnavailable);
+      setDeveloperStatus(copy.logLevelSaveFailed(message));
+      clientLog("error", "server log level update failed", { error: message });
+    }
+  }
+
   async function createAgent(data: { name: string; nickname: string; role: string; provider_profile: string; model: string; system_prompt: string; allowed_global_skills: string[]; disabled_global_skills: string[]; priority: number }) {
     try {
       const response = await fetch(`${API_BASE}/api/agents`, {
@@ -893,19 +1058,31 @@ function HomeExperience() {
   }
 
   async function loadConversations() {
+    const copy = t(locale).ui;
+    setConversationsLoading(true);
+    clientLog("info", "conversation history load started", { apiBase: API_BASE });
     try {
-      const response = await fetch(`${API_BASE}/api/conversations`);
+      const response = await fetchWithTimeout(`${API_BASE}/api/conversations`, {}, 6000);
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const payload = (await response.json()) as ConversationListItem[];
       setConversations(payload);
       setConversationsError(null);
+      clientLog("info", "conversation history load completed", { count: payload.length });
     } catch (error) {
-      setConversationsError(clientErrorMessage(error, t(locale).ui.backendUnavailable));
+      const message =
+        error instanceof RequestTimeoutError
+          ? copy.requestTimedOut(Math.round(error.timeoutMs / 1000))
+          : clientErrorMessage(error, copy.backendUnavailable);
+      setConversationsError(message);
+      clientLog("error", "conversation history load failed", { error: message });
       // keep existing conversations on fetch failure
+    } finally {
+      setConversationsLoading(false);
     }
   }
 
   async function loadConversation(conversationId: string) {
+    clientLog("info", "conversation detail load started", { conversationId });
     setUnreadConversationIds((current) => {
       if (!current.has(conversationId)) return current;
       const next = new Set(current);
@@ -927,7 +1104,7 @@ function HomeExperience() {
     setCurrentConversationId(conversationId);
     router.replace(`/?c=${conversationId}`, { scroll: false });
     try {
-      const response = await fetch(`${API_BASE}/api/conversations/${conversationId}`);
+      const response = await fetchWithTimeout(`${API_BASE}/api/conversations/${conversationId}`, {}, 6000);
       if (!response.ok) {
         if (response.status === 404) {
           const resumed = await resumeConversationStream(conversationId);
@@ -959,8 +1136,16 @@ function HomeExperience() {
         });
         setMessagePairs(pairs);
       }
-    } catch {
-      // silently fail
+      clientLog("info", "conversation detail load completed", {
+        conversationId,
+        rounds: payload.rounds.length,
+      });
+    } catch (error) {
+      const message =
+        error instanceof RequestTimeoutError
+          ? t(locale).ui.requestTimedOut(Math.round(error.timeoutMs / 1000))
+          : clientErrorMessage(error, t(locale).ui.backendUnavailable);
+      clientLog("error", "conversation detail load failed", { conversationId, error: message });
     }
   }
 
@@ -995,7 +1180,13 @@ function HomeExperience() {
     });
 
     try {
-      const response = await fetch(`${API_BASE}/api/conversations/${conversationId}/stream`);
+      clientLog("info", "conversation resume stream started", { conversationId });
+      const response = await fetchWithTimeout(`${API_BASE}/api/conversations/${conversationId}/stream`, {}, 8000);
+      clientLog("info", "conversation resume stream response", {
+        conversationId,
+        status: response.status,
+        ok: response.ok,
+      });
       if (!response.ok || !response.body) {
         slot.loading = false;
         setLoading(false);
@@ -1014,6 +1205,10 @@ function HomeExperience() {
         const parsed = parseSseChunk(buffer);
         buffer = parsed.rest;
         for (const event of parsed.events) {
+          clientLog("debug", "conversation resume stream event", {
+            conversationId,
+            event: event.event,
+          });
           if (event.event === "conversation_start") {
             const question = String(event.data.question ?? "");
             slot.submittedQuestion = question || null;
@@ -1050,7 +1245,11 @@ function HomeExperience() {
       return true;
     } catch (error) {
       if (isExpectedAbortError(error)) return true;
-      console.error(error);
+      const message =
+        error instanceof RequestTimeoutError
+          ? t(locale).ui.requestTimedOut(Math.round(error.timeoutMs / 1000))
+          : clientErrorMessage(error, t(locale).ui.backendUnavailable);
+      clientLog("error", "conversation resume stream failed", { conversationId, error: message });
       return false;
     } finally {
       slot.loading = false;
@@ -1095,6 +1294,10 @@ function HomeExperience() {
   function pauseConversation() {
     const slot = getActiveSlot();
     if (!slot) return;
+
+    clientLog("info", "conversation pause requested", {
+      conversationId: activeSlotId,
+    });
 
     flushStateToSlot(slot);
     slot.paused = true;
@@ -1182,6 +1385,12 @@ function HomeExperience() {
     }
 
     try {
+      clientLog("info", "conversation stream started", {
+        conversationId: convId,
+        isNewConversation,
+        discussionLevel,
+        deepThink: discussionLevel === "off" ? deepThink : false,
+      });
       const body: Record<string, string | boolean> = { question, level: discussionLevel };
       if (discussionLevel === "off") {
         body.deep_think = deepThink;
@@ -1195,6 +1404,12 @@ function HomeExperience() {
         signal: controller.signal,
       });
 
+      clientLog("info", "conversation stream response", {
+        conversationId: convId,
+        status: response.status,
+        ok: response.ok,
+      });
+
       if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`);
 
       if (controller.signal.aborted) return;
@@ -1205,6 +1420,10 @@ function HomeExperience() {
       let done = false;
 
       function streamEventHandler(message: StreamEvent) {
+        clientLog("debug", "conversation stream event", {
+          conversationId: streamSlotId,
+          event: message.event,
+        });
         if (message.event === "conversation_start") {
           const startedId = String(message.data.conversation_id ?? "");
           if (startedId && startedId !== streamSlotId) {
@@ -1267,9 +1486,12 @@ function HomeExperience() {
       }
     } catch (e: unknown) {
       if (isExpectedAbortError(e)) {
-        // stream aborted by user — pauseConversation handles UI feedback
+        clientLog("info", "conversation stream aborted by user", { conversationId: streamSlotId });
       } else {
-        console.error(e);
+        clientLog("error", "conversation stream failed", {
+          conversationId: streamSlotId,
+          error: clientErrorMessage(e, t(locale).ui.backendUnavailable),
+        });
       }
     } finally {
       slot.loading = false;
@@ -1278,6 +1500,7 @@ function HomeExperience() {
       }
       setSlotVersion((v) => v + 1);
       abortControllerRef.current = null;
+      clientLog("debug", "conversation stream settled", { conversationId: streamSlotId });
     }
   }
 
@@ -1652,6 +1875,7 @@ function HomeExperience() {
         agents={agents}
         conversations={conversations}
         conversationsError={conversationsError}
+        conversationsLoading={conversationsLoading}
         activeConversationId={currentConversationId}
         unreadConversationIds={unreadConversationIds}
         slotMapRef={slotMapRef}
@@ -1766,7 +1990,13 @@ function HomeExperience() {
           providerStatus={providerStatus}
           settingsTab={settingsTab}
           locale={locale}
+          developerMode={developerMode}
+          logLevel={logLevel}
+          developerStatus={developerStatus}
+          developerDiagnostics={developerDiagnostics}
           setLocale={setLocale}
+          setDeveloperMode={setDeveloperMode}
+          setLogLevel={setLogLevel}
           setProviderForms={setProviderForms}
           setProviderKeys={setProviderKeys}
           setSettingsOpen={setSettingsOpen}
@@ -1774,6 +2004,7 @@ function HomeExperience() {
           saveProvider={saveProvider}
           saveProviderSecret={saveProviderSecret}
           testProvider={testProvider}
+          refreshDeveloperDiagnostics={() => void loadDeveloperDiagnostics()}
           onAddExpert={() => {
             setExpertModalMode("create");
             setEditingAgent(null);
@@ -1814,6 +2045,7 @@ function Sidebar({
   agents,
   conversations,
   conversationsError,
+  conversationsLoading,
   activeConversationId,
   unreadConversationIds,
   slotMapRef,
@@ -1830,6 +2062,7 @@ function Sidebar({
   agents: AgentView[];
   conversations: ConversationListItem[];
   conversationsError: string | null;
+  conversationsLoading: boolean;
   activeConversationId: string | null;
   unreadConversationIds: Set<string>;
   slotMapRef: React.MutableRefObject<Map<string, StreamSlot>>;
@@ -1987,103 +2220,116 @@ function Sidebar({
               <div className="sidebar-date-divider">
                 <span>{group.label}</span>
               </div>
-              {group.items.map((item) => (
-                <div
-                  key={item.conversation_id}
-                  className={cn(
-                    "sidebar-link-row",
-                    activeConversationId === item.conversation_id && "sidebar-link-row-active",
-                    menuConversationId === item.conversation_id && "sidebar-link-row-menu-open"
-                  )}
-                >
-                  {loadingConvIds.has(item.conversation_id) && activeConversationId !== item.conversation_id ? (
-                    <span className="sidebar-status-indicator">
-                      <span className="sidebar-spinner" />
+              {group.items.map((item) => {
+                const isLoadingConversation = loadingConvIds.has(item.conversation_id);
+                const isActiveConversation = activeConversationId === item.conversation_id;
+                return (
+                  <div
+                    key={item.conversation_id}
+                    className={cn(
+                      "sidebar-link-row",
+                      isActiveConversation && "sidebar-link-row-active",
+                      isLoadingConversation && "sidebar-link-row-loading",
+                      menuConversationId === item.conversation_id && "sidebar-link-row-menu-open"
+                    )}
+                  >
+                    {isLoadingConversation && !isActiveConversation ? (
+                      <span className="sidebar-status-indicator" title={tr.ui.conversationInProgress}>
+                        <span className="sidebar-spinner" />
+                      </span>
+                    ) : unreadConversationIds.has(item.conversation_id) ? (
+                      <span className="sidebar-status-indicator">
+                        <span className="sidebar-unread-dot" />
+                      </span>
+                    ) : null}
+                    {editingId === item.conversation_id ? (
+                      <input
+                        ref={editInputRef}
+                        className="sidebar-link-input"
+                        value={editValue}
+                        onChange={(e) => setEditValue(e.target.value)}
+                        onBlur={commitRename}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") commitRename();
+                          if (e.key === "Escape") {
+                            setEditingId(null);
+                            setEditValue("");
+                          }
+                        }}
+                        onClick={(e) => e.stopPropagation()}
+                      />
+                    ) : (
+                      <button
+                        className={cn("sidebar-link", isActiveConversation && "sidebar-link-active")}
+                        onClick={() => onSelectConversation(item.conversation_id)}
+                      >
+                        {item.title}
+                      </button>
+                    )}
+                    {isLoadingConversation && isActiveConversation ? (
+                      <span className="sidebar-row-progress" title={tr.ui.conversationInProgress}>
+                        <span className="sidebar-spinner" />
+                      </span>
+                    ) : null}
+                    <span className="sidebar-link-actions" onPointerDown={(e) => e.stopPropagation()}>
+                      <button
+                        className="sidebar-link-action-btn"
+                        title={tr.ui.more}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setMenuConversationId((current) => current === item.conversation_id ? null : item.conversation_id);
+                        }}
+                      >
+                        <MoreHorizontal size={16} aria-hidden="true" />
+                      </button>
                     </span>
-                  ) : unreadConversationIds.has(item.conversation_id) ? (
-                    <span className="sidebar-status-indicator">
-                      <span className="sidebar-unread-dot" />
-                    </span>
-                  ) : null}
-                  {editingId === item.conversation_id ? (
-                    <input
-                      ref={editInputRef}
-                      className="sidebar-link-input"
-                      value={editValue}
-                      onChange={(e) => setEditValue(e.target.value)}
-                      onBlur={commitRename}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") commitRename();
-                        if (e.key === "Escape") {
-                          setEditingId(null);
-                          setEditValue("");
-                        }
-                      }}
-                      onClick={(e) => e.stopPropagation()}
-                    />
-                  ) : (
-                    <button
-                      className={cn(
-                        "sidebar-link",
-                        activeConversationId === item.conversation_id && "sidebar-link-active"
-                      )}
-                      onClick={() => onSelectConversation(item.conversation_id)}
-                    >
-                      {item.title}
-                    </button>
-                  )}
-                  <span className="sidebar-link-actions" onPointerDown={(e) => e.stopPropagation()}>
-                    <button
-                      className="sidebar-link-action-btn"
-                      title={tr.ui.more}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setMenuConversationId((current) => current === item.conversation_id ? null : item.conversation_id);
-                      }}
-                    >
-                      <MoreHorizontal size={16} aria-hidden="true" />
-                    </button>
-                  </span>
-                  {menuConversationId === item.conversation_id ? (
-                    <div
-                      className="conversation-menu"
-                      onPointerDown={(e) => e.stopPropagation()}
-                      onClick={(e) => e.stopPropagation()}
-                    >
-                      <button className="conversation-menu-item" onClick={(e) => openConversationInNewTab(item, e)}>
-                        <ExternalLink size={14} aria-hidden="true" />
-                        <span>{tr.ui.openInNewTab}</span>
-                      </button>
-                      <button className="conversation-menu-item" onClick={(e) => { startRename(item, e); closeMenu(); }}>
-                        <Pencil size={14} aria-hidden="true" />
-                        <span>{tr.ui.rename}</span>
-                      </button>
-                      <button className="conversation-menu-item conversation-menu-danger" onClick={(e) => { handleDeleteClick(item, e); closeMenu(); }}>
-                        <Trash2 size={14} aria-hidden="true" />
-                        <span>{tr.ui.delete}</span>
-                      </button>
-                    </div>
-                  ) : null}
-                  {confirmDeleteId === item.conversation_id ? (
-                    <div
-                      className="sidebar-confirm-popover"
-                      onPointerDown={(e) => e.stopPropagation()}
-                      onClick={(e) => e.stopPropagation()}
-                    >
-                      <div className="sidebar-confirm-title">{tr.ui.confirmDeleteConversation}</div>
-                      <div className="sidebar-confirm-actions">
-                        <button className="small-button" onClick={() => setConfirmDeleteId(null)}>{tr.ui.cancel}</button>
-                        <button className="small-button small-button-danger" onClick={confirmDelete}>{tr.ui.delete}</button>
+                    {menuConversationId === item.conversation_id ? (
+                      <div
+                        className="conversation-menu"
+                        onPointerDown={(e) => e.stopPropagation()}
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <button className="conversation-menu-item" onClick={(e) => openConversationInNewTab(item, e)}>
+                          <ExternalLink size={14} aria-hidden="true" />
+                          <span>{tr.ui.openInNewTab}</span>
+                        </button>
+                        <button className="conversation-menu-item" onClick={(e) => { startRename(item, e); closeMenu(); }}>
+                          <Pencil size={14} aria-hidden="true" />
+                          <span>{tr.ui.rename}</span>
+                        </button>
+                        <button className="conversation-menu-item conversation-menu-danger" onClick={(e) => { handleDeleteClick(item, e); closeMenu(); }}>
+                          <Trash2 size={14} aria-hidden="true" />
+                          <span>{tr.ui.delete}</span>
+                        </button>
                       </div>
-                    </div>
-                  ) : null}
-                </div>
-              ))}
+                    ) : null}
+                    {confirmDeleteId === item.conversation_id ? (
+                      <div
+                        className="sidebar-confirm-popover"
+                        onPointerDown={(e) => e.stopPropagation()}
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <div className="sidebar-confirm-title">{tr.ui.confirmDeleteConversation}</div>
+                        <div className="sidebar-confirm-actions">
+                          <button className="small-button" onClick={() => setConfirmDeleteId(null)}>{tr.ui.cancel}</button>
+                          <button className="small-button small-button-danger" onClick={confirmDelete}>{tr.ui.delete}</button>
+                        </div>
+                      </div>
+                    ) : null}
+                  </div>
+                );
+              })}
             </div>
           ))}
           {conversations.length === 0 ? (
             <div className="sidebar-history-empty">
-              <div>{conversationsError ? tr.ui.conversationHistoryUnavailable : tr.ui.noConversationHistory}</div>
+              <div>
+                {conversationsLoading
+                  ? tr.ui.conversationHistoryLoading
+                  : conversationsError
+                    ? tr.ui.conversationHistoryUnavailable
+                    : tr.ui.noConversationHistory}
+              </div>
               {conversationsError ? <div className="sidebar-history-empty-detail">{conversationsError}</div> : null}
             </div>
           ) : null}
@@ -2302,13 +2548,32 @@ function DiscussionModePicker({
   setDeepThink: Dispatch<SetStateAction<boolean>>;
 }) {
   const [dropdownOpen, setDropdownOpen] = useState(false);
+  const pickerRef = useRef<HTMLDivElement>(null);
   const levels = useMemo(() => discussionLevels(locale), [locale]);
   const active = levels.find((d) => d.id === discussionLevel) ?? levels[0];
   const isActive = discussionLevel !== "off";
   const modeTitle = `${active.tag} [${active.code}]`;
 
+  useEffect(() => {
+    if (!dropdownOpen) return;
+    const handlePointerDown = (event: PointerEvent) => {
+      const root = pickerRef.current;
+      if (!root || !event.target || root.contains(event.target as Node)) return;
+      setDropdownOpen(false);
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setDropdownOpen(false);
+    };
+    window.addEventListener("pointerdown", handlePointerDown);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", handlePointerDown);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [dropdownOpen]);
+
   return (
-    <div className="discussion-mode">
+    <div ref={pickerRef} className="discussion-mode">
       <div className="discussion-mode-control">
         <button
           className={cn("discussion-level-trigger", "discussion-level-trigger-topbar", isActive && "discussion-level-trigger-active")}
@@ -2558,7 +2823,13 @@ function SettingsOverlay({
   providerStatus,
   settingsTab,
   locale,
+  developerMode,
+  logLevel,
+  developerStatus,
+  developerDiagnostics,
   setLocale,
+  setDeveloperMode,
+  setLogLevel,
   setProviderForms,
   setProviderKeys,
   setSettingsOpen,
@@ -2566,6 +2837,7 @@ function SettingsOverlay({
   saveProvider,
   saveProviderSecret,
   testProvider,
+  refreshDeveloperDiagnostics,
   onAddExpert,
   onEditExpert,
   onDeleteExpert,
@@ -2580,7 +2852,13 @@ function SettingsOverlay({
   providerStatus: Record<string, string>;
   settingsTab: SettingsTab;
   locale: Locale;
+  developerMode: boolean;
+  logLevel: LogLevel;
+  developerStatus: string | null;
+  developerDiagnostics: DeveloperDiagnostics | null;
   setLocale: Dispatch<SetStateAction<Locale>>;
+  setDeveloperMode: Dispatch<SetStateAction<boolean>>;
+  setLogLevel: Dispatch<SetStateAction<LogLevel>>;
   setProviderForms: Dispatch<SetStateAction<Record<string, ProviderProfile>>>;
   setProviderKeys: Dispatch<SetStateAction<Record<string, string>>>;
   setSettingsOpen: Dispatch<SetStateAction<boolean>>;
@@ -2588,6 +2866,7 @@ function SettingsOverlay({
   saveProvider: (providerId: string) => Promise<void>;
   saveProviderSecret: (providerId: string) => Promise<void>;
   testProvider: (providerId: string) => Promise<void>;
+  refreshDeveloperDiagnostics: () => void;
   onAddExpert: () => void;
   onEditExpert: (agent: AgentView) => void;
   onDeleteExpert: (name: string) => void;
@@ -2595,6 +2874,11 @@ function SettingsOverlay({
   const [confirmDeleteName, setConfirmDeleteName] = useState<string | null>(null);
   const copy = t(locale).ui;
   const skillCountLabel = copy.globalSkillsCount(globalSkills.length);
+  const logLevelOptions: Array<{ id: LogLevel; label: string; description: string }> = [
+    { id: "error", label: copy.logLevelError, description: copy.logLevelErrorDescription },
+    { id: "info", label: copy.logLevelInfo, description: copy.logLevelInfoDescription },
+    { id: "debug", label: copy.logLevelDebug, description: copy.logLevelDebugDescription },
+  ];
   return (
     <div className="settings-backdrop">
       <div className="settings-shell" role="dialog" aria-modal="true" aria-label={t(locale).ui.settings}>
@@ -2808,6 +3092,77 @@ function SettingsOverlay({
                   </div>
                 </div>
               </div>
+            ) : settingsTab === "developer" ? (
+              <div className="settings-list">
+                <div className="settings-row">
+                  <div>
+                    <div className="settings-row-title">{copy.developerMode}</div>
+                    <div className="settings-row-description">{copy.developerModeDescription}</div>
+                  </div>
+                  <label className="settings-switch">
+                    <input
+                      type="checkbox"
+                      checked={developerMode}
+                      onChange={(event) => setDeveloperMode(event.target.checked)}
+                    />
+                    <span aria-hidden="true" />
+                  </label>
+                </div>
+                <div className="settings-row settings-row-stacked">
+                  <div>
+                    <div className="settings-row-title">{copy.logLevel}</div>
+                    <div className="settings-row-description">{copy.logLevelDescription}</div>
+                  </div>
+                  <div className="settings-choice-stack">
+                    {logLevelOptions.map((option) => (
+                      <button
+                        key={option.id}
+                        className={cn("settings-log-choice", logLevel === option.id && "settings-log-choice-active")}
+                        onClick={() => setLogLevel(option.id)}
+                        type="button"
+                      >
+                        <span>{option.label}</span>
+                        <small>{option.description}</small>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="settings-row settings-row-stacked">
+                  <div className="settings-row-inline">
+                    <div>
+                      <div className="settings-row-title">{copy.diagnostics}</div>
+                      <div className="settings-row-description">{copy.diagnosticsDescription}</div>
+                    </div>
+                    <button className="small-button small-button-icon" type="button" onClick={refreshDeveloperDiagnostics}>
+                      <FlaskConical size={14} aria-hidden="true" />
+                      <span>{copy.refresh}</span>
+                    </button>
+                  </div>
+                  <div className="developer-diagnostics">
+                    <div>
+                      <span>{copy.apiBaseUrl}</span>
+                      <strong>{developerDiagnostics?.api_base_url || API_BASE}</strong>
+                    </div>
+                    <div>
+                      <span>{copy.conversationStore}</span>
+                      <strong>{developerDiagnostics?.conversation_store_path ?? copy.notLoaded}</strong>
+                    </div>
+                    <div>
+                      <span>{copy.conversationCount}</span>
+                      <strong>{developerDiagnostics?.conversation_count ?? copy.notLoaded}</strong>
+                    </div>
+                    <div>
+                      <span>{copy.runningJobs}</span>
+                      <strong>{developerDiagnostics ? `${developerDiagnostics.jobs_running}/${developerDiagnostics.jobs_total}` : copy.notLoaded}</strong>
+                    </div>
+                    <div>
+                      <span>{copy.backendLogLevel}</span>
+                      <strong>{developerDiagnostics?.log_level ?? logLevel.toUpperCase()}</strong>
+                    </div>
+                  </div>
+                  {developerStatus ? <div className="settings-status-text">{developerStatus}</div> : null}
+                </div>
+              </div>
             ) : (
               <div className="text-sm leading-7 text-muted">{copy.dataSkeleton}</div>
             )}
@@ -2844,6 +3199,7 @@ function settingsTitle(tab: SettingsTab, locale: Locale) {
   if (tab === "experts") return t(locale).ui.experts;
   if (tab === "skills") return t(locale).ui.skills;
   if (tab === "data") return t(locale).ui.data;
+  if (tab === "developer") return t(locale).ui.developer;
   return t(locale).ui.general;
 }
 
@@ -2853,6 +3209,7 @@ function settingsSubtitle(tab: SettingsTab, locale: Locale) {
   if (tab === "experts") return copy.settingsSubtitleExperts;
   if (tab === "skills") return copy.settingsSubtitleSkills;
   if (tab === "data") return copy.settingsSubtitleData;
+  if (tab === "developer") return copy.settingsSubtitleDeveloper;
   return copy.settingsSubtitleGeneral;
 }
 

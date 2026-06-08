@@ -189,6 +189,24 @@ class ConversationListItem(BaseModel):
     expert_count: int
 
 
+class DeveloperRuntimeResponse(BaseModel):
+    app_env: str
+    api_base_url: str = ""
+    conversation_store_path: str
+    conversation_count: int
+    jobs_total: int
+    jobs_running: int
+    log_level: Literal["ERROR", "INFO", "DEBUG"]
+
+
+class LogLevelUpdate(BaseModel):
+    level: Literal["ERROR", "INFO", "DEBUG"]
+
+
+class LogLevelResponse(BaseModel):
+    level: Literal["ERROR", "INFO", "DEBUG"]
+
+
 class ConversationRecord(BaseModel):
     conversation_id: str
     created_at: datetime = Field(default_factory=utc_now)

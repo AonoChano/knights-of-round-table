@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from fastapi import FastAPI, HTTPException, Response, status
+import logging
+import time
+
+from fastapi import FastAPI, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
@@ -16,7 +19,10 @@ from .schemas import (
     ConversationRenameRequest,
     ConversationRequest,
     ConversationResponse,
+    DeveloperRuntimeResponse,
     HealthResponse,
+    LogLevelResponse,
+    LogLevelUpdate,
     ProviderConnectivityRequest,
     ProviderConnectivityResponse,
     ProviderProfile,
@@ -24,6 +30,33 @@ from .schemas import (
     ProviderSecretStatus,
     ProviderSecretUpdate,
 )
+
+LOG_LEVELS = {
+    "ERROR": logging.ERROR,
+    "INFO": logging.INFO,
+    "DEBUG": logging.DEBUG,
+}
+
+
+def _normalize_log_level(level: str) -> str:
+    upper = level.upper()
+    return upper if upper in LOG_LEVELS else "INFO"
+
+
+def _set_log_level(level: str) -> str:
+    normalized = _normalize_log_level(level)
+    logging.getLogger().setLevel(LOG_LEVELS[normalized])
+    for logger_name in ("kort_api", "uvicorn.error", "uvicorn.access"):
+        logging.getLogger(logger_name).setLevel(LOG_LEVELS[normalized])
+    return normalized
+
+
+logging.basicConfig(
+    level=LOG_LEVELS[_normalize_log_level(settings.log_level)],
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
+logger = logging.getLogger("kort_api.app")
+current_log_level = _set_log_level(settings.log_level)
 
 app = FastAPI(title=settings.app_name)
 app.add_middleware(
@@ -39,9 +72,58 @@ agent_loader = AgentLoader(settings.runtime_root)
 conversation_service = VisibleConversationService(ConversationStore(settings.conversation_db))
 
 
+@app.middleware("http")
+async def log_request_metadata(request: Request, call_next):
+    started = time.perf_counter()
+    logger.debug("request.start method=%s path=%s", request.method, request.url.path)
+    try:
+        response = await call_next(request)
+    except Exception:
+        duration_ms = (time.perf_counter() - started) * 1000
+        logger.exception(
+            "request.error method=%s path=%s duration_ms=%.1f",
+            request.method,
+            request.url.path,
+            duration_ms,
+        )
+        raise
+
+    duration_ms = (time.perf_counter() - started) * 1000
+    message = "request.end method=%s path=%s status=%s duration_ms=%.1f"
+    if duration_ms >= settings.slow_request_ms:
+        logger.warning(message, request.method, request.url.path, response.status_code, duration_ms)
+    else:
+        logger.info(message, request.method, request.url.path, response.status_code, duration_ms)
+    return response
+
+
 @app.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
     return HealthResponse(app=settings.app_name)
+
+
+@app.get("/api/developer/runtime", response_model=DeveloperRuntimeResponse)
+def developer_runtime() -> DeveloperRuntimeResponse:
+    with conversation_service.jobs_lock:
+        jobs_total = len(conversation_service.jobs)
+        jobs_running = sum(1 for job in conversation_service.jobs.values() if not job.done)
+    records = conversation_service.store.list_records()
+    return DeveloperRuntimeResponse(
+        app_env=settings.app_env,
+        conversation_store_path=str(conversation_service.store.path.resolve()),
+        conversation_count=len(records),
+        jobs_total=jobs_total,
+        jobs_running=jobs_running,
+        log_level=current_log_level,
+    )
+
+
+@app.put("/api/developer/log-level", response_model=LogLevelResponse)
+def update_log_level(payload: LogLevelUpdate) -> LogLevelResponse:
+    global current_log_level
+    current_log_level = _set_log_level(payload.level)
+    logger.info("developer.log_level_updated level=%s", current_log_level)
+    return LogLevelResponse(level=current_log_level)
 
 
 @app.get("/api/providers", response_model=list[ProviderProfile])

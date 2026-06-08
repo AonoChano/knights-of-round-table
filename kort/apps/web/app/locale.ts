@@ -73,6 +73,10 @@ export const t = (locale: Locale) => {
         formatTemplate(copy.ui.globalSkillsCount, { count }),
       profilesAvailable: (count: number) =>
         formatTemplate(copy.ui.profilesAvailable, { count }),
+      logLevelSaveFailed: (error: string) =>
+        formatTemplate(copy.ui.logLevelSaveFailed, { error }),
+      requestTimedOut: (seconds: number) =>
+        formatTemplate(copy.ui.requestTimedOut, { seconds }),
       testFailed: (error: string) =>
         formatTemplate(copy.ui.testFailed, { error }),
       thinkingElapsedActive: (duration: string) =>

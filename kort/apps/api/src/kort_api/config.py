@@ -15,6 +15,8 @@ class Settings(BaseSettings):
 
     app_name: str = "KORT API"
     app_env: str = "development"
+    log_level: str = "INFO"
+    slow_request_ms: int = 1000
     runtime_root: Path = Field(default=Path(__file__).resolve().parents[4] / "runtime")
     data_root: Path = Field(default=Path(__file__).resolve().parents[4] / "runtime" / "data")
     providers_file: Path = Field(

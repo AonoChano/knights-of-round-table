@@ -85,6 +85,26 @@ def test_health() -> None:
     assert response.json()["status"] == "ok"
 
 
+def test_developer_runtime_reports_safe_metadata() -> None:
+    response = client.get("/api/developer/runtime")
+    payload = response.json()
+
+    assert response.status_code == 200
+    assert "conversation_store_path" in payload
+    assert isinstance(payload["conversation_count"], int)
+    assert "secret-test-key" not in response.text
+
+
+def test_developer_log_level_can_be_updated() -> None:
+    response = client.put("/api/developer/log-level", json={"level": "DEBUG"})
+    assert response.status_code == 200
+    assert response.json() == {"level": "DEBUG"}
+
+    response = client.put("/api/developer/log-level", json={"level": "INFO"})
+    assert response.status_code == 200
+    assert response.json() == {"level": "INFO"}
+
+
 def test_visible_conversation_payload_hides_internal_discussion() -> None:
     response = client.post("/api/conversations/stream", json={"question": "How should I structure the MVP?", "level": "off"})
 
