@@ -736,7 +736,7 @@ def run_discussion_stream(
                 "details": f"### {title}\n\n{body}",
                 "confidence": 0.78,
                 "tree_nodes": [
-                    {"id": f"{sid}-node", "title": title, "summary": body},
+                    {"id": f"{sid}-node", "title": title, "summary": body, "status": "complete"},
                 ],
             })
             yield _sse("thinking_active", {})
@@ -860,7 +860,7 @@ async def _run_summarizer_task(
                     "confidence": 0.78,
                     "stage_index": stage_index,
                     "tree_nodes": [
-                        {"id": f"{summary_id}-node", "title": title, "summary": body},
+                        {"id": f"{summary_id}-node", "title": title, "summary": body, "status": "complete"},
                     ],
                 },
             )

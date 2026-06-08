@@ -15,6 +15,7 @@
   --shadow-soft: 0 18px 60px rgba(29, 29, 26, 0.08);
   --shadow-tight: 0 8px 26px rgba(29, 29, 26, 0.06);
   --ease-productive: cubic-bezier(0.16, 1, 0.3, 1);
+  --font-mono: "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
 }
 
 html,
@@ -923,6 +924,54 @@ button:active:not(:disabled) {
 
 .reasoning-body p {
   font-weight: 400;
+  margin: 0;
+}
+
+.reasoning-tree {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+  color: #686864;
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.reasoning-tree-node {
+  display: grid;
+  gap: 4px;
+}
+
+.reasoning-tree-row {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  padding-left: calc(var(--tree-depth, 0) * 18px);
+}
+
+.reasoning-tree-branch {
+  flex: 0 0 auto;
+  color: #a8a7a2;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.reasoning-tree-title {
+  color: var(--ink-strong);
+  font-weight: 650;
+}
+
+.reasoning-tree-title-done {
+  color: #377c4d;
+}
+
+.reasoning-tree-summary {
+  margin-left: calc((var(--tree-depth, 0) * 18px) + 24px);
+  color: #6a6a67;
+  font-size: 13px;
+  line-height: 1.78;
+}
+
+.reasoning-tree-summary p {
   margin: 0;
 }
 

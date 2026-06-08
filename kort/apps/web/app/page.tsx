@@ -3,7 +3,7 @@
 import "katex/dist/katex.min.css";
 
 import { Suspense, useEffect, useMemo, useRef, useState } from "react";
-import type { Dispatch, SetStateAction } from "react";
+import type { CSSProperties, Dispatch, SetStateAction } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
   Bot,
@@ -52,6 +52,9 @@ type ThinkingTreeNode = {
   id: string;
   title: string;
   summary: string;
+  parent_id?: string | null;
+  status?: "active" | "complete" | "done" | "cancelled";
+  children?: ThinkingTreeNode[];
 };
 
 type StageSummary = {
@@ -169,6 +172,7 @@ type TimelineItem = {
   body: string;
   raw: string;
   status: "streaming" | "complete" | "active" | "done" | "talking";
+  treeNodes?: ThinkingTreeNode[];
 };
 
 type StreamEvent = {
@@ -303,6 +307,33 @@ function clientErrorMessage(error: unknown, fallback: string) {
   return fallback;
 }
 
+function parseThinkingTreeNodes(value: unknown): ThinkingTreeNode[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((node) => {
+    if (!node || typeof node !== "object") return [];
+    const item = node as Record<string, unknown>;
+    const id = typeof item.id === "string" ? item.id : crypto.randomUUID();
+    const title = typeof item.title === "string" ? item.title : "";
+    const summary = typeof item.summary === "string" ? item.summary : "";
+    if (!title && !summary) return [];
+    const status =
+      item.status === "active" ||
+      item.status === "complete" ||
+      item.status === "done" ||
+      item.status === "cancelled"
+        ? item.status
+        : "complete";
+    return [{
+      id,
+      title,
+      summary,
+      parent_id: typeof item.parent_id === "string" ? item.parent_id : null,
+      status,
+      children: parseThinkingTreeNodes(item.children),
+    }];
+  });
+}
+
 function markdownTitle(markdown: string, fallback: string) {
   const firstHeading = markdown.match(/^###\s+(.+)$/m);
   return firstHeading?.[1]?.trim() || fallback;
@@ -393,6 +424,7 @@ function timelineFromStageSummaries(
     body: markdownBody(s.details),
     raw: s.details,
     status: "complete" as const,
+    treeNodes: s.tree_nodes ?? [],
   }));
   return items.length > 0 ? appendThinkingDoneNode(items, locale, elapsedSeconds) : [];
 }
@@ -1264,9 +1296,10 @@ function HomeExperience() {
     }
     if (message.event === "summary_complete") {
       const id = String(message.data.id ?? "");
+      const treeNodes = parseThinkingTreeNodes(message.data.tree_nodes);
       slot.timeline = slot.timeline.map((item) => {
         if (item.id !== id) return item;
-        return { ...item, body: item.raw.trim(), status: "complete" as const };
+        return { ...item, body: item.raw.trim(), status: "complete" as const, treeNodes };
       });
       return;
     }
@@ -1410,6 +1443,7 @@ function HomeExperience() {
 
     if (message.event === "summary_complete") {
       const id = String(message.data.id ?? "");
+      const treeNodes = parseThinkingTreeNodes(message.data.tree_nodes);
 
       setTimeout(() => {
         const finalRaw = rawBodyBySummary.current[id] ?? "";
@@ -1417,7 +1451,7 @@ function HomeExperience() {
           setTimeline((current) =>
             current.map((item) => {
               if (item.id !== id) return item;
-              return { ...item, body: finalRaw.trim() };
+              return { ...item, body: finalRaw.trim(), treeNodes };
             })
           );
         }
@@ -1429,7 +1463,7 @@ function HomeExperience() {
       }, 3000);
 
       setTimeline((current) =>
-        current.map((item) => (item.id === id ? { ...item, status: "complete" } : item))
+        current.map((item) => (item.id === id ? { ...item, status: "complete", treeNodes } : item))
       );
       return;
     }
@@ -2345,6 +2379,26 @@ function ThinkingDrawer({
   const doneItem = [...visibleTimeline].reverse().find((item) => item.status === "done");
   const drawerComplete = thinkingComplete || Boolean(doneItem);
   const doneTitle = doneItem?.title || thinkingElapsedLabel(locale, elapsed, true);
+
+  function renderTreeNodes(nodes: ThinkingTreeNode[], depth = 0) {
+    return nodes.map((node, index) => {
+      const isLast = index === nodes.length - 1;
+      const children = node.children ?? [];
+      return (
+        <div key={node.id} className="reasoning-tree-node" style={{ "--tree-depth": depth } as CSSProperties}>
+          <div className="reasoning-tree-row">
+            <span className="reasoning-tree-branch">{isLast ? "└─" : "├─"}</span>
+            <span className={cn("reasoning-tree-title", node.status === "done" && "reasoning-tree-title-done")}>
+              {node.title}
+            </span>
+          </div>
+          {node.summary ? <div className="reasoning-tree-summary markdown-body"><Markdown content={node.summary} /></div> : null}
+          {children.length > 0 ? renderTreeNodes(children, depth + 1) : null}
+        </div>
+      );
+    });
+  }
+
   return (
     <aside className="thinking-drawer" aria-label={tr.ui.thinkingProcess}>
       <div className="thinking-drawer-header">
@@ -2388,9 +2442,13 @@ function ThinkingDrawer({
                   {item.status !== "active" && item.status !== "done" && item.status !== "talking" ? item.title : null}
                 </div>
                 {item.status === "complete" || item.status === "streaming" ? (
-                  <div className="reasoning-body markdown-body">
-                    <Markdown content={item.body} />
-                  </div>
+                  item.treeNodes?.length ? (
+                    <div className="reasoning-tree">{renderTreeNodes(item.treeNodes)}</div>
+                  ) : (
+                    <div className="reasoning-body markdown-body">
+                      <Markdown content={item.body} />
+                    </div>
+                  )
                 ) : null}
               </div>
             </div>

@@ -131,6 +131,9 @@ class ThinkingTreeNode(BaseModel):
     id: str
     title: str
     summary: str
+    parent_id: str | None = None
+    status: Literal["active", "complete", "done", "cancelled"] = "complete"
+    children: list[ThinkingTreeNode] = Field(default_factory=list)
 
 
 class StageSummary(BaseModel):
