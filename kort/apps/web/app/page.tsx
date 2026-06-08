@@ -532,6 +532,7 @@ function HomeExperience() {
   const [discussionLevel, setDiscussionLevel] = useState<DiscussionLevel>(DEFAULT_DISCUSSION_LEVEL);
   const [deepThink, setDeepThink] = useState(false);
   const [conversations, setConversations] = useState<ConversationListItem[]>([]);
+  const [conversationsError, setConversationsError] = useState<string | null>(null);
   const [messagePairs, setMessagePairs] = useState<MessagePair[]>([]);
   const [currentConversationId, setCurrentConversationId] = useState<string | null>(null);
   const [pendingConvId, setPendingConvId] = useState<string | null>(null);
@@ -897,7 +898,9 @@ function HomeExperience() {
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const payload = (await response.json()) as ConversationListItem[];
       setConversations(payload);
-    } catch {
+      setConversationsError(null);
+    } catch (error) {
+      setConversationsError(clientErrorMessage(error, t(locale).ui.backendUnavailable));
       // keep existing conversations on fetch failure
     }
   }
@@ -1648,6 +1651,7 @@ function HomeExperience() {
         locale={locale}
         agents={agents}
         conversations={conversations}
+        conversationsError={conversationsError}
         activeConversationId={currentConversationId}
         unreadConversationIds={unreadConversationIds}
         slotMapRef={slotMapRef}
@@ -1809,6 +1813,7 @@ function Sidebar({
   locale,
   agents,
   conversations,
+  conversationsError,
   activeConversationId,
   unreadConversationIds,
   slotMapRef,
@@ -1824,6 +1829,7 @@ function Sidebar({
   locale: Locale;
   agents: AgentView[];
   conversations: ConversationListItem[];
+  conversationsError: string | null;
   activeConversationId: string | null;
   unreadConversationIds: Set<string>;
   slotMapRef: React.MutableRefObject<Map<string, StreamSlot>>;
@@ -2075,9 +2081,12 @@ function Sidebar({
               ))}
             </div>
           ))}
-          {conversations.length === 0 && (
-            <div className="px-2 py-3 text-xs text-muted">{tr.ui.noConversationHistory}</div>
-          )}
+          {conversations.length === 0 ? (
+            <div className="sidebar-history-empty">
+              <div>{conversationsError ? tr.ui.conversationHistoryUnavailable : tr.ui.noConversationHistory}</div>
+              {conversationsError ? <div className="sidebar-history-empty-detail">{conversationsError}</div> : null}
+            </div>
+          ) : null}
         </div>
       </div>
 
@@ -2184,6 +2193,7 @@ function ConversationView({
   const isDone = thinkingComplete || statusItem?.status === "done";
   const showPreview = !isDone && latest && latest.body.trim();
   const showCurrentTurn = !isHistoryView && (question || timeline.length > 0 || finalBody);
+  const showWaitingState = loading && Boolean(question) && timeline.length === 0 && !finalBody;
   const previewTitle = isDone
     ? statusItem?.title ?? thinkingElapsedLabel(locale, elapsed, true)
     : statusItem?.title ?? lastCompleteTitle ?? latest?.title ?? tr.thinking.active;
@@ -2206,6 +2216,13 @@ function ConversationView({
                   </span>
                   <ChevronRight className="thinking-chevron" size={14} aria-hidden="true" />
                 </button>
+              ) : null}
+
+              {showWaitingState ? (
+                <div className="assistant-waiting" role="status" aria-live="polite">
+                  <span className="assistant-waiting-spinner" aria-hidden="true" />
+                  <span>{tr.ui.requestReceived}</span>
+                </div>
               ) : null}
 
               {showPreview && previewBody ? (

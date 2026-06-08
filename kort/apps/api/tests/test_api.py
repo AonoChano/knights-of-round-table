@@ -4,8 +4,9 @@ from fastapi.testclient import TestClient
 
 from kort_api.app import app
 from kort_api.config import settings
+from kort_api.conversations import ConversationStore
 from kort_api.request_router import RouteDecision, route_request
-from kort_api.schemas import ConversationRequest
+from kort_api.schemas import ConversationRecord, ConversationRequest
 
 
 client = TestClient(app)
@@ -185,6 +186,27 @@ def test_stream_conversation_uses_client_supplied_conversation_id() -> None:
 
     assert response.status_code == 200
     assert f'"conversation_id": "{conversation_id}"' in response.text
+
+
+def test_conversation_store_reads_json_named_directory(tmp_path: Path) -> None:
+    import json
+
+    store_dir = tmp_path / "conversations.json"
+    store_dir.mkdir()
+    record = ConversationRecord(
+        conversation_id="existing-history",
+        title="Existing history",
+        expert_count=1,
+    )
+    (store_dir / "existing-history.json").write_text(
+        json.dumps(record.model_dump(mode="json"), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    store = ConversationStore(store_dir)
+
+    assert store.path == store_dir
+    assert [item.conversation_id for item in store.list_records()] == ["existing-history"]
 
 
 def test_provider_connectivity_does_not_echo_api_key() -> None:

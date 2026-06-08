@@ -120,6 +120,11 @@ class ConversationStore:
             self.path = self.path.with_name(self.path.stem)
             self.path.mkdir(parents=True, exist_ok=True)
             self._migrate_from_file(old_file)
+        elif self.path.is_dir():
+            self.path.mkdir(parents=True, exist_ok=True)
+        elif self.path.suffix == ".json":
+            self.path = self.path.with_name(self.path.stem)
+            self.path.mkdir(parents=True, exist_ok=True)
         else:
             self.path.mkdir(parents=True, exist_ok=True)
 

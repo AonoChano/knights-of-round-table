@@ -118,6 +118,20 @@ button:active:not(:disabled) {
   padding-right: 2px;
 }
 
+.sidebar-history-empty {
+  padding: 12px 8px;
+  color: var(--ink-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.sidebar-history-empty-detail {
+  margin-top: 4px;
+  color: rgba(104, 104, 98, 0.76);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
 .main-shell {
   position: relative;
   display: flex;
@@ -740,6 +754,8 @@ button:active:not(:disabled) {
   padding: 10px 15px;
   font-size: 15px;
   line-height: 1.7;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 .assistant-row {
@@ -751,6 +767,26 @@ button:active:not(:disabled) {
 .assistant-content {
   min-width: 0;
   flex: 1;
+}
+
+.assistant-waiting {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  color: var(--ink-muted);
+  font-size: 14px;
+  font-weight: 520;
+}
+
+.assistant-waiting-spinner {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  border: 2px solid rgba(23, 23, 23, 0.12);
+  border-top-color: rgba(23, 23, 23, 0.62);
+  border-radius: 999px;
+  animation: borderSpin 780ms linear infinite;
 }
 
 .thinking-block {
