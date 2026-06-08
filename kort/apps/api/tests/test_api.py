@@ -1,15 +1,57 @@
+import json
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
-from kort_api.app import app
-from kort_api.config import settings
-from kort_api.conversations import ConversationStore
+import kort_api.app as app_module
+from kort_api.agents import AgentLoader
+from kort_api.conversations import ConversationStore, VisibleConversationService
+from kort_api.providers import ProviderStore
 from kort_api.request_router import RouteDecision, route_request
 from kort_api.schemas import ConversationRecord, ConversationRequest
 
 
-client = TestClient(app)
+client = TestClient(app_module.app)
+
+
+@pytest.fixture(autouse=True)
+def isolated_app_stores(tmp_path: Path) -> None:
+    """Keep API tests away from the developer's local runtime data."""
+    runtime_root = tmp_path / "runtime"
+    providers_root = tmp_path / "providers"
+    data_root = tmp_path / "data"
+    providers_root.mkdir(parents=True)
+    data_root.mkdir(parents=True)
+
+    profiles_file = providers_root / "profiles.json"
+    secrets_file = data_root / "provider-secrets.local.json"
+    conversations_path = data_root / "conversations.json"
+
+    profiles_file.write_text(
+        json.dumps(
+            [
+                {
+                    "provider_id": "deepseek",
+                    "label": "DeepSeek",
+                    "provider_type": "deepseek",
+                    "base_url": "https://api.deepseek.com",
+                    "api_style": "openai",
+                    "default_model": "deepseek-chat",
+                    "env_key_name": "DEEPSEEK_API_KEY",
+                    "enabled": True,
+                    "capabilities": ["chat", "reasoning"],
+                }
+            ],
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    app_module.provider_store = ProviderStore(profiles_file, secrets_file)
+    app_module.agent_loader = AgentLoader(runtime_root)
+    app_module.conversation_service = VisibleConversationService(ConversationStore(conversations_path))
 
 
 # ---------------------------------------------------------------------------
@@ -55,10 +97,9 @@ def _delete(name: str) -> None:
 
 
 def _clear_test_secret(provider_id: str) -> None:
-    path = Path(settings.secrets_file)
+    path = app_module.provider_store.secrets_path
     if not path.exists():
         return
-    import json
 
     data = json.loads(path.read_text(encoding="utf-8"))
     if isinstance(data, dict) and provider_id in data:
@@ -93,6 +134,16 @@ def test_developer_runtime_reports_safe_metadata() -> None:
     assert "conversation_store_path" in payload
     assert isinstance(payload["conversation_count"], int)
     assert "secret-test-key" not in response.text
+
+
+def test_api_stores_are_isolated_from_local_runtime(tmp_path: Path) -> None:
+    root = tmp_path.resolve()
+
+    assert app_module.provider_store.path.resolve().is_relative_to(root)
+    assert app_module.provider_store.secrets_path.resolve().is_relative_to(root)
+    assert app_module.agent_loader.agents_root.resolve().is_relative_to(root)
+    assert app_module.agent_loader.skills_root.resolve().is_relative_to(root)
+    assert app_module.conversation_service.store.path.resolve().is_relative_to(root)
 
 
 def test_developer_log_level_can_be_updated() -> None:
