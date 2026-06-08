@@ -1,11 +1,9 @@
 <div align="center">
-  <img src="kort/apps/web/public/kort-readme-logo.svg" alt="KORT logo" width="300" height="96" />
+  <img src="kort/apps/web/public/kort-readme-logo.svg" alt="KORT logo" width="300" height="96" style="filter: invert(1);" />
 
   <h1>Knights of the Round Table</h1>
 
-  <p>
-    A hidden-CoT, multi-model expert panel for structured AI discussion.
-  </p>
+  <p>A hidden-CoT, multi-model expert panel for structured AI discussion.</p>
 
   <p>
     <a href="README.zh-CN.md">简体中文</a>
@@ -29,31 +27,29 @@
 
 ## What KORT Is
 
-KORT is a web chat application where a user's question can be routed through a panel of AI agents:
+KORT routes a user's question to a configurable panel of AI agents:
 
-1. Expert agents reason independently.
-2. Critic agents review and challenge the work.
+1. Experts reason independently.
+2. Critics review and challenge.
 3. The graph may continue for multiple rounds.
 4. A summarizer projects only user-visible stage summaries.
 5. A synthesizer produces the final answer.
 
-The product boundary is intentional: raw expert discussion, provider reasoning content, and internal transcripts stay inside backend runtime state. Users see the visible projection only: staged thinking summaries and the final answer.
+Product boundary: raw expert discussion, provider reasoning content, and internal transcripts stay inside backend runtime state. Users see only the summarizer's projections and the final answer.
 
 ## Highlights
 
 | Area | Current capability |
 | --- | --- |
-| Chat UX | ChatGPT-like shell with sidebar history, fixed composer, streamed answer output, and Markdown/KaTeX rendering |
-| Thinking UX | Collapsed visible thinking row, right-side thinking drawer, completed-thinking state, and structured summary tree nodes |
-| Orchestration | LangGraph discussion flow with experts, critics, summarizer, synthesizer, and configurable discussion depth |
-| Request routing | Simple prompts can be routed away from full panel orchestration to avoid overreaction |
-| Agents | File-backed agents with roles, prompts, provider profile, priority, and Skill access controls |
-| Providers | Runtime provider profiles, local key status, connectivity checks, and OpenAI-compatible model calls |
-| Persistence | Visible conversation projections are persisted and reloadable; raw hidden discussion is not exposed |
+| Chat UX | ChatGPT-like shell with sidebar history, fixed composer, streamed answer output, Markdown/KaTeX |
+| Thinking UX | Collapsed thinking entry, right-side drawer, completed state, structured summary nodes |
+| Orchestration | LangGraph discussion flow with experts, critics, summarizer, synthesizer, configurable depth |
+| Request routing | Simple prompts can skip full panel orchestration |
+| Agents | File‑backed agents with role, prompt, provider profile, priority, Skill access |
+| Providers | Runtime provider profiles, local key status, connectivity checks, OpenAI‑compatible calls |
+| Persistence | Only visible projections are persisted; raw hidden discussion never exposed |
 
 ## Quick Start
-
-The fastest path is Docker Compose:
 
 ```bash
 docker compose up --build
@@ -77,7 +73,7 @@ pip install -e ".[dev]"
 python -m uvicorn kort_api.main:app --reload --port 8000
 ```
 
-Optional `.env` values:
+Optional `.env`:
 
 ```env
 RUNTIME_ROOT=../../runtime
@@ -102,26 +98,25 @@ The web app expects `NEXT_PUBLIC_API_BASE_URL` to point at the backend. Docker C
 kort/
 ├── apps/
 │   ├── api/                    # FastAPI backend
-│   │   ├── src/kort_api/
-│   │   │   ├── app.py          # API routes
-│   │   │   ├── agents.py       # File-backed agent loader and CRUD
-│   │   │   ├── conversations.py # Visible conversation store and SSE service
-│   │   │   ├── model_client.py # OpenAI-compatible model client
-│   │   │   ├── orchestration.py # LangGraph discussion runtime
-│   │   │   ├── providers.py    # Provider profiles and local secret status
-│   │   │   ├── request_router.py
-│   │   │   └── schemas.py      # Pydantic contracts
-│   │   └── tests/
+│   │   └── src/kort_api/
+│   │       ├── app.py          # API routes
+│   │       ├── agents.py       # Agent loader and CRUD
+│   │       ├── conversations.py # Visible conversation store and SSE service
+│   │       ├── model_client.py # OpenAI-compatible model client
+│   │       ├── orchestration.py # LangGraph runtime
+│   │       ├── providers.py    # Provider profiles and local secrets
+│   │       ├── request_router.py
+│   │       └── schemas.py      # Pydantic contracts
 │   └── web/                    # Next.js 15 frontend
 │       └── app/
-│           ├── page.tsx        # Chat shell, settings, sidebar, drawer
-│           ├── locale.ts       # Locale access
-│           └── globals.css     # Product styling
+│           ├── page.tsx        # Chat shell, sidebar, settings, drawer
+│           ├── locale.ts
+│           └── globals.css
 ├── runtime/
 │   ├── agents/                 # Agent folders and agent.yaml files
-│   ├── providers/              # Provider profile metadata
+│   ├── providers/              # Provider metadata
 │   ├── skills/                 # Global Skills
-│   └── data/                   # Local runtime persistence, ignored by git
+│   └── data/                   # Local runtime data
 └── docs/
     └── architecture-rules.md
 ```
@@ -140,13 +135,13 @@ User question
 
 Core rules:
 
-- Hidden CoT is a product boundary, not a UI label.
-- Only summarizer projections and final answers are user-visible.
-- Runtime data lives under `kort/runtime`; product code lives under `kort/apps`.
-- Provider secrets are stored locally under runtime data or read from environment variables. They are not committed.
-- API payloads are validated with Pydantic before use.
+- Hidden CoT is never shown to the user.
+- Users see only summarizer stage summaries and the final answer.
+- Product code lives under `kort/apps`, runtime data under `kort/runtime`.
+- API keys are stored locally in runtime data or environment variables, never committed.
+- All API payloads are validated with Pydantic.
 
-See [architecture-rules.md](kort/docs/architecture-rules.md) for the full rule set.
+See [architecture-rules.md](kort/docs/architecture-rules.md).
 
 ## API Surface
 
@@ -156,25 +151,9 @@ See [architecture-rules.md](kort/docs/architecture-rules.md) for the full rule s
 | --- | --- | --- |
 | `GET` | `/api/providers` | List provider profiles |
 | `PUT` | `/api/providers/{provider_id}` | Create or update a provider profile |
-| `POST` | `/api/providers/{provider_id}/test` | Validate profile readiness and key availability |
-| `GET` | `/api/provider-secrets` | Return configured/not-configured secret status |
+| `POST` | `/api/providers/{provider_id}/test` | Validate profile and key status |
+| `GET` | `/api/provider-secrets` | Return key configured status |
 | `PUT` | `/api/providers/{provider_id}/secret` | Save a local runtime API key |
-
-Provider profile example:
-
-```json
-{
-  "provider_id": "deepseek",
-  "label": "DeepSeek",
-  "provider_type": "deepseek",
-  "base_url": "https://api.deepseek.com",
-  "api_style": "openai",
-  "default_model": "deepseek-chat",
-  "env_key_name": "DEEPSEEK_API_KEY",
-  "enabled": true,
-  "capabilities": ["chat", "reasoning"]
-}
-```
 
 ### Agents
 
@@ -186,7 +165,7 @@ Provider profile example:
 | `DELETE` | `/api/agents/{name}` | Delete an agent |
 | `GET` | `/api/skills` | List global Skills |
 
-Agent folders live at `kort/runtime/agents/{name}/agent.yaml`.
+Agent folders live at `kort/runtime/agents/{name}/agent.yaml`:
 
 ```yaml
 name: research-lead
@@ -211,13 +190,13 @@ Read [How To Make A Agent](kort/runtime/agents/How%20To%20Make%20A%20Agent.md) f
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/api/conversations` | List visible conversation records |
-| `GET` | `/api/conversations/{conversation_id}` | Load one persisted visible conversation |
+| `GET` | `/api/conversations/{conversation_id}` | Load one persisted conversation |
 | `GET` | `/api/conversations/{conversation_id}/stream` | Reattach to a running conversation stream |
 | `PATCH` | `/api/conversations/{conversation_id}` | Rename a conversation |
 | `DELETE` | `/api/conversations/{conversation_id}` | Delete a conversation |
 | `POST` | `/api/conversations/stream` | Start or continue an SSE conversation |
 
-Conversation request:
+Request example:
 
 ```json
 {
@@ -227,16 +206,6 @@ Conversation request:
   "deep_think": false
 }
 ```
-
-Discussion levels:
-
-| Level | Behavior |
-| --- | --- |
-| `off` | Direct answer unless `deep_think` is enabled |
-| `auto` | Router decides between direct and panel |
-| `low` | Lightweight panel |
-| `medium` | Focused panel |
-| `high` | Deeper panel |
 
 ## Built-in Agents
 
@@ -257,12 +226,12 @@ System agents are protected from GUI deletion or editing.
 | --- | --- |
 | `structured-analysis` | Structured reasoning framework |
 | `evidence-grounding` | Evidence and citation discipline |
-| `gap-analysis` | Missing-information detection |
-| `hidden-cot-guard` | Hidden-CoT boundary guard |
-| `stage-summary-projection` | User-visible stage summary format |
+| `gap-analysis` | Missing‑information detection |
+| `hidden-cot-guard` | Hidden‑CoT boundary guard |
+| `stage-summary-projection` | User‑visible stage summary format |
 | `final-answer-structure` | Final answer structure template |
 
-Global Skills are shared. Private agent Skills can be added under `kort/runtime/agents/{name}/skills/` and are managed through the filesystem, not the GUI.
+Global Skills are shared. Private agent Skills can be added under `kort/runtime/agents/{name}/skills/` and are managed through the filesystem.
 
 ## Tech Stack
 
@@ -270,7 +239,7 @@ Global Skills are shared. Private agent Skills can be added under `kort/runtime/
 | --- | --- |
 | Backend | Python 3.12, FastAPI, Uvicorn |
 | Orchestration | LangGraph |
-| Current model client | OpenAI-compatible HTTP client |
+| Current model client | OpenAI‑compatible HTTP client |
 | Planned provider unification | LiteLLM |
 | Validation | Pydantic v2 |
 | Frontend | Next.js 15, React 19, Tailwind CSS 3 |
@@ -278,8 +247,6 @@ Global Skills are shared. Private agent Skills can be added under `kort/runtime/
 | Deployment | Docker Compose |
 
 ## Verification
-
-Useful one-shot checks:
 
 ```bash
 cd kort/apps/api
@@ -290,9 +257,3 @@ python -m pytest tests
 pnpm --dir kort/apps/web exec tsc --noEmit
 pnpm --dir kort/apps/web build
 ```
-
-## Repository Notes
-
-- `kort/runtime/data/` is local runtime state and should not be committed.
-- `.trae/`, `.codex/`, `.claude/`, `AGENTS.md`, and `HARNESS.md` are local agent context files and are intentionally ignored.
-- The public README should describe the product surface, not local agent-operational details.
