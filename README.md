@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="kort/apps/web/public/kort-readme-logo.svg" alt="KORT logo" width="300" height="96" style="filter: invert(1);" />
+  <img src="kort/apps/web/public/kort-readme-logo-inverted.svg" alt="KORT logo" width="300" height="96" />
 
   <h1>Knights of the Round Table</h1>
 

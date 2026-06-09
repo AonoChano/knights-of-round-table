@@ -309,6 +309,81 @@ def test_new_post_replaces_running_job() -> None:
     assert app_module.conversation_service.jobs[conversation_id] is not old_job
 
 
+def test_cancel_persists_partial_round_from_cached_events() -> None:
+    conversation_id = "cancelled-history"
+    service = app_module.conversation_service
+    job = ConversationJob(conversation_id, question="Keep this as context", expert_count=1)
+    job.append(service._sse("conversation_start", {"conversation_id": conversation_id, "question": "Keep this as context"}))
+    job.append(
+        service._sse(
+            "delegation_complete",
+            {
+                "route_kind": "direct",
+                "reason_code": "off_direct",
+                "discussion_level": "off",
+                "deep_think": False,
+                "participant_count": 1,
+                "max_rounds": 0,
+                "agents": [],
+            },
+        )
+    )
+    job.append(
+        service._sse(
+            "summary_complete",
+            {
+                "id": "summary-a",
+                "stage": "thinking",
+                "title": "Framing",
+                "snippet": "Framing the question",
+                "details": "I am framing the question.",
+                "confidence": 0.7,
+                "tree_nodes": [],
+            },
+        )
+    )
+    job.append(service._sse("final_delta", {"delta": "partial answer"}))
+    service.jobs[conversation_id] = job
+
+    response = client.post(f"/api/conversations/{conversation_id}/cancel")
+    detail = client.get(f"/api/conversations/{conversation_id}").json()
+    round_item = detail["rounds"][0]
+
+    assert response.status_code == 200
+    assert response.json()["cancelled"] is True
+    assert round_item["question"] == "Keep this as context"
+    assert round_item["final_answer"]["body"] == "partial answer"
+    assert round_item["final_answer"]["limitations"] == ["Conversation was paused by the user."]
+    assert round_item["delegation"]["route_kind"] == "direct"
+    assert round_item["stage_summaries"][0]["id"] == "summary-a"
+
+
+def test_cancelled_round_is_used_as_followup_context(monkeypatch) -> None:
+    conversation_id = "cancelled-context"
+    service = app_module.conversation_service
+    job = ConversationJob(conversation_id, question="Interrupted question", expert_count=1)
+    service.jobs[conversation_id] = job
+    client.post(f"/api/conversations/{conversation_id}/cancel")
+
+    captured: dict[str, str] = {}
+
+    def fake_direct_stream(**kwargs):
+        captured["question"] = kwargs["question"]
+        yield 'event: final_delta\ndata: {"delta": "follow-up"}\n\n'
+
+    monkeypatch.setattr("kort_api.conversations.run_direct_answer_stream", fake_direct_stream)
+
+    response = client.post(
+        "/api/conversations/stream",
+        json={"conversation_id": conversation_id, "question": "Continue from there", "level": "off"},
+    )
+
+    assert response.status_code == 200
+    assert "User: Interrupted question" in captured["question"]
+    assert "Assistant: [Response was stopped by the user.]" in captured["question"]
+    assert captured["question"].endswith("User: Continue from there")
+
+
 def test_panel_expert_and_critic_calls_disable_provider_thinking(monkeypatch) -> None:
     calls: list[tuple[str, bool]] = []
 

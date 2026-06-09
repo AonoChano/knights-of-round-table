@@ -390,6 +390,7 @@ function dedupeTimelineItems(items: TimelineItem[]): TimelineItem[] {
 }
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+const USER_CANCELLED_LIMITATION = "Conversation was paused by the user.";
 
 const SENTENCE_BOUNDARY_RE = /[。！？…；\n]+/g;
 
@@ -599,7 +600,8 @@ function appendThinkingCancelledNode(items: TimelineItem[], locale: Locale): Tim
 function timelineFromStageSummaries(
   stageSummaries: StageSummary[] | undefined,
   locale: Locale,
-  elapsedSeconds?: number
+  elapsedSeconds?: number,
+  cancelled = false
 ): TimelineItem[] {
   const items = (stageSummaries ?? []).map((s) => ({
     id: s.id,
@@ -609,7 +611,12 @@ function timelineFromStageSummaries(
     status: "complete" as const,
     treeNodes: s.tree_nodes ?? [],
   }));
+  if (cancelled) return appendThinkingCancelledNode(items, locale);
   return items.length > 0 ? appendThinkingDoneNode(items, locale, elapsedSeconds) : [];
+}
+
+function isCancelledRound(round: ConversationRound): boolean {
+  return round.final_answer.limitations.includes(USER_CANCELLED_LIMITATION);
 }
 
 function parseSseChunk(buffer: string): { events: StreamEvent[]; rest: string } {
@@ -1269,7 +1276,12 @@ function HomeExperience() {
       }
       if (payload.rounds?.length) {
         const pairs: MessagePair[] = payload.rounds.map((round) => {
-          const timelineItems = timelineFromStageSummaries(round.stage_summaries, locale);
+          const timelineItems = timelineFromStageSummaries(
+            round.stage_summaries,
+            locale,
+            undefined,
+            isCancelledRound(round)
+          );
           return {
             question: round.question,
             timeline: timelineItems,
@@ -1999,7 +2011,12 @@ function HomeExperience() {
       setFinalBody("");
       if (question && conv.rounds.length > 0) {
         const lastRound = conv.rounds[conv.rounds.length - 1];
-        const timelineItems = timelineFromStageSummaries(lastRound.stage_summaries, locale, elapsed);
+        const timelineItems = timelineFromStageSummaries(
+          lastRound.stage_summaries,
+          locale,
+          elapsed,
+          isCancelledRound(lastRound)
+        );
         if (drawerOpen && drawerTimeline === null) {
           setDrawerTimeline(timelineItems);
         }
