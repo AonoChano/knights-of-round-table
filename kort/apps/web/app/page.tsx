@@ -219,6 +219,7 @@ type StreamSlot = {
   deepThink: boolean;
   paused: boolean;
   conversation: ConversationResponse | null;
+  streamError: string | null;
 };
 
 const TRANSIENT_TIMELINE_IDS = new Set(["thinking-active", "talking-active"]);
@@ -333,6 +334,7 @@ function createEmptySlot(): StreamSlot {
     deepThink: loadDeepThink(),
     paused: false,
     conversation: null,
+    streamError: null,
   };
 }
 
@@ -395,6 +397,9 @@ function cn(...values: Array<string | false | null | undefined>) {
 }
 
 function clientErrorMessage(error: unknown, fallback: string) {
+  if (error instanceof TypeError && /failed to fetch|load failed|networkerror/i.test(error.message)) {
+    return fallback;
+  }
   if (error instanceof Error && error.message) return error.message;
   if (typeof Event !== "undefined" && error instanceof Event) {
     return error.type ? `${fallback} (${error.type})` : fallback;
@@ -636,6 +641,8 @@ function HomeExperience() {
   const [logLevel, setLogLevel] = useState<LogLevel>(DEFAULT_LOG_LEVEL);
   const [developerStatus, setDeveloperStatus] = useState<string | null>(null);
   const [developerDiagnostics, setDeveloperDiagnostics] = useState<DeveloperDiagnostics | null>(null);
+  const [streamError, setStreamError] = useState<string | null>(null);
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
 
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -678,6 +685,7 @@ function HomeExperience() {
     setPendingConvId(slot.plannedConversationId);
     setConversation(slot.conversation);
     setPaused(slot.paused);
+    setStreamError(slot.streamError);
   }
 
   function flushStateToSlot(slot: StreamSlot) {
@@ -693,6 +701,7 @@ function HomeExperience() {
     slot.submittedQuestion = submittedQuestion;
     slot.plannedConversationId = pendingConvId;
     slot.conversation = conversation;
+    slot.streamError = streamError;
   }
 
   function saveCurrentSlot() {
@@ -808,6 +817,7 @@ function HomeExperience() {
     setTalkingActive(false);
     setLoading(false);
     setSubmittedQuestion(null);
+    setStreamError(null);
   }
 
   function fullReset() {
@@ -871,6 +881,22 @@ function HomeExperience() {
   }, [currentConversationId]);
 
   useEffect(() => {
+    if (!mobileSidebarOpen) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMobileSidebarOpen(false);
+    };
+    const handleResize = () => {
+      if (window.innerWidth >= 1024) setMobileSidebarOpen(false);
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("resize", handleResize);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("resize", handleResize);
+    };
+  }, [mobileSidebarOpen]);
+
+  useEffect(() => {
     timelineRef.current = timeline;
   }, [timeline]);
 
@@ -919,13 +945,16 @@ function HomeExperience() {
 
   async function loadProviders() {
     try {
-      const response = await fetch(`${API_BASE}/api/providers`);
+      const response = await fetchWithTimeout(`${API_BASE}/api/providers`, {}, 6000);
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const payload = (await response.json()) as ProviderProfile[];
       const next = payload.length ? payload : fallbackProviders;
       setProviders(next);
       setProviderForms(Object.fromEntries(next.map((item) => [item.provider_id, item])));
-    } catch {
+    } catch (error) {
+      clientLog("debug", "provider profiles load failed", {
+        error: clientErrorMessage(error, t(locale).ui.backendUnavailable),
+      });
       setProviders(fallbackProviders);
       setProviderForms(Object.fromEntries(fallbackProviders.map((item) => [item.provider_id, item])));
     }
@@ -933,18 +962,21 @@ function HomeExperience() {
 
   async function loadProviderSecretStatuses() {
     try {
-      const response = await fetch(`${API_BASE}/api/provider-secrets`);
+      const response = await fetchWithTimeout(`${API_BASE}/api/provider-secrets`, {}, 6000);
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const payload = (await response.json()) as ProviderSecretStatus[];
       setProviderSecretStatus(Object.fromEntries(payload.map((item) => [item.provider_id, item.configured])));
-    } catch {
+    } catch (error) {
+      clientLog("debug", "provider secret status load failed", {
+        error: clientErrorMessage(error, t(locale).ui.backendUnavailable),
+      });
       setProviderSecretStatus({});
     }
   }
 
   async function loadAgents() {
     try {
-      const response = await fetch(`${API_BASE}/api/agents`);
+      const response = await fetchWithTimeout(`${API_BASE}/api/agents`, {}, 6000);
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const payload = (await response.json()) as AgentView[];
       setAgents(payload);
@@ -957,11 +989,14 @@ function HomeExperience() {
 
   async function loadSkills() {
     try {
-      const response = await fetch(`${API_BASE}/api/skills`);
+      const response = await fetchWithTimeout(`${API_BASE}/api/skills`, {}, 6000);
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const payload = (await response.json()) as string[];
       setGlobalSkills(payload);
-    } catch {
+    } catch (error) {
+      clientLog("debug", "global skills load failed", {
+        error: clientErrorMessage(error, t(locale).ui.backendUnavailable),
+      });
       setGlobalSkills([]);
     }
   }
@@ -1365,8 +1400,10 @@ function HomeExperience() {
     submittedQuestionRef.current = question;
     setInput("");
     setLoading(true);
+    setStreamError(null);
 
     const controller = slot.abortController!;
+    slot.streamError = null;
 
     if (isNewConversation) {
       setConversations((prev) => [
@@ -1487,9 +1524,14 @@ function HomeExperience() {
       if (isExpectedAbortError(e)) {
         clientLog("info", "conversation stream aborted by user", { conversationId: streamSlotId });
       } else {
+        const message = clientErrorMessage(e, t(locale).ui.backendUnavailable);
+        slot.streamError = message;
+        if (activeSlotIdRef.current === streamSlotId) {
+          setStreamError(message);
+        }
         clientLog("error", "conversation stream failed", {
           conversationId: streamSlotId,
-          error: clientErrorMessage(e, t(locale).ui.backendUnavailable),
+          error: message,
         });
       }
     } finally {
@@ -1561,6 +1603,7 @@ function HomeExperience() {
     if (message.event === "conversation_complete") {
       slot.finalBody = String(message.data.final_body ?? slot.finalBody);
       slot.loading = false;
+      slot.streamError = null;
       slot.conversation = message.data as unknown as ConversationResponse;
       const visibleTimeline = withoutTransientTimelineItems(slot.timeline);
       slot.thinkingComplete = visibleTimeline.length > 0;
@@ -1577,6 +1620,7 @@ function HomeExperience() {
     }
     if (message.event === "error") {
       slot.loading = false;
+      slot.streamError = String(message.data.message ?? message.data.error ?? t(locale).ui.backendUnavailable);
       return;
     }
   }
@@ -1736,6 +1780,7 @@ function HomeExperience() {
     if (message.event === "conversation_complete") {
       const conv = message.data as unknown as ConversationResponse;
       setConversation(conv);
+      setStreamError(null);
       setCurrentConversationId(conv.conversation_id);
       const question = submittedQuestionRef.current;
       submittedQuestionRef.current = null;
@@ -1758,6 +1803,12 @@ function HomeExperience() {
         setPendingConvId(null);
       }
       void loadConversations();
+    }
+
+    if (message.event === "error") {
+      setLoading(false);
+      setStreamError(String(message.data.message ?? message.data.error ?? t(locale).ui.backendUnavailable));
+      return;
     }
   }
 
@@ -1869,6 +1920,9 @@ function HomeExperience() {
 
   return (
     <main className="app-shell">
+      {mobileSidebarOpen ? (
+        <div className="mobile-sidebar-backdrop" onClick={() => setMobileSidebarOpen(false)} />
+      ) : null}
       <Sidebar
         locale={locale}
         agents={agents}
@@ -1879,13 +1933,22 @@ function HomeExperience() {
         unreadConversationIds={unreadConversationIds}
         slotMapRef={slotMapRef}
         slotVersion={slotVersion}
-        collapsed={sidebarCollapsed}
-        onNewConversation={fullReset}
-        onSelectConversation={(id) => void loadConversation(id)}
+        collapsed={sidebarCollapsed && !mobileSidebarOpen}
+        mobileOpen={mobileSidebarOpen}
+        onCloseMobile={() => setMobileSidebarOpen(false)}
+        onNewConversation={() => {
+          setMobileSidebarOpen(false);
+          fullReset();
+        }}
+        onSelectConversation={(id) => {
+          setMobileSidebarOpen(false);
+          void loadConversation(id);
+        }}
         onRenameConversation={(id, name) => void renameConversation(id, name)}
         onDeleteConversation={(id) => void deleteConversation(id)}
         onToggleCollapsed={() => setSidebarCollapsed((current) => !current)}
         openSettings={(tab) => {
+          setMobileSidebarOpen(false);
           setSettingsTab(tab);
           setSettingsOpen(true);
         }}
@@ -1894,6 +1957,16 @@ function HomeExperience() {
       <section className={cn("main-shell", !hasRun && "main-shell-empty")}>
         <header className="topbar">
           <div className="topbar-left">
+            <button
+              className="mobile-sidebar-button"
+              type="button"
+              title={tr.ui.openSidebar}
+              aria-label={tr.ui.openSidebar}
+              aria-expanded={mobileSidebarOpen}
+              onClick={() => setMobileSidebarOpen(true)}
+            >
+              <PanelLeftOpen size={18} aria-hidden="true" />
+            </button>
             <DiscussionModePicker
               discussionLevel={discussionLevel}
               deepThink={deepThink}
@@ -1921,6 +1994,7 @@ function HomeExperience() {
                 question={submittedQuestion}
                 timeline={visibleTimeline}
                 finalBody={finalBody}
+                streamError={streamError}
                 messagePairs={messagePairs}
                 locale={locale}
                 onToggleThinking={() => setDrawerOpen((prev) => !prev)}
@@ -2050,11 +2124,13 @@ function Sidebar({
   slotMapRef,
   slotVersion,
   collapsed,
+  mobileOpen = false,
   onNewConversation,
   onSelectConversation,
   onRenameConversation,
   onDeleteConversation,
   onToggleCollapsed,
+  onCloseMobile,
   openSettings,
 }: {
   locale: Locale;
@@ -2067,11 +2143,13 @@ function Sidebar({
   slotMapRef: React.MutableRefObject<Map<string, StreamSlot>>;
   slotVersion: number;
   collapsed: boolean;
+  mobileOpen?: boolean;
   onNewConversation: () => void;
   onSelectConversation: (id: string) => void;
   onRenameConversation: (id: string, name: string) => void;
   onDeleteConversation: (id: string) => void;
   onToggleCollapsed: () => void;
+  onCloseMobile?: () => void;
   openSettings: (tab: SettingsTab) => void;
 }) {
   const tr = t(locale);
@@ -2176,8 +2254,15 @@ function Sidebar({
     setConfirmDeleteId(null);
   }
 
+  const collapseTitle = mobileOpen
+    ? tr.ui.closeSidebar
+    : collapsed
+      ? tr.ui.expandSidebar
+      : tr.ui.collapseSidebar;
+  const handleCollapseClick = mobileOpen && onCloseMobile ? onCloseMobile : onToggleCollapsed;
+
   return (
-    <aside className={cn("sidebar", collapsed && "sidebar-collapsed")} aria-label="Conversation sidebar">
+    <aside className={cn("sidebar", collapsed && "sidebar-collapsed", mobileOpen && "sidebar-mobile-open")} aria-label="Conversation sidebar">
       <div className="sidebar-main">
         <div className="sidebar-header">
           <div className="sidebar-brand" aria-label="Knights of the Round Table">
@@ -2186,11 +2271,11 @@ function Sidebar({
               <button
                 className="logo-collapse-overlay"
                 type="button"
-                title={collapsed ? tr.ui.expandSidebar : tr.ui.collapseSidebar}
-                aria-label={collapsed ? tr.ui.expandSidebar : tr.ui.collapseSidebar}
-                onClick={onToggleCollapsed}
+                title={collapseTitle}
+                aria-label={collapseTitle}
+                onClick={handleCollapseClick}
               >
-                {collapsed ? <PanelLeftOpen size={17} aria-hidden="true" /> : <PanelLeftClose size={17} aria-hidden="true" />}
+                {mobileOpen ? <X size={17} aria-hidden="true" /> : collapsed ? <PanelLeftOpen size={17} aria-hidden="true" /> : <PanelLeftClose size={17} aria-hidden="true" />}
               </button>
             </div>
             <img className="sidebar-wordmark sidebar-expanded-only" src="/icon_text_part.svg" alt="Knights of Round Table" />
@@ -2198,11 +2283,11 @@ function Sidebar({
           <button
             className="sidebar-collapse-button"
             type="button"
-            title={collapsed ? tr.ui.expandSidebar : tr.ui.collapseSidebar}
-            aria-label={collapsed ? tr.ui.expandSidebar : tr.ui.collapseSidebar}
-            onClick={onToggleCollapsed}
+            title={collapseTitle}
+            aria-label={collapseTitle}
+            onClick={handleCollapseClick}
           >
-            {collapsed ? <PanelLeftOpen size={17} aria-hidden="true" /> : <PanelLeftClose size={17} aria-hidden="true" />}
+            {mobileOpen ? <X size={17} aria-hidden="true" /> : collapsed ? <PanelLeftOpen size={17} aria-hidden="true" /> : <PanelLeftClose size={17} aria-hidden="true" />}
           </button>
         </div>
         <button
@@ -2370,6 +2455,7 @@ function ConversationView({
   question,
   timeline,
   finalBody,
+  streamError,
   messagePairs,
   locale,
   onToggleThinking,
@@ -2382,6 +2468,7 @@ function ConversationView({
   question: string | null;
   timeline: TimelineItem[];
   finalBody: string;
+  streamError: string | null;
   messagePairs: MessagePair[];
   locale: Locale;
   onToggleThinking: () => void;
@@ -2437,8 +2524,8 @@ function ConversationView({
   const isHistoryView = Boolean(conversation && !loading && !hasLiveTimelineItems);
   const isDone = thinkingComplete || statusItem?.status === "done";
   const showPreview = !isDone && latest && latest.body.trim();
-  const showCurrentTurn = !isHistoryView && (question || timeline.length > 0 || finalBody);
-  const showWaitingState = loading && Boolean(question) && timeline.length === 0 && !finalBody;
+  const showCurrentTurn = !isHistoryView && (question || timeline.length > 0 || finalBody || streamError);
+  const showWaitingState = loading && Boolean(question) && timeline.length === 0 && !finalBody && !streamError;
   const previewTitle = isDone
     ? statusItem?.title ?? thinkingElapsedLabel(locale, elapsed, true)
     : statusItem?.title ?? lastCompleteTitle ?? latest?.title ?? tr.thinking.active;
@@ -2467,6 +2554,13 @@ function ConversationView({
                 <div className="assistant-waiting" role="status" aria-live="polite">
                   <span className="assistant-waiting-spinner" aria-hidden="true" />
                   <span>{tr.ui.requestReceived}</span>
+                </div>
+              ) : null}
+
+              {streamError ? (
+                <div className="assistant-error" role="status" aria-live="polite">
+                  <span>{tr.ui.sendFailed}</span>
+                  <span className="assistant-error-detail">{streamError}</span>
                 </div>
               ) : null}
 
