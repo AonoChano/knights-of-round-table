@@ -233,6 +233,12 @@ def delete_conversation(conversation_id: str) -> dict:
     return {"ok": True}
 
 
+@app.post("/api/conversations/{conversation_id}/cancel")
+def cancel_conversation(conversation_id: str) -> dict:
+    cancelled = conversation_service.cancel_conversation(conversation_id)
+    return {"ok": True, "cancelled": cancelled}
+
+
 @app.post("/api/conversations/stream")
 def stream_conversation(payload: ConversationRequest) -> StreamingResponse:
     expert_count = len(agent_loader.list_agents())

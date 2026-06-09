@@ -86,12 +86,31 @@ type FinalAnswer = {
   limitations: string[];
 };
 
+type DelegatedAgent = {
+  name: string;
+  nickname: string;
+  role: string;
+  provider_profile: string;
+  model: string;
+};
+
+type DelegationInfo = {
+  route_kind: "direct" | "solo_thinking" | "panel";
+  reason_code: string;
+  discussion_level: DiscussionLevel;
+  deep_think: boolean;
+  participant_count: number;
+  max_rounds: number;
+  agents: DelegatedAgent[];
+};
+
 type ConversationRound = {
   round_id: string;
   created_at: string;
   question: string;
   stage_summaries: StageSummary[];
   final_answer: FinalAnswer;
+  delegation?: DelegationInfo | null;
 };
 
 type ConversationResponse = {
@@ -115,6 +134,7 @@ type MessagePair = {
   question: string;
   timeline: TimelineItem[];
   finalBody: string;
+  delegation?: DelegationInfo | null;
 };
 
 type ProviderProfile = {
@@ -218,6 +238,8 @@ type StreamSlot = {
   submittedQuestion: string | null;
   plannedConversationId: string | null;
   deepThink: boolean;
+  requestPhase: "sent" | "delegating" | "delegated" | null;
+  delegationInfo: DelegationInfo | null;
   paused: boolean;
   conversation: ConversationResponse | null;
   streamError: string | null;
@@ -334,6 +356,8 @@ function createEmptySlot(): StreamSlot {
     submittedQuestion: null,
     plannedConversationId: null,
     deepThink: loadDeepThink(),
+    requestPhase: null,
+    delegationInfo: null,
     paused: false,
     conversation: null,
     streamError: null,
@@ -447,6 +471,50 @@ function parseThinkingTreeNodes(value: unknown): ThinkingTreeNode[] {
       children: parseThinkingTreeNodes(item.children),
     }];
   });
+}
+
+function parseDelegatedAgents(value: unknown): DelegatedAgent[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((agent) => {
+    if (!agent || typeof agent !== "object") return [];
+    const item = agent as Record<string, unknown>;
+    const name = typeof item.name === "string" ? item.name : "";
+    const nickname = typeof item.nickname === "string" ? item.nickname : name;
+    const role = typeof item.role === "string" ? item.role : "";
+    const providerProfile = typeof item.provider_profile === "string" ? item.provider_profile : "";
+    const model = typeof item.model === "string" ? item.model : "";
+    if (!name && !nickname && !role && !model) return [];
+    return [{ name, nickname, role, provider_profile: providerProfile, model }];
+  });
+}
+
+function parseDelegationInfo(value: unknown): DelegationInfo | null {
+  if (!value || typeof value !== "object") return null;
+  const item = value as Record<string, unknown>;
+  const routeKind = item.route_kind;
+  const discussionLevelValue = item.discussion_level;
+  const discussionLevel: DiscussionLevel =
+    discussionLevelValue === "off" ||
+    discussionLevelValue === "auto" ||
+    discussionLevelValue === "low" ||
+    discussionLevelValue === "medium" ||
+    discussionLevelValue === "high"
+      ? discussionLevelValue
+      : "auto";
+  if (routeKind !== "direct" && routeKind !== "solo_thinking" && routeKind !== "panel") return null;
+  const agents = parseDelegatedAgents(item.agents);
+  const participantCount =
+    typeof item.participant_count === "number" ? item.participant_count : agents.length;
+  const maxRounds = typeof item.max_rounds === "number" ? item.max_rounds : 0;
+  return {
+    route_kind: routeKind,
+    reason_code: typeof item.reason_code === "string" ? item.reason_code : "",
+    discussion_level: discussionLevel,
+    deep_think: item.deep_think === true,
+    participant_count: participantCount,
+    max_rounds: maxRounds,
+    agents,
+  };
 }
 
 function markdownTitle(markdown: string, fallback: string) {
@@ -645,6 +713,8 @@ function HomeExperience() {
   const [developerDiagnostics, setDeveloperDiagnostics] = useState<DeveloperDiagnostics | null>(null);
   const [streamError, setStreamError] = useState<string | null>(null);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const [requestPhase, setRequestPhase] = useState<StreamSlot["requestPhase"]>(null);
+  const [delegationInfo, setDelegationInfo] = useState<DelegationInfo | null>(null);
 
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -663,6 +733,7 @@ function HomeExperience() {
   const messagePairsRef = useRef<MessagePair[]>([]);
   const submittedQuestionRef = useRef<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const delegationPhaseTimerRef = useRef<TimerHandle | null>(null);
   const slotMapRef = useRef<Map<string, StreamSlot>>(new Map());
   const [activeSlotId, setActiveSlotId] = useState<string | null>(null);
   const [slotVersion, setSlotVersion] = useState(0);
@@ -690,6 +761,8 @@ function HomeExperience() {
     setConversation(slot.conversation);
     setPaused(slot.paused);
     setStreamError(slot.streamError);
+    setRequestPhase(slot.requestPhase);
+    setDelegationInfo(slot.delegationInfo);
   }
 
   function flushStateToSlot(slot: StreamSlot) {
@@ -707,6 +780,8 @@ function HomeExperience() {
     slot.plannedConversationId = pendingConvId;
     slot.conversation = conversation;
     slot.streamError = streamError;
+    slot.requestPhase = requestPhase;
+    slot.delegationInfo = delegationInfo;
   }
 
   function saveCurrentSlot() {
@@ -767,6 +842,10 @@ function HomeExperience() {
     if (thinkingLabelRef.current) {
       clearTimeout(thinkingLabelRef.current);
       thinkingLabelRef.current = null;
+    }
+    if (delegationPhaseTimerRef.current) {
+      clearTimeout(delegationPhaseTimerRef.current);
+      delegationPhaseTimerRef.current = null;
     }
     sentenceQueueRef.current = [];
     activeSummaryRef.current = "";
@@ -835,6 +914,8 @@ function HomeExperience() {
     setLoading(false);
     setSubmittedQuestion(null);
     setStreamError(null);
+    setRequestPhase(null);
+    setDelegationInfo(null);
   }
 
   function fullReset() {
@@ -1193,6 +1274,7 @@ function HomeExperience() {
             question: round.question,
             timeline: timelineItems,
             finalBody: round.final_answer.body,
+            delegation: round.delegation ?? null,
           };
         });
         setMessagePairsSynced(pairs);
@@ -1218,6 +1300,8 @@ function HomeExperience() {
     const now = new Date().toISOString();
     slot.submittedQuestion = null;
     slot.plannedConversationId = conversationId;
+    slot.requestPhase = "sent";
+    slot.delegationInfo = null;
     setCurrentConversationId(conversationId);
     currentCidRef.current = conversationId;
     setSubmittedQuestion(null);
@@ -1225,6 +1309,8 @@ function HomeExperience() {
     setTimeline([]);
     setThinkingComplete(false);
     setLoading(true);
+    setRequestPhase("sent");
+    setDelegationInfo(null);
     setPendingConvId(conversationId);
     setConversations((prev) => {
       if (prev.some((item) => item.conversation_id === conversationId)) return prev;
@@ -1355,6 +1441,24 @@ function HomeExperience() {
     }
   }
 
+  async function cancelBackendConversation(conversationId: string) {
+    try {
+      const response = await fetch(`${API_BASE}/api/conversations/${conversationId}/cancel`, {
+        method: "POST",
+        keepalive: true,
+      });
+      clientLog("debug", "conversation cancel request completed", {
+        conversationId,
+        status: response.status,
+      });
+    } catch (error) {
+      clientLog("debug", "conversation cancel request failed", {
+        conversationId,
+        error: clientErrorMessage(error, t(locale).ui.backendUnavailable),
+      });
+    }
+  }
+
   function pauseConversation() {
     const slot = getActiveSlot();
     if (!slot) return;
@@ -1366,6 +1470,9 @@ function HomeExperience() {
     flushStateToSlot(slot);
     slot.paused = true;
     setPaused(true);
+    if (activeSlotId) {
+      void cancelBackendConversation(activeSlotId);
+    }
 
     setPauseFlash(true);
     window.setTimeout(() => setPauseFlash(false), 800);
@@ -1385,9 +1492,31 @@ function HomeExperience() {
     slot.timeline = cancelledTimeline;
     slot.thinkingComplete = true;
     slot.talkingActive = false;
-    setTimeline(cancelledTimeline);
-    setThinkingComplete(true);
+    slot.requestPhase = null;
+    const cancelledQuestion = slot.submittedQuestion ?? submittedQuestion;
+    let committedCancelledTurn = false;
+    if (cancelledQuestion) {
+      const cancelledPair: MessagePair = {
+        question: cancelledQuestion,
+        timeline: cancelledTimeline,
+        finalBody: slot.finalBody,
+        delegation: slot.delegationInfo,
+      };
+      slot.messagePairs = [...slot.messagePairs, cancelledPair];
+      setMessagePairsSynced(slot.messagePairs);
+      slot.submittedQuestion = null;
+      submittedQuestionRef.current = null;
+      setSubmittedQuestion(null);
+      slot.finalBody = "";
+      setFinalBody("");
+      slot.timeline = [];
+      slot.thinkingComplete = false;
+      committedCancelledTurn = true;
+    }
+    setTimeline(committedCancelledTurn ? [] : cancelledTimeline);
+    setThinkingComplete(!committedCancelledTurn);
     setTalkingActive(false);
+    setRequestPhase(null);
 
     slot.loading = false;
     setLoading(false);
@@ -1438,6 +1567,10 @@ function HomeExperience() {
     slot.submittedQuestion = question;
     slot.discussionLevel = discussionLevel;
     slot.deepThink = discussionLevel === "off" ? deepThink : false;
+    slot.requestPhase = "sent";
+    slot.delegationInfo = null;
+    setRequestPhase("sent");
+    setDelegationInfo(null);
 
     if (isNewConversation) {
       setConversations((prev) => [
@@ -1582,13 +1715,25 @@ function HomeExperience() {
   }
 
   function applyEventToSlot(slot: StreamSlot, message: StreamEvent) {
+    if (message.event === "conversation_start") {
+      slot.requestPhase = "sent";
+      return;
+    }
+    if (message.event === "delegation_complete") {
+      const info = parseDelegationInfo(message.data);
+      slot.delegationInfo = info;
+      slot.requestPhase = "delegating";
+      return;
+    }
     if (message.event === "talking_active") {
+      slot.requestPhase = null;
       slot.talkingActive = true;
       slot.timeline = withoutTransientTimelineItems(slot.timeline);
       slot.timeline = [...slot.timeline, { id: "talking-active", title: t(locale).thinking.talking, body: "", raw: "", status: "talking" }];
       return;
     }
     if (message.event === "thinking_active") {
+      slot.requestPhase = null;
       slot.talkingActive = false;
       const { label: initialLabel } = nextThinkingLabel(locale, "");
       slot.timeline = withoutTransientTimelineItems(slot.timeline);
@@ -1632,6 +1777,7 @@ function HomeExperience() {
       return;
     }
     if (message.event === "final_delta") {
+      slot.requestPhase = null;
       const delta = String(message.data.delta ?? "");
       slot.finalBody = slot.finalBody + delta;
       return;
@@ -1639,6 +1785,7 @@ function HomeExperience() {
     if (message.event === "conversation_complete") {
       slot.finalBody = String(message.data.final_body ?? slot.finalBody);
       slot.loading = false;
+      slot.requestPhase = null;
       slot.streamError = null;
       slot.conversation = message.data as unknown as ConversationResponse;
       const visibleTimeline = withoutTransientTimelineItems(slot.timeline);
@@ -1656,13 +1803,37 @@ function HomeExperience() {
     }
     if (message.event === "error") {
       slot.loading = false;
+      slot.requestPhase = null;
       slot.streamError = String(message.data.message ?? message.data.error ?? t(locale).ui.backendUnavailable);
       return;
     }
   }
 
   function handleStreamEvent(message: StreamEvent) {
+    if (message.event === "conversation_start") {
+      setRequestPhase("sent");
+      return;
+    }
+
+    if (message.event === "delegation_complete") {
+      const info = parseDelegationInfo(message.data);
+      setDelegationInfo(info);
+      setRequestPhase("delegating");
+      if (delegationPhaseTimerRef.current) {
+        clearTimeout(delegationPhaseTimerRef.current);
+      }
+      delegationPhaseTimerRef.current = setTimeout(() => {
+        setRequestPhase((current) => (current === "delegating" ? "delegated" : current));
+        delegationPhaseTimerRef.current = setTimeout(() => {
+          setRequestPhase((current) => (current === "delegated" ? null : current));
+          delegationPhaseTimerRef.current = null;
+        }, 450);
+      }, 1200);
+      return;
+    }
+
     if (message.event === "talking_active") {
+      setRequestPhase(null);
       setTalkingActive(true);
       if (thinkingLabelRef.current) {
         clearTimeout(thinkingLabelRef.current);
@@ -1676,6 +1847,7 @@ function HomeExperience() {
     }
 
     if (message.event === "thinking_active") {
+      setRequestPhase(null);
       setTalkingActive(false);
       const now = Date.now();
       const STABLE_LABEL_WINDOW = 15000;
@@ -1809,6 +1981,7 @@ function HomeExperience() {
     }
 
     if (message.event === "final_delta") {
+      setRequestPhase(null);
       setFinalBody((current) => current + String(message.data.delta ?? ""));
       return;
     }
@@ -1817,6 +1990,7 @@ function HomeExperience() {
       const conv = message.data as unknown as ConversationResponse;
       setConversation(conv);
       setStreamError(null);
+      setRequestPhase(null);
       setCurrentConversationId(conv.conversation_id);
       const question = submittedQuestionRef.current;
       submittedQuestionRef.current = null;
@@ -1835,6 +2009,7 @@ function HomeExperience() {
             question: lastRound.question,
             timeline: timelineItems,
             finalBody: lastRound.final_answer.body,
+            delegation: lastRound.delegation ?? delegationInfo,
           },
         ]);
       }
@@ -1846,6 +2021,7 @@ function HomeExperience() {
 
     if (message.event === "error") {
       setLoading(false);
+      setRequestPhase(null);
       setStreamError(String(message.data.message ?? message.data.error ?? t(locale).ui.backendUnavailable));
       return;
     }
@@ -2041,6 +2217,8 @@ function HomeExperience() {
                 finalBody={finalBody}
                 streamError={streamError}
                 messagePairs={messagePairs}
+                requestPhase={requestPhase}
+                delegationInfo={delegationInfo}
                 locale={locale}
                 onToggleThinking={toggleCurrentThinkingDrawer}
                 onViewPairThinking={(pair) => {
@@ -2360,7 +2538,8 @@ function Sidebar({
                       "sidebar-link-row",
                       isActiveConversation && "sidebar-link-row-active",
                       isLoadingConversation && !isActiveConversation && "sidebar-link-row-loading",
-                      menuConversationId === item.conversation_id && "sidebar-link-row-menu-open"
+                      menuConversationId === item.conversation_id && "sidebar-link-row-menu-open",
+                      confirmDeleteId === item.conversation_id && "sidebar-link-row-confirm-open"
                     )}
                   >
                     {editingId === item.conversation_id ? (
@@ -2487,6 +2666,38 @@ function Sidebar({
   );
 }
 
+const BRAILLE_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+function BrailleSpinner() {
+  const [frame, setFrame] = useState(0);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setFrame((current) => (current + 1) % BRAILLE_FRAMES.length);
+    }, 85);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  return (
+    <span className="assistant-waiting-spinner" aria-hidden="true">
+      {BRAILLE_FRAMES[frame]}
+    </span>
+  );
+}
+
+function waitingStatusText(
+  locale: Locale,
+  requestPhase: StreamSlot["requestPhase"],
+  delegation: DelegationInfo | null
+) {
+  const copy = t(locale).ui;
+  if (requestPhase === "delegating") {
+    return copy.delegatingExperts(delegation?.participant_count ?? 0);
+  }
+  if (requestPhase === "delegated") return copy.delegationSucceeded;
+  return copy.requestReceived;
+}
+
 function ConversationView({
   conversation,
   loading,
@@ -2497,6 +2708,8 @@ function ConversationView({
   finalBody,
   streamError,
   messagePairs,
+  requestPhase,
+  delegationInfo,
   locale,
   onToggleThinking,
   onViewPairThinking,
@@ -2510,6 +2723,8 @@ function ConversationView({
   finalBody: string;
   streamError: string | null;
   messagePairs: MessagePair[];
+  requestPhase: StreamSlot["requestPhase"];
+  delegationInfo: DelegationInfo | null;
   locale: Locale;
   onToggleThinking: () => void;
   onViewPairThinking: (pair: MessagePair) => void;
@@ -2538,7 +2753,7 @@ function ConversationView({
                 <div className="answer-body markdown-body mt-2">
                   <Markdown content={cleanBody} />
                 </div>
-                <MessageActions body={cleanBody} locale={locale} />
+                <MessageActions body={cleanBody} locale={locale} delegation={pair.delegation ?? null} />
               </>
             ) : wasCancelled ? (
               <div className="cancelled-badge mt-2 text-xs text-muted">{tr.ui.cancelled}</div>
@@ -2565,7 +2780,7 @@ function ConversationView({
   const isDone = thinkingComplete || statusItem?.status === "done";
   const showPreview = !isDone && latest && latest.body.trim();
   const showCurrentTurn = !isHistoryView && (question || timeline.length > 0 || finalBody || streamError);
-  const showWaitingState = loading && Boolean(question) && timeline.length === 0 && !finalBody && !streamError;
+  const showWaitingState = loading && Boolean(question) && !finalBody && !streamError && (timeline.length === 0 || requestPhase !== null);
   const previewTitle = isDone
     ? statusItem?.title ?? thinkingElapsedLabel(locale, elapsed, true)
     : statusItem?.title ?? lastCompleteTitle ?? latest?.title ?? tr.thinking.active;
@@ -2592,8 +2807,8 @@ function ConversationView({
 
               {showWaitingState ? (
                 <div className="assistant-waiting" role="status" aria-live="polite">
-                  <span className="assistant-waiting-spinner" aria-hidden="true" />
-                  <span>{tr.ui.requestReceived}</span>
+                  <BrailleSpinner />
+                  <span>{waitingStatusText(locale, requestPhase, delegationInfo)}</span>
                 </div>
               ) : null}
 
@@ -2615,7 +2830,7 @@ function ConversationView({
                   <div className="answer-body markdown-body">
                     <Markdown content={finalBody} />
                   </div>
-                  <MessageActions body={finalBody} locale={locale} />
+                  <MessageActions body={finalBody} locale={locale} delegation={delegationInfo} />
                 </>
               ) : null}
             </div>
@@ -2626,9 +2841,37 @@ function ConversationView({
   );
 }
 
-function MessageActions({ body, locale }: { body: string; locale: Locale }) {
+function delegationRouteLabel(locale: Locale, routeKind: DelegationInfo["route_kind"]) {
+  const copy = t(locale).ui;
+  if (routeKind === "direct") return copy.delegationRouteDirect;
+  if (routeKind === "solo_thinking") return copy.delegationRouteSolo;
+  return copy.delegationRoutePanel;
+}
+
+function delegationTooltip(locale: Locale, delegation: DelegationInfo | null) {
+  const copy = t(locale).ui;
+  if (!delegation) return copy.delegationUnavailable;
+  const lines = [
+    `${copy.delegationRoute}: ${delegationRouteLabel(locale, delegation.route_kind)}`,
+    copy.delegationMode(delegation.discussion_level.toUpperCase(), delegation.deep_think ? copy.enabled : copy.disabled),
+    copy.delegationParticipants(delegation.participant_count),
+  ];
+  if (delegation.max_rounds > 0) {
+    lines.push(copy.delegationRounds(delegation.max_rounds));
+  }
+  const agentLines = delegation.agents.slice(0, 6).map((agent) =>
+    copy.delegationAgentLine(agent.nickname || agent.name, agent.role, agent.model)
+  );
+  if (agentLines.length) {
+    lines.push(...agentLines);
+  }
+  return lines.join("\n");
+}
+
+function MessageActions({ body, locale, delegation }: { body: string; locale: Locale; delegation?: DelegationInfo | null }) {
   const [copied, setCopied] = useState(false);
   const copy = t(locale).ui;
+  const tooltip = delegationTooltip(locale, delegation ?? null);
 
   async function copyBody() {
     if (!body.trim() || !navigator.clipboard) return;
@@ -2652,6 +2895,10 @@ function MessageActions({ body, locale }: { body: string; locale: Locale }) {
         <Copy size={15} aria-hidden="true" />
         <span className="sr-only">{copy.copy}</span>
       </button>
+      <span className="delegation-badge" data-tooltip={tooltip} tabIndex={0}>
+        <UsersRound size={14} aria-hidden="true" />
+        <span>{copy.delegationInfo}</span>
+      </span>
       {copied ? <span className="message-action-status">{copy.copied}</span> : null}
     </div>
   );

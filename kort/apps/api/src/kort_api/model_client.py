@@ -24,6 +24,26 @@ class OpenAICompatibleClient:
     def __init__(self, secrets: dict[str, str]) -> None:
         self.secrets = secrets
 
+    @staticmethod
+    def _supports_thinking_toggle(provider: ProviderProfile) -> bool:
+        base_url = provider.base_url.lower()
+        return provider.provider_type == "deepseek" or "deepseek" in provider.provider_id or "deepseek" in base_url
+
+    def _apply_thinking_parameters(
+        self,
+        payload: dict,
+        provider: ProviderProfile,
+        *,
+        disable_thinking: bool,
+        enable_thinking: bool = False,
+    ) -> None:
+        if not self._supports_thinking_toggle(provider):
+            return
+        if disable_thinking:
+            payload["thinking"] = {"type": "disabled"}
+        elif enable_thinking:
+            payload["thinking"] = {"type": "enabled"}
+
     def chat(self, provider: ProviderProfile, prompt: str, system_prompt: str, *, disable_thinking: bool = False) -> str:
         if provider.api_style != "openai":
             raise ModelCallError(f"Provider {provider.provider_id} is not OpenAI-compatible yet.")
@@ -47,8 +67,7 @@ class OpenAICompatibleClient:
             "temperature": 0.4,
         }
 
-        if disable_thinking:
-            payload["thinking"] = {"type": "disabled"}
+        self._apply_thinking_parameters(payload, provider, disable_thinking=disable_thinking)
 
         try:
             response = httpx.post(url, headers=headers, json=payload, timeout=120)
@@ -93,8 +112,7 @@ class OpenAICompatibleClient:
             "stream": True,
         }
 
-        if disable_thinking:
-            payload["thinking"] = {"type": "disabled"}
+        self._apply_thinking_parameters(payload, provider, disable_thinking=disable_thinking)
 
         try:
             with httpx.stream("POST", url, headers=headers, json=payload, timeout=120) as response:
@@ -128,6 +146,7 @@ class OpenAICompatibleClient:
         system_prompt: str,
         *,
         disable_thinking: bool = False,
+        enable_thinking: bool = False,
     ) -> AsyncIterator[dict[str, str]]:
         """Stream a model response, splitting think (reasoning_content) from answer (content).
 
@@ -156,8 +175,12 @@ class OpenAICompatibleClient:
             "stream": True,
         }
 
-        if disable_thinking:
-            payload["thinking"] = {"type": "disabled"}
+        self._apply_thinking_parameters(
+            payload,
+            provider,
+            disable_thinking=disable_thinking,
+            enable_thinking=enable_thinking,
+        )
 
         async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
             try:

@@ -5,8 +5,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 import kort_api.app as app_module
+import kort_api.orchestration as orchestration
 from kort_api.agents import AgentLoader
-from kort_api.conversations import ConversationStore, VisibleConversationService
+from kort_api.conversations import ConversationJob, ConversationStore, VisibleConversationService
 from kort_api.providers import ProviderStore
 from kort_api.request_router import RouteDecision, route_request
 from kort_api.schemas import ConversationRecord, ConversationRequest
@@ -242,6 +243,133 @@ def test_explicit_low_level_keeps_panel_route(monkeypatch) -> None:
     assert seen["max_rounds"] == 2
     assert "talking_active" in events
     assert "thinking_complete" in events
+
+
+def test_deep_think_off_level_uses_solo_route(monkeypatch) -> None:
+    client.put("/api/providers/deepseek/secret", json={"api_key": "secret-test-key"})
+    _create(_make_agent_name("solo-agent"))
+
+    async def fake_solo_stream(**_kwargs):
+        yield "event: thinking_active\ndata: {}\n\n"
+        yield "event: thinking_complete\ndata: {\"elapsed_ms\": 12}\n\n"
+        yield 'event: final_delta\ndata: {"delta": "solo answer"}\n\n'
+
+    def fail_discussion_stream(**_kwargs):
+        raise AssertionError("deep_think with level=off must not run panel discussion")
+
+    monkeypatch.setattr("kort_api.conversations.run_solo_thinking_stream", fake_solo_stream)
+    monkeypatch.setattr("kort_api.conversations.run_discussion_stream", fail_discussion_stream)
+
+    response = client.post(
+        "/api/conversations/stream",
+        json={"question": "主线？", "level": "off", "deep_think": True},
+    )
+    events = _event_names(response.text)
+
+    assert response.status_code == 200
+    assert "delegation_complete" in events
+    assert "thinking_active" in events
+    assert "talking_active" not in events
+    assert '"route_kind": "solo_thinking"' in response.text
+
+
+def test_stream_persists_delegation_metadata(monkeypatch) -> None:
+    client.put("/api/providers/deepseek/secret", json={"api_key": "secret-test-key"})
+    _create(_make_agent_name("direct-agent"))
+
+    def fake_direct_stream(**_kwargs):
+        yield 'event: final_delta\ndata: {"delta": "direct answer"}\n\n'
+
+    monkeypatch.setattr("kort_api.conversations.run_direct_answer_stream", fake_direct_stream)
+
+    response = client.post(
+        "/api/conversations/stream",
+        json={"question": "Hello", "level": "off"},
+    )
+
+    assert response.status_code == 200
+    assert "event: delegation_complete" in response.text
+    assert '"route_kind": "direct"' in response.text
+    assert '"delegation": {' in response.text
+    assert '"participant_count": 1' in response.text
+
+
+def test_new_post_replaces_running_job() -> None:
+    conversation_id = "replace-running-job"
+    old_job = ConversationJob(conversation_id)
+    app_module.conversation_service.jobs[conversation_id] = old_job
+
+    response = client.post(
+        "/api/conversations/stream",
+        json={"conversation_id": conversation_id, "question": "Hello", "level": "off"},
+    )
+
+    assert response.status_code == 200
+    assert old_job.cancel_requested is True
+    assert app_module.conversation_service.jobs[conversation_id] is not old_job
+
+
+def test_panel_expert_and_critic_calls_disable_provider_thinking(monkeypatch) -> None:
+    calls: list[tuple[str, bool]] = []
+
+    def fake_call_model(*, agent, disable_thinking=False, **_kwargs):
+        calls.append((agent["role"], disable_thinking))
+        return f"{agent['role']} output"
+
+    monkeypatch.setattr(orchestration, "_call_model", fake_call_model)
+
+    state = {
+        "question": "How should this work?",
+        "current_round": 0,
+        "max_rounds": 1,
+        "expert_outputs": {},
+        "critic_reviews": {},
+        "discussion_transcript": [],
+        "stage_summaries": [],
+        "should_continue": True,
+        "final_answer_text": "",
+        "agents": [
+            {
+                "name": "expert-a",
+                "nickname": "Expert A",
+                "role": "expert",
+                "provider_profile": "deepseek",
+                "model": "deepseek-chat",
+                "system_prompt": "",
+                "priority": 0,
+            },
+            {
+                "name": "critic-a",
+                "nickname": "Critic A",
+                "role": "critic",
+                "provider_profile": "deepseek",
+                "model": "deepseek-chat",
+                "system_prompt": "",
+                "priority": 0,
+            },
+        ],
+        "providers": [
+            {
+                "provider_id": "deepseek",
+                "label": "DeepSeek",
+                "provider_type": "deepseek",
+                "base_url": "https://api.deepseek.com",
+                "api_style": "openai",
+                "default_model": "deepseek-chat",
+                "env_key_name": "DEEPSEEK_API_KEY",
+                "enabled": True,
+                "capabilities": ["chat", "reasoning"],
+            }
+        ],
+        "secrets": {"deepseek": "secret-test-key"},
+    }
+
+    expert_update = orchestration._experts_think(state)
+    state.update(expert_update)
+    orchestration._critics_review(state)
+
+    assert ("expert", True) in calls
+    assert ("critic", True) in calls
 
 
 def test_stream_conversation_uses_client_supplied_conversation_id() -> None:

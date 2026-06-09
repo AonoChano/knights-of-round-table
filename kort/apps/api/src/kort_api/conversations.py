@@ -18,7 +18,7 @@ from .orchestration import (
     run_discussion_stream,
     run_solo_thinking_stream,
 )
-from .request_router import route_request
+from .request_router import RouteDecision, route_request
 from .schemas import (
     AgentDefinition,
     ConversationListItem,
@@ -26,6 +26,8 @@ from .schemas import (
     ConversationRequest,
     ConversationResponse,
     ConversationRound,
+    DelegatedAgent,
+    DelegationMetadata,
     FinalAnswer,
     ProviderProfile,
     StageSummary,
@@ -40,6 +42,7 @@ class ConversationJob:
         self.conversation_id = conversation_id
         self.events: list[str] = []
         self.done = False
+        self.cancel_requested = False
         self.error: Exception | None = None
         self.condition = threading.Condition()
 
@@ -52,6 +55,11 @@ class ConversationJob:
         with self.condition:
             self.error = error
             self.done = True
+            self.condition.notify_all()
+
+    def cancel(self) -> None:
+        with self.condition:
+            self.cancel_requested = True
             self.condition.notify_all()
 
     def stream(self, start_index: int = 0) -> Iterator[str]:
@@ -119,6 +127,76 @@ def _merge_streamed_summaries(events: list[StageSummary]) -> list[StageSummary]:
 def _sse_event_name(event: str) -> str:
     first_line = event.splitlines()[0] if event else ""
     return first_line.removeprefix("event:").strip() if first_line.startswith("event:") else "unknown"
+
+
+def _provider_by_id(providers: list[ProviderProfile], provider_id: str) -> ProviderProfile | None:
+    for provider in providers:
+        if provider.provider_id == provider_id:
+            return provider
+    return None
+
+
+def _enabled_agent(agent: AgentDefinition, providers: list[ProviderProfile], secrets: dict[str, str]) -> bool:
+    provider = _provider_by_id(providers, agent.provider_profile)
+    if provider is None or not provider.enabled:
+        return False
+    if provider.api_style != "openai":
+        return False
+    return provider.provider_type == "ollama" or bool(secrets.get(provider.provider_id, "").strip())
+
+
+def _delegated_agent(agent: AgentDefinition) -> DelegatedAgent:
+    return DelegatedAgent(
+        name=agent.name,
+        nickname=agent.nickname,
+        role=agent.role,
+        provider_profile=agent.provider_profile,
+        model=agent.model,
+    )
+
+
+def _single_model_delegate(
+    agents: list[AgentDefinition],
+    providers: list[ProviderProfile],
+    secrets: dict[str, str],
+) -> list[DelegatedAgent]:
+    role_rank = {"synthesizer": 0, "expert": 1, "summarizer": 2, "critic": 3}
+    candidates = [agent for agent in agents if _enabled_agent(agent, providers, secrets)]
+    candidates.sort(key=lambda item: (role_rank.get(item.role, 99), -item.priority, item.name))
+    return [_delegated_agent(candidates[0])] if candidates else []
+
+
+def _panel_delegates(
+    agents: list[AgentDefinition],
+    providers: list[ProviderProfile],
+    secrets: dict[str, str],
+) -> list[DelegatedAgent]:
+    candidates = [agent for agent in agents if _enabled_agent(agent, providers, secrets)]
+    candidates.sort(key=lambda item: (item.role, -item.priority, item.name))
+    return [_delegated_agent(agent) for agent in candidates]
+
+
+def _build_delegation_metadata(
+    request: ConversationRequest,
+    route_decision: RouteDecision,
+    agents: list[AgentDefinition],
+    providers: list[ProviderProfile],
+    secrets: dict[str, str],
+) -> DelegationMetadata:
+    delegated_agents = (
+        _panel_delegates(agents, providers, secrets)
+        if route_decision.kind == "panel"
+        else _single_model_delegate(agents, providers, secrets)
+    )
+    return DelegationMetadata(
+        route_kind=route_decision.kind,
+        reason_code=route_decision.reason_code,
+        discussion_level=request.level,
+        deep_think=request.deep_think,
+        participant_count=len(delegated_agents),
+        max_rounds=route_decision.max_rounds,
+        agents=delegated_agents,
+    )
 
 
 class ConversationStore:
@@ -275,6 +353,16 @@ class VisibleConversationService:
     def delete_conversation(self, conversation_id: str) -> bool:
         return self.store.delete(conversation_id)
 
+    def cancel_conversation(self, conversation_id: str) -> bool:
+        with self.jobs_lock:
+            job = self.jobs.get(conversation_id)
+        if job is None or job.done:
+            logger.info("conversation_job.cancel_missing conversation_id=%s", conversation_id)
+            return False
+        job.cancel()
+        logger.info("conversation_job.cancel_requested conversation_id=%s event_count=%s", conversation_id, len(job.events))
+        return True
+
     def stream_existing_job(self, conversation_id: str) -> Iterator[str] | None:
         with self.jobs_lock:
             job = self.jobs.get(conversation_id)
@@ -302,24 +390,28 @@ class VisibleConversationService:
 
         with self.jobs_lock:
             job = self.jobs.get(conversation_id)
-            if job is None or job.done:
-                job = ConversationJob(conversation_id)
-                self.jobs[conversation_id] = job
+            if job is not None and not job.done:
                 logger.info(
-                    "conversation_job.start conversation_id=%s level=%s deep_think=%s has_existing=%s",
+                    "conversation_job.replace_running conversation_id=%s previous_event_count=%s",
                     conversation_id,
-                    request.level,
-                    request.deep_think,
-                    existing is not None,
+                    len(job.events),
                 )
-                thread = threading.Thread(
-                    target=self._run_job,
-                    args=(job, request, conversation_id, existing, expert_count, agents, providers, secrets),
-                    daemon=True,
-                )
-                thread.start()
-            else:
-                logger.info("conversation_job.reuse conversation_id=%s event_count=%s", conversation_id, len(job.events))
+                job.cancel()
+            job = ConversationJob(conversation_id)
+            self.jobs[conversation_id] = job
+            logger.info(
+                "conversation_job.start conversation_id=%s level=%s deep_think=%s has_existing=%s",
+                conversation_id,
+                request.level,
+                request.deep_think,
+                existing is not None,
+            )
+            thread = threading.Thread(
+                target=self._run_job,
+                args=(job, request, conversation_id, existing, expert_count, agents, providers, secrets),
+                daemon=True,
+            )
+            thread.start()
 
         return job.stream()
 
@@ -336,6 +428,7 @@ class VisibleConversationService:
     ) -> None:
         try:
             for event in self._generate_conversation_events(
+                job,
                 request,
                 conversation_id,
                 existing,
@@ -344,6 +437,9 @@ class VisibleConversationService:
                 providers,
                 secrets,
             ):
+                if job.cancel_requested:
+                    logger.info("conversation_job.cancelled_before_append conversation_id=%s", conversation_id)
+                    break
                 logger.debug("conversation_job.event conversation_id=%s event=%s", conversation_id, _sse_event_name(event))
                 job.append(event)
         except Exception as exc:
@@ -355,6 +451,7 @@ class VisibleConversationService:
 
     def _generate_conversation_events(
         self,
+        job: ConversationJob,
         request: ConversationRequest,
         conversation_id: str,
         existing: ConversationRecord | None,
@@ -363,6 +460,12 @@ class VisibleConversationService:
         providers: list[ProviderProfile],
         secrets: dict[str, str],
     ) -> Iterator[str]:
+
+        def _cancelled() -> bool:
+            if job.cancel_requested:
+                logger.info("conversation_job.generation_cancelled conversation_id=%s", conversation_id)
+                return True
+            return False
 
         # Build history context prefix from previous conversation rounds
         context_prefix = ""
@@ -376,11 +479,14 @@ class VisibleConversationService:
         else:
             question_to_ask = request.question
 
+        collected_summaries: list[StageSummary] = []
+        final_body = ""
+        delegation: DelegationMetadata | None = None
+
         try:
             yield self._sse("conversation_start", {"conversation_id": conversation_id, "question": request.question})
-
-            collected_summaries: list[StageSummary] = []
-            final_body = ""
+            if _cancelled():
+                return
 
             if request.deep_think and request.level != "off":
                 raise HTTPException(
@@ -405,6 +511,10 @@ class VisibleConversationService:
                 route_decision.max_rounds,
                 bool(existing and existing.rounds),
             )
+            delegation = _build_delegation_metadata(request, route_decision, agents, providers, secrets)
+            yield self._sse("delegation_complete", delegation.model_dump(mode="json"))
+            if _cancelled():
+                return
 
             if route_decision.kind == "solo_thinking":
                 # --- Deep-think (solo model with CoT summaries) ---
@@ -416,6 +526,8 @@ class VisibleConversationService:
                     secrets=secrets,
                 ):
                     yield sse_event
+                    if _cancelled():
+                        return
 
                     if sse_event.startswith("event: summary_complete"):
                         collected_summaries.append(
@@ -436,6 +548,8 @@ class VisibleConversationService:
                     secrets=secrets,
                 ):
                     yield sse_event
+                    if _cancelled():
+                        return
 
                     if sse_event.startswith("event: final_delta"):
                         try:
@@ -452,6 +566,8 @@ class VisibleConversationService:
                     max_rounds=route_decision.max_rounds,
                 ):
                     yield sse_event
+                    if _cancelled():
+                        return
 
                     if sse_event.startswith("event: summary_complete"):
                         collected_summaries.append(
@@ -463,6 +579,9 @@ class VisibleConversationService:
                             final_body += json.loads(sse_event.split("data: ", 1)[1])["delta"]
                         except (json.JSONDecodeError, KeyError, IndexError):
                             pass
+
+            if _cancelled():
+                return
 
             collected_summaries = _merge_streamed_summaries(collected_summaries)
 
@@ -478,6 +597,7 @@ class VisibleConversationService:
                 question=request.question,
                 stage_summaries=collected_summaries,
                 final_answer=final_answer,
+                delegation=delegation,
             )
 
             if existing:
@@ -525,6 +645,8 @@ class VisibleConversationService:
                 len(collected_summaries),
                 len(final_body),
             )
+            if job.cancel_requested:
+                return
             # Client disconnected (e.g. user clicked pause).
             # Save partial progress so it survives page refreshes.
             if not collected_summaries and not final_body:
@@ -540,6 +662,7 @@ class VisibleConversationService:
                         confidence=0.5,
                         limitations=["Conversation was paused by the user."],
                     ),
+                    delegation=delegation,
                 )
                 if existing:
                     try:

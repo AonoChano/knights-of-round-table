@@ -67,6 +67,16 @@ export const t = (locale: Locale) => {
         formatTemplate(copy.ui.confirmDeleteExpert, { name }),
       createAgentFailedHttp: (status: number) =>
         formatTemplate(copy.ui.createAgentFailedHttp, { status }),
+      delegatingExperts: (count: number) =>
+        formatTemplate(copy.ui.delegatingExperts, { count }),
+      delegationAgentLine: (name: string, role: string, model: string) =>
+        formatTemplate(copy.ui.delegationAgentLine, { name, role, model }),
+      delegationMode: (level: string, thinking: string) =>
+        formatTemplate(copy.ui.delegationMode, { level, thinking }),
+      delegationParticipants: (count: number) =>
+        formatTemplate(copy.ui.delegationParticipants, { count }),
+      delegationRounds: (count: number) =>
+        formatTemplate(copy.ui.delegationRounds, { count }),
       deleteAgentFailedHttp: (status: number) =>
         formatTemplate(copy.ui.deleteAgentFailedHttp, { status }),
       globalSkillsCount: (count: number) =>

@@ -153,6 +153,24 @@ class FinalAnswer(BaseModel):
     limitations: list[str] = Field(default_factory=list)
 
 
+class DelegatedAgent(BaseModel):
+    name: str
+    nickname: str
+    role: str
+    provider_profile: str
+    model: str
+
+
+class DelegationMetadata(BaseModel):
+    route_kind: Literal["direct", "solo_thinking", "panel"]
+    reason_code: str
+    discussion_level: str
+    deep_think: bool
+    participant_count: int
+    max_rounds: int = 0
+    agents: list[DelegatedAgent] = Field(default_factory=list)
+
+
 class ConversationRequest(BaseModel):
     question: str = Field(min_length=1, max_length=4000)
     level: str = Field(default="auto", pattern=r"^(off|auto|low|medium|high)$")
@@ -170,6 +188,7 @@ class ConversationRound(BaseModel):
     question: str
     stage_summaries: list[StageSummary]
     final_answer: FinalAnswer
+    delegation: DelegationMetadata | None = None
 
 
 class ConversationResponse(BaseModel):

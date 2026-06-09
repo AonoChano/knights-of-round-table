@@ -275,6 +275,7 @@ def _experts_think(state: DiscussionState) -> dict:
                 system_prompt=expert.get("system_prompt", ""),
                 user_prompt=prompt,
                 secrets=secrets,
+                disable_thinking=True,
             )
         except ModelCallError:
             output = f"[{nickname} was unavailable]"
@@ -337,6 +338,7 @@ def _critics_review(state: DiscussionState) -> dict:
                 system_prompt=critic.get("system_prompt", ""),
                 user_prompt=prompt,
                 secrets=secrets,
+                disable_thinking=True,
             )
         except ModelCallError:
             review = f"[{nickname} review unavailable]"
@@ -930,6 +932,7 @@ async def run_solo_thinking_stream(
                 prompt=question,
                 system_prompt=agent.get("system_prompt", ""),
                 disable_thinking=False,
+                enable_thinking=True,
             ):
                 if chunk["type"] == "think":
                     think_buffer += chunk["text"]
