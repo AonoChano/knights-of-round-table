@@ -212,6 +212,7 @@ type StreamSlot = {
   thinkingComplete: boolean;
   finalBody: string;
   timeline: TimelineItem[];
+  messagePairs: MessagePair[];
   talkingActive: boolean;
   discussionLevel: DiscussionLevel;
   submittedQuestion: string | null;
@@ -327,6 +328,7 @@ function createEmptySlot(): StreamSlot {
     thinkingComplete: false,
     finalBody: "",
     timeline: [],
+    messagePairs: [],
     talkingActive: false,
     discussionLevel: loadDiscussionLevel(),
     submittedQuestion: null,
@@ -658,6 +660,7 @@ function HomeExperience() {
   const rawBodyBySummary = useRef<Record<string, string>>({});
   const timelineRef = useRef<TimelineItem[]>([]);
   const finalBodyRef = useRef("");
+  const messagePairsRef = useRef<MessagePair[]>([]);
   const submittedQuestionRef = useRef<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const slotMapRef = useRef<Map<string, StreamSlot>>(new Map());
@@ -678,6 +681,7 @@ function HomeExperience() {
     setThinkingComplete(slot.thinkingComplete);
     setFinalBody(slot.finalBody);
     setTimeline(slot.timeline);
+    setMessagePairsSynced(slot.messagePairs);
     setTalkingActive(slot.talkingActive);
     setDiscussionLevel(slot.discussionLevel);
     setDeepThink(slot.deepThink);
@@ -694,6 +698,7 @@ function HomeExperience() {
     slot.thinkingComplete = thinkingComplete;
     slot.finalBody = finalBody;
     slot.timeline = timeline;
+    slot.messagePairs = messagePairsRef.current;
     slot.talkingActive = talkingActive;
     slot.discussionLevel = discussionLevel;
     slot.deepThink = deepThink;
@@ -711,6 +716,16 @@ function HomeExperience() {
     flushStateToSlot(slot);
   }
 
+  function setMessagePairsSynced(
+    nextValue: MessagePair[] | ((current: MessagePair[]) => MessagePair[])
+  ) {
+    setMessagePairs((current) => {
+      const next = typeof nextValue === "function" ? nextValue(current) : nextValue;
+      messagePairsRef.current = next;
+      return next;
+    });
+  }
+
   function activateSlot(slotId: string) {
     // save current slot before switching
     if (activeSlotId && activeSlotId !== slotId) {
@@ -725,7 +740,7 @@ function HomeExperience() {
     setSlotVersion((v) => v + 1);
   }
 
-  function ensureSlotForSend(slotId: string): StreamSlot {
+  function ensureSlotForSend(slotId: string, seedMessagePairs: MessagePair[] = []): StreamSlot {
     // save current slot before switching
     if (activeSlotId && activeSlotId !== slotId) {
       const cur = slotMapRef.current.get(activeSlotId);
@@ -735,6 +750,7 @@ function HomeExperience() {
     const ac = new AbortController();
     slot.abortController = ac;
     slot.loading = true;
+    slot.messagePairs = seedMessagePairs;
     slotMapRef.current.set(slotId, slot);
     activeSlotIdRef.current = slotId;
     setActiveSlotId(slotId);
@@ -814,6 +830,7 @@ function HomeExperience() {
     setThinkingComplete(false);
     setElapsed(0);
     setDrawerOpen(false);
+    setDrawerTimeline(null);
     setTalkingActive(false);
     setLoading(false);
     setSubmittedQuestion(null);
@@ -835,7 +852,7 @@ function HomeExperience() {
     });
     resetConversation();
     setSubmittedQuestion(null);
-    setMessagePairs([]);
+    setMessagePairsSynced([]);
     setActiveSlotId(null);
     setCurrentConversationId(null);
     setConversation(null);
@@ -903,6 +920,10 @@ function HomeExperience() {
   useEffect(() => {
     finalBodyRef.current = finalBody;
   }, [finalBody]);
+
+  useEffect(() => {
+    messagePairsRef.current = messagePairs;
+  }, [messagePairs]);
 
   useEffect(() => {
     if (!loading || thinkingComplete) return;
@@ -1129,13 +1150,19 @@ function HomeExperience() {
 
     if (hasActiveStream) {
       activateSlot(conversationId);
-    } else {
-      resetConversation();
-      setActiveSlotId(conversationId);
-      setSlotVersion((v) => v + 1);
+      setCurrentConversationId(conversationId);
+      currentCidRef.current = conversationId;
+      router.replace(`/?c=${conversationId}`, { scroll: false });
+      clientLog("info", "conversation detail load skipped for active local stream", { conversationId });
+      return;
     }
-    setMessagePairs([]);
+
+    resetConversation();
+    setActiveSlotId(conversationId);
+    setSlotVersion((v) => v + 1);
+    setMessagePairsSynced([]);
     setCurrentConversationId(conversationId);
+    currentCidRef.current = conversationId;
     router.replace(`/?c=${conversationId}`, { scroll: false });
     try {
       const response = await fetchWithTimeout(`${API_BASE}/api/conversations/${conversationId}`, {}, 6000);
@@ -1168,7 +1195,7 @@ function HomeExperience() {
             finalBody: round.final_answer.body,
           };
         });
-        setMessagePairs(pairs);
+        setMessagePairsSynced(pairs);
       }
       clientLog("info", "conversation detail load completed", {
         conversationId,
@@ -1215,7 +1242,7 @@ function HomeExperience() {
 
     try {
       clientLog("info", "conversation resume stream started", { conversationId });
-      const response = await fetchWithTimeout(`${API_BASE}/api/conversations/${conversationId}/stream`, {}, 8000);
+      const response = await fetch(`${API_BASE}/api/conversations/${conversationId}/stream`);
       clientLog("info", "conversation resume stream response", {
         conversationId,
         status: response.status,
@@ -1259,10 +1286,13 @@ function HomeExperience() {
             }
             continue;
           }
+          const slotForEvent = slotMapRef.current.get(conversationId);
+          if (slotForEvent) {
+            applyEventToSlot(slotForEvent, event);
+          }
           if (activeSlotIdRef.current !== conversationId) {
             const bgSlot = slotMapRef.current.get(conversationId);
             if (bgSlot) {
-              applyEventToSlot(bgSlot, event);
               if (event.event === "conversation_complete") {
                 setUnreadConversationIds((current) => {
                   const next = new Set(current);
@@ -1380,6 +1410,7 @@ function HomeExperience() {
     const isNewConversation = !currentConversationId;
     const convId = currentConversationId ?? crypto.randomUUID();
     let streamSlotId = convId;
+    const seedMessagePairs = isNewConversation ? [] : messagePairsRef.current;
 
     if (isNewConversation) {
       fullReset();
@@ -1392,7 +1423,7 @@ function HomeExperience() {
     clearSentenceState();
     setDrawerOpen(false);
 
-    const slot = ensureSlotForSend(convId);
+    const slot = ensureSlotForSend(convId, seedMessagePairs);
     setCurrentConversationId(convId);
     currentCidRef.current = convId;
     router.replace(`/?c=${convId}`, { scroll: false });
@@ -1404,6 +1435,9 @@ function HomeExperience() {
 
     const controller = slot.abortController!;
     slot.streamError = null;
+    slot.submittedQuestion = question;
+    slot.discussionLevel = discussionLevel;
+    slot.deepThink = discussionLevel === "off" ? deepThink : false;
 
     if (isNewConversation) {
       setConversations((prev) => [
@@ -1477,10 +1511,12 @@ function HomeExperience() {
             router.replace(`/?c=${startedId}`, { scroll: false });
           }
         }
+        const slotForEvent = slotMapRef.current.get(streamSlotId);
+        if (slotForEvent) {
+          applyEventToSlot(slotForEvent, message);
+        }
         if (activeSlotIdRef.current !== streamSlotId) {
-          const bgSlot = slotMapRef.current.get(streamSlotId);
-          if (bgSlot) {
-            applyEventToSlot(bgSlot, message);
+          if (slotForEvent) {
             if (message.event === "conversation_start") return;
             if (
               message.event === "thinking_complete" ||
@@ -1575,7 +1611,8 @@ function HomeExperience() {
       const delta = String(message.data.delta ?? "");
       slot.timeline = slot.timeline.map((item) => {
         if (item.id !== id) return item;
-        return { ...item, raw: item.raw + delta };
+        const raw = item.raw + delta;
+        return { ...item, raw, body: markdownBody(raw) };
       });
       return;
     }
@@ -1590,7 +1627,6 @@ function HomeExperience() {
     }
     if (message.event === "thinking_complete") {
       slot.thinkingComplete = true;
-      slot.loading = false;
       slot.talkingActive = false;
       slot.timeline = appendThinkingDoneNode(withoutTransientTimelineItems(slot.timeline), locale, slot.elapsed);
       return;
@@ -1790,7 +1826,10 @@ function HomeExperience() {
       if (question && conv.rounds.length > 0) {
         const lastRound = conv.rounds[conv.rounds.length - 1];
         const timelineItems = timelineFromStageSummaries(lastRound.stage_summaries, locale, elapsed);
-        setMessagePairs((prev) => [
+        if (drawerOpen && drawerTimeline === null) {
+          setDrawerTimeline(timelineItems);
+        }
+        setMessagePairsSynced((prev) => [
           ...prev,
           {
             question: lastRound.question,
@@ -1918,6 +1957,12 @@ function HomeExperience() {
     });
   }, [hasRun, locale]);
 
+  function toggleCurrentThinkingDrawer() {
+    const wasShowingHistoryTimeline = drawerTimeline !== null;
+    setDrawerTimeline(null);
+    setDrawerOpen((current) => (wasShowingHistoryTimeline ? true : !current));
+  }
+
   return (
     <main className="app-shell">
       {mobileSidebarOpen ? (
@@ -1997,7 +2042,7 @@ function HomeExperience() {
                 streamError={streamError}
                 messagePairs={messagePairs}
                 locale={locale}
-                onToggleThinking={() => setDrawerOpen((prev) => !prev)}
+                onToggleThinking={toggleCurrentThinkingDrawer}
                 onViewPairThinking={(pair) => {
                   setDrawerTimeline(pair.timeline);
                   setDrawerOpen(true);
@@ -2307,25 +2352,17 @@ function Sidebar({
               {group.items.map((item) => {
                 const isLoadingConversation = loadingConvIds.has(item.conversation_id);
                 const isActiveConversation = activeConversationId === item.conversation_id;
+                const hasUnreadConversation = unreadConversationIds.has(item.conversation_id);
                 return (
                   <div
                     key={item.conversation_id}
                     className={cn(
                       "sidebar-link-row",
                       isActiveConversation && "sidebar-link-row-active",
-                      isLoadingConversation && "sidebar-link-row-loading",
+                      isLoadingConversation && !isActiveConversation && "sidebar-link-row-loading",
                       menuConversationId === item.conversation_id && "sidebar-link-row-menu-open"
                     )}
                   >
-                    {isLoadingConversation && !isActiveConversation ? (
-                      <span className="sidebar-status-indicator" title={tr.ui.conversationInProgress}>
-                        <span className="sidebar-spinner" />
-                      </span>
-                    ) : unreadConversationIds.has(item.conversation_id) ? (
-                      <span className="sidebar-status-indicator">
-                        <span className="sidebar-unread-dot" />
-                      </span>
-                    ) : null}
                     {editingId === item.conversation_id ? (
                       <input
                         ref={editInputRef}
@@ -2350,9 +2387,12 @@ function Sidebar({
                         {item.title}
                       </button>
                     )}
-                    {isLoadingConversation && isActiveConversation ? (
-                      <span className="sidebar-row-progress" title={tr.ui.conversationInProgress}>
-                        <span className="sidebar-spinner" />
+                    {!isActiveConversation && (isLoadingConversation || hasUnreadConversation) ? (
+                      <span
+                        className="sidebar-row-progress"
+                        title={isLoadingConversation ? tr.ui.conversationInProgress : tr.ui.conversationCompleteUnread}
+                      >
+                        {isLoadingConversation ? <span className="sidebar-spinner" /> : <span className="sidebar-unread-dot" />}
                       </span>
                     ) : null}
                     <span className="sidebar-link-actions" onPointerDown={(e) => e.stopPropagation()}>

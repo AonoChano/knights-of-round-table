@@ -52,6 +52,7 @@
     "conversationHistoryUnavailable": "Unable to load conversation history. Check the backend service.",
     "conversationHistoryLoading": "Loading conversation history...",
     "conversationInProgress": "Conversation in progress",
+    "conversationCompleteUnread": "Conversation finished",
     "conversationEarlier": "Earlier",
     "conversationToday": "Today",
     "conversationYesterday": "Yesterday",

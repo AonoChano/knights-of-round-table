@@ -52,6 +52,7 @@
     "conversationHistoryUnavailable": "无法加载对话历史，请检查后端服务。",
     "conversationHistoryLoading": "正在加载对话历史...",
     "conversationInProgress": "对话进行中",
+    "conversationCompleteUnread": "对话已完成",
     "conversationEarlier": "更早",
     "conversationToday": "今天",
     "conversationYesterday": "昨天",

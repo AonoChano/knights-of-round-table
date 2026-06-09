@@ -526,6 +526,10 @@ button:active:not(:disabled) {
   background: rgba(23, 23, 23, 0.055);
 }
 
+.sidebar-link-row-menu-open {
+  z-index: 26;
+}
+
 .sidebar-link-row:hover::after,
 .sidebar-link-row-menu-open::after,
 .sidebar-link-row-loading.sidebar-link-row-active::after {
@@ -539,10 +543,6 @@ button:active:not(:disabled) {
   min-width: 0;
   background: transparent;
   padding-right: 34px;
-}
-
-.sidebar-link-row:has(.sidebar-status-indicator) .sidebar-link {
-  padding-left: 30px;
 }
 
 .sidebar-link-actions {
