@@ -311,6 +311,19 @@ def test_provider_secret_status_does_not_echo_secret() -> None:
     assert "secret-test-key" not in response.text
 
 
+def test_provider_secret_status_accepts_utf8_bom() -> None:
+    app_module.provider_store.secrets_path.write_text(
+        json.dumps({"deepseek": "secret-test-key"}, ensure_ascii=False, indent=2),
+        encoding="utf-8-sig",
+    )
+
+    response = client.get("/api/provider-secrets")
+
+    assert response.status_code == 200
+    assert response.json() == [{"provider_id": "deepseek", "configured": True}]
+    assert "secret-test-key" not in response.text
+
+
 # ---------------------------------------------------------------------------
 # Agent CRUD tests
 # ---------------------------------------------------------------------------
