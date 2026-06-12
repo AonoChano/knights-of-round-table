@@ -172,6 +172,11 @@ class DelegationMetadata(BaseModel):
     participant_count: int
     max_rounds: int = 0
     agents: list[DelegatedAgent] = Field(default_factory=list)
+    # Early stop metadata
+    actual_rounds: int = 0
+    early_stop: bool = False
+    early_stop_reason: str | None = None
+    convergence_score: float | None = None
 
 
 class ConversationRequest(BaseModel):

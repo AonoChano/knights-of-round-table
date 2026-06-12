@@ -361,10 +361,138 @@ def _critics_review(state: DiscussionState) -> dict:
     }
 
 
+def _calculate_text_similarity(texts_a: list[str], texts_b: list[str]) -> float:
+    """
+    Calculate similarity between two sets of texts using simple word overlap.
+
+    Returns a score between 0.0 (completely different) and 1.0 (identical).
+    Uses Jaccard similarity on word sets as a simple heuristic.
+    """
+    if not texts_a or not texts_b:
+        return 0.0
+
+    def _normalize_text(text: str) -> set[str]:
+        """Convert text to normalized word set"""
+        # Remove special characters, lowercase, split into words
+        words = re.sub(r'[^\w\s]', ' ', text.lower()).split()
+        # Filter out very short words (likely articles, prepositions)
+        return set(word for word in words if len(word) > 2)
+
+    # Combine all texts in each set into word sets
+    words_a = set()
+    for text in texts_a:
+        words_a.update(_normalize_text(text))
+
+    words_b = set()
+    for text in texts_b:
+        words_b.update(_normalize_text(text))
+
+    if not words_a or not words_b:
+        return 0.0
+
+    # Calculate Jaccard similarity: intersection / union
+    intersection = len(words_a & words_b)
+    union = len(words_a | words_b)
+
+    if union == 0:
+        return 0.0
+
+    return intersection / union
+
+
+def _evaluate_convergence(state: DiscussionState) -> dict:
+    """
+    Evaluate whether the discussion has converged.
+
+    Returns:
+        {
+            "convergence_score": float (0.0-1.0),
+            "reason": str,
+            "should_stop_early": bool
+        }
+    """
+    current_round = state.get("current_round", 0)
+
+    # Strategy 1: Minimum rounds protection (at least 1 round)
+    if current_round < 1:
+        return {
+            "convergence_score": 0.0,
+            "reason": "minimum_rounds_not_met",
+            "should_stop_early": False
+        }
+
+    # Strategy 2: Check expert outputs availability
+    expert_outputs = state.get("expert_outputs", {})
+    if len(expert_outputs) < 2:
+        return {
+            "convergence_score": 0.3,
+            "reason": "insufficient_experts",
+            "should_stop_early": False
+        }
+
+    # Strategy 3: Check if we have enough history to compare
+    discussion_transcript = state.get("discussion_transcript", [])
+    if len(discussion_transcript) < 2:
+        return {
+            "convergence_score": 0.4,
+            "reason": "insufficient_history",
+            "should_stop_early": False
+        }
+
+    # Strategy 4: Compare recent round with previous round
+    # Extract texts from the last round
+    expert_count = len(expert_outputs)
+    if len(discussion_transcript) < expert_count * 2:
+        # Not enough history for comparison (only one round completed)
+        return {
+            "convergence_score": 0.5,
+            "reason": "first_round_only",
+            "should_stop_early": False
+        }
+
+    # Get the most recent round's expert outputs
+    last_round_texts = discussion_transcript[-expert_count:]
+    # Get the previous round's expert outputs
+    prev_round_texts = discussion_transcript[-(expert_count * 2):-expert_count]
+
+    # Calculate similarity
+    similarity = _calculate_text_similarity(last_round_texts, prev_round_texts)
+
+    # Convergence threshold: 85% similarity
+    CONVERGENCE_THRESHOLD = 0.85
+    should_stop = similarity >= CONVERGENCE_THRESHOLD
+
+    return {
+        "convergence_score": similarity,
+        "reason": "high_similarity" if should_stop else "still_evolving",
+        "should_stop_early": should_stop
+    }
+
+
 def _decide_continue(state: DiscussionState) -> dict:
     current = state.get("current_round", 0)
     max_rounds = state.get("max_rounds", 4)
-    return {"should_continue": current < max_rounds}
+
+    # Basic round limit check
+    if current >= max_rounds:
+        return {"should_continue": False}
+
+    # Minimum rounds protection (at least 1 round)
+    if current < 1:
+        return {"should_continue": True}
+
+    # Evaluate convergence
+    convergence = _evaluate_convergence(state)
+
+    if convergence["should_stop_early"]:
+        return {
+            "should_continue": False,
+            "early_stop": True,
+            "early_stop_reason": convergence["reason"],
+            "convergence_score": convergence["convergence_score"]
+        }
+
+    return {"should_continue": True}
 
 
 def _produce_final_answer(state: DiscussionState) -> dict:
@@ -758,6 +886,16 @@ def run_discussion_stream(
 
         if not state.get("should_continue"):
             break
+
+    # Emit early stop metadata if applicable
+    actual_rounds = state.get("current_round", 0)
+    if state.get("early_stop", False):
+        yield _sse("early_stop_detected", {
+            "actual_rounds": actual_rounds,
+            "max_rounds": max_rounds,
+            "early_stop_reason": state.get("early_stop_reason"),
+            "convergence_score": state.get("convergence_score")
+        })
 
     yield _sse("thinking_complete", {})
 

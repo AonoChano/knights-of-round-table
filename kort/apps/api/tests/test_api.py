@@ -661,3 +661,102 @@ def test_agents_endpoint_returns_list() -> None:
     resp = client.get("/api/agents")
     assert resp.status_code == 200
     assert isinstance(resp.json(), list)
+
+
+# ---------------------------------------------------------------------------
+# Early stop convergence tests
+# ---------------------------------------------------------------------------
+
+
+def test_convergence_evaluation_requires_minimum_rounds() -> None:
+    """Early stop should not trigger before completing at least 1 round"""
+    state = {
+        "question": "test",
+        "current_round": 0,
+        "max_rounds": 4,
+        "expert_outputs": {"expert1": "output"},
+        "discussion_transcript": [],
+        "should_continue": True,
+    }
+    result = orchestration._evaluate_convergence(state)
+
+    assert result["should_stop_early"] is False
+    assert result["reason"] == "minimum_rounds_not_met"
+
+
+def test_convergence_evaluation_detects_high_similarity() -> None:
+    """Early stop should trigger when discussion shows high similarity"""
+    # Simulate two rounds with very similar expert outputs
+    state = {
+        "question": "What is 2+2?",
+        "current_round": 2,
+        "max_rounds": 4,
+        "expert_outputs": {"expert1": "The answer is 4", "expert2": "It equals 4"},
+        "discussion_transcript": [
+            "[Expert1 (Round 1)]:\nThe answer is definitely 4 because two plus two equals four.",
+            "[Expert2 (Round 1)]:\nIt equals 4, that's basic arithmetic.",
+            "[Expert1 (Round 2)]:\nThe answer is definitely 4 because two plus two equals four.",
+            "[Expert2 (Round 2)]:\nIt equals 4, that's basic arithmetic.",
+        ],
+        "should_continue": True,
+    }
+    result = orchestration._evaluate_convergence(state)
+
+    assert result["convergence_score"] >= 0.85
+    assert result["should_stop_early"] is True
+    assert result["reason"] == "high_similarity"
+
+
+def test_text_similarity_calculation() -> None:
+    """Text similarity should detect identical and different texts"""
+    # Very similar texts
+    similar_a = ["The answer is four because two plus two equals four"]
+    similar_b = ["The answer is four since two plus two equals four"]
+    similarity_high = orchestration._calculate_text_similarity(similar_a, similar_b)
+    assert similarity_high > 0.7
+
+    # Very different texts
+    different_a = ["Quantum physics deals with subatomic particles"]
+    different_b = ["Cooking pasta requires boiling water"]
+    similarity_low = orchestration._calculate_text_similarity(different_a, different_b)
+    assert similarity_low < 0.3
+
+
+def test_decide_continue_triggers_early_stop() -> None:
+    """_decide_continue should respect convergence evaluation"""
+    state = {
+        "question": "Simple question",
+        "current_round": 2,
+        "max_rounds": 8,
+        "expert_outputs": {"expert1": "answer", "expert2": "answer"},
+        "discussion_transcript": [
+            "[Expert1 (Round 1)]:\nThe answer is clearly X.",
+            "[Expert2 (Round 1)]:\nThe answer is clearly X.",
+            "[Expert1 (Round 2)]:\nThe answer is clearly X.",
+            "[Expert2 (Round 2)]:\nThe answer is clearly X.",
+        ],
+        "should_continue": True,
+    }
+
+    result = orchestration._decide_continue(state)
+
+    assert result["should_continue"] is False
+    assert result.get("early_stop") is True
+    assert "convergence_score" in result
+
+
+def test_decide_continue_respects_max_rounds() -> None:
+    """_decide_continue should stop at max_rounds even without convergence"""
+    state = {
+        "question": "Complex question",
+        "current_round": 4,
+        "max_rounds": 4,
+        "expert_outputs": {},
+        "discussion_transcript": [],
+        "should_continue": True,
+    }
+
+    result = orchestration._decide_continue(state)
+
+    assert result["should_continue"] is False
+    assert result.get("early_stop") is not True  # Not early stop, just reached limit

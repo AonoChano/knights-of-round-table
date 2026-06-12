@@ -102,6 +102,11 @@ type DelegationInfo = {
   participant_count: number;
   max_rounds: number;
   agents: DelegatedAgent[];
+  // Early stop fields
+  actual_rounds?: number;
+  early_stop?: boolean;
+  early_stop_reason?: string | null;
+  convergence_score?: number | null;
 };
 
 type ConversationRound = {
@@ -1737,6 +1742,19 @@ function HomeExperience() {
       slot.requestPhase = "delegating";
       return;
     }
+    if (message.event === "early_stop_detected") {
+      // Update delegation info with early stop metadata
+      if (slot.delegationInfo && message.data) {
+        slot.delegationInfo = {
+          ...slot.delegationInfo,
+          actual_rounds: typeof message.data.actual_rounds === "number" ? message.data.actual_rounds : 0,
+          early_stop: true,
+          early_stop_reason: typeof message.data.early_stop_reason === "string" ? message.data.early_stop_reason : null,
+          convergence_score: typeof message.data.convergence_score === "number" ? message.data.convergence_score : null,
+        };
+      }
+      return;
+    }
     if (message.event === "talking_active") {
       slot.requestPhase = null;
       slot.talkingActive = true;
@@ -2874,7 +2892,17 @@ function delegationTooltip(locale: Locale, delegation: DelegationInfo | null) {
     copy.delegationParticipants(delegation.participant_count),
   ];
   if (delegation.max_rounds > 0) {
-    lines.push(copy.delegationRounds(delegation.max_rounds));
+    if (delegation.early_stop && delegation.actual_rounds !== undefined) {
+      // Show early stop information
+      const actualRounds = delegation.actual_rounds;
+      const maxRounds = delegation.max_rounds;
+      const convergenceInfo = delegation.convergence_score
+        ? ` (${Math.round(delegation.convergence_score * 100)}% converged)`
+        : '';
+      lines.push(`Rounds: ${actualRounds}/${maxRounds} (stopped early${convergenceInfo})`);
+    } else {
+      lines.push(copy.delegationRounds(delegation.max_rounds));
+    }
   }
   const agentLines = delegation.agents.slice(0, 6).map((agent) =>
     copy.delegationAgentLine(agent.nickname || agent.name, agent.role, agent.model)

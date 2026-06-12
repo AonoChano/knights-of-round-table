@@ -725,6 +725,17 @@ class VisibleConversationService:
                     if _cancelled():
                         return
 
+                    if sse_event.startswith("event: early_stop_detected"):
+                        try:
+                            early_stop_data = json.loads(sse_event.split("data: ", 1)[1])
+                            if delegation:
+                                delegation.actual_rounds = early_stop_data.get("actual_rounds", 0)
+                                delegation.early_stop = True
+                                delegation.early_stop_reason = early_stop_data.get("early_stop_reason")
+                                delegation.convergence_score = early_stop_data.get("convergence_score")
+                        except (json.JSONDecodeError, KeyError, IndexError):
+                            pass
+
                     if sse_event.startswith("event: summary_complete"):
                         collected_summaries.append(
                             StageSummary.model_validate(json.loads(sse_event.split("data: ", 1)[1]))
