@@ -669,8 +669,9 @@ def test_agents_endpoint_returns_list() -> None:
 
 
 def test_convergence_evaluation_requires_minimum_rounds() -> None:
-    """Early stop should not trigger before completing at least 1 round"""
-    state = {
+    """Early stop should not trigger before completing at least 2 rounds"""
+    # Test round 0
+    state_round0 = {
         "question": "test",
         "current_round": 0,
         "max_rounds": 4,
@@ -678,31 +679,43 @@ def test_convergence_evaluation_requires_minimum_rounds() -> None:
         "discussion_transcript": [],
         "should_continue": True,
     }
-    result = orchestration._evaluate_convergence(state)
+    result0 = orchestration._evaluate_convergence(state_round0)
+    assert result0["should_stop_early"] is False
+    assert result0["reason"] == "minimum_rounds_not_met"
 
-    assert result["should_stop_early"] is False
-    assert result["reason"] == "minimum_rounds_not_met"
+    # Test round 1
+    state_round1 = {
+        "question": "test",
+        "current_round": 1,
+        "max_rounds": 4,
+        "expert_outputs": {"expert1": "output"},
+        "discussion_transcript": ["something"],
+        "should_continue": True,
+    }
+    result1 = orchestration._evaluate_convergence(state_round1)
+    assert result1["should_stop_early"] is False
+    assert result1["reason"] == "minimum_rounds_not_met"
 
 
 def test_convergence_evaluation_detects_high_similarity() -> None:
-    """Early stop should trigger when discussion shows high similarity"""
-    # Simulate two rounds with very similar expert outputs
+    """Early stop should trigger when discussion shows very high similarity (92%+)"""
+    # Simulate two rounds with nearly identical expert outputs
     state = {
         "question": "What is 2+2?",
         "current_round": 2,
         "max_rounds": 4,
         "expert_outputs": {"expert1": "The answer is 4", "expert2": "It equals 4"},
         "discussion_transcript": [
-            "[Expert1 (Round 1)]:\nThe answer is definitely 4 because two plus two equals four.",
-            "[Expert2 (Round 1)]:\nIt equals 4, that's basic arithmetic.",
-            "[Expert1 (Round 2)]:\nThe answer is definitely 4 because two plus two equals four.",
-            "[Expert2 (Round 2)]:\nIt equals 4, that's basic arithmetic.",
+            "[Expert1 (Round 1)]:\nThe answer is definitely four because two plus two equals four mathematically.",
+            "[Expert2 (Round 1)]:\nIt equals four, that's basic arithmetic operation.",
+            "[Expert1 (Round 2)]:\nThe answer is definitely four because two plus two equals four mathematically.",
+            "[Expert2 (Round 2)]:\nIt equals four, that's basic arithmetic operation.",
         ],
         "should_continue": True,
     }
     result = orchestration._evaluate_convergence(state)
 
-    assert result["convergence_score"] >= 0.85
+    assert result["convergence_score"] >= 0.92
     assert result["should_stop_early"] is True
     assert result["reason"] == "high_similarity"
 

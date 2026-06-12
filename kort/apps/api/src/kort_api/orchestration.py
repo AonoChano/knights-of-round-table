@@ -413,8 +413,8 @@ def _evaluate_convergence(state: DiscussionState) -> dict:
     """
     current_round = state.get("current_round", 0)
 
-    # Strategy 1: Minimum rounds protection (at least 1 round)
-    if current_round < 1:
+    # Strategy 1: Minimum rounds protection (at least 2 rounds to compare)
+    if current_round < 2:
         return {
             "convergence_score": 0.0,
             "reason": "minimum_rounds_not_met",
@@ -458,8 +458,8 @@ def _evaluate_convergence(state: DiscussionState) -> dict:
     # Calculate similarity
     similarity = _calculate_text_similarity(last_round_texts, prev_round_texts)
 
-    # Convergence threshold: 85% similarity
-    CONVERGENCE_THRESHOLD = 0.85
+    # Convergence threshold: 92% similarity (stricter to avoid premature stops)
+    CONVERGENCE_THRESHOLD = 0.92
     should_stop = similarity >= CONVERGENCE_THRESHOLD
 
     return {
@@ -477,8 +477,8 @@ def _decide_continue(state: DiscussionState) -> dict:
     if current >= max_rounds:
         return {"should_continue": False}
 
-    # Minimum rounds protection (at least 1 round)
-    if current < 1:
+    # Minimum rounds protection (at least 2 rounds before early stop)
+    if current < 2:
         return {"should_continue": True}
 
     # Evaluate convergence
