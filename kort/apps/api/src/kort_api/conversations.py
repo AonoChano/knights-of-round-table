@@ -21,6 +21,7 @@ from .orchestration import (
 from .request_router import RouteDecision, route_request
 from .schemas import (
     AgentDefinition,
+    CANCELLED_ROUND_LIMITATION,
     ConversationListItem,
     ConversationRecord,
     ConversationRequest,
@@ -36,7 +37,6 @@ from .schemas import (
 
 logger = logging.getLogger(__name__)
 
-USER_CANCELLED_LIMITATION = "Conversation was paused by the user."
 STOPPED_ASSISTANT_CONTEXT = "[Response was stopped by the user.]"
 
 
@@ -152,7 +152,7 @@ def _sse_payload(event: str) -> tuple[str, dict] | None:
 
 
 def _round_was_cancelled(round_item: ConversationRound) -> bool:
-    return USER_CANCELLED_LIMITATION in round_item.final_answer.limitations
+    return round_item.status == "cancelled"
 
 
 def _assistant_history_body(round_item: ConversationRound) -> str:
@@ -203,9 +203,10 @@ def _cancelled_round_from_events(events: list[str], fallback_question: str) -> C
             title="Partial answer",
             body=final_body,
             confidence=0.5,
-            limitations=[USER_CANCELLED_LIMITATION],
+            limitations=[CANCELLED_ROUND_LIMITATION],
         ),
         delegation=delegation,
+        status="cancelled",
     )
 
 
@@ -812,9 +813,10 @@ class VisibleConversationService:
                     title="Partial answer",
                     body=final_body,
                     confidence=0.5,
-                    limitations=[USER_CANCELLED_LIMITATION],
+                    limitations=[CANCELLED_ROUND_LIMITATION],
                 ),
                 delegation=delegation,
+                status="cancelled",
             )
             if existing:
                 try:

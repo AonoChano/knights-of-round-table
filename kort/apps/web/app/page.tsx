@@ -111,6 +111,7 @@ type ConversationRound = {
   stage_summaries: StageSummary[];
   final_answer: FinalAnswer;
   delegation?: DelegationInfo | null;
+  status?: "complete" | "cancelled";
 };
 
 type ConversationResponse = {
@@ -390,7 +391,6 @@ function dedupeTimelineItems(items: TimelineItem[]): TimelineItem[] {
 }
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
-const USER_CANCELLED_LIMITATION = "Conversation was paused by the user.";
 
 const SENTENCE_BOUNDARY_RE = /[。！？…；\n]+/g;
 
@@ -616,7 +616,7 @@ function timelineFromStageSummaries(
 }
 
 function isCancelledRound(round: ConversationRound): boolean {
-  return round.final_answer.limitations.includes(USER_CANCELLED_LIMITATION);
+  return round.status === "cancelled";
 }
 
 function parseSseChunk(buffer: string): { events: StreamEvent[]; rest: string } {

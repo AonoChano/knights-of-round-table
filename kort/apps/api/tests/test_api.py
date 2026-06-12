@@ -10,7 +10,13 @@ from kort_api.agents import AgentLoader
 from kort_api.conversations import ConversationJob, ConversationStore, VisibleConversationService
 from kort_api.providers import ProviderStore
 from kort_api.request_router import RouteDecision, route_request
-from kort_api.schemas import ConversationRecord, ConversationRequest
+from kort_api.schemas import (
+    CANCELLED_ROUND_LIMITATION,
+    ConversationRecord,
+    ConversationRequest,
+    ConversationRound,
+    FinalAnswer,
+)
 
 
 client = TestClient(app_module.app)
@@ -352,10 +358,64 @@ def test_cancel_persists_partial_round_from_cached_events() -> None:
     assert response.status_code == 200
     assert response.json()["cancelled"] is True
     assert round_item["question"] == "Keep this as context"
+    assert round_item["status"] == "cancelled"
     assert round_item["final_answer"]["body"] == "partial answer"
-    assert round_item["final_answer"]["limitations"] == ["Conversation was paused by the user."]
+    assert round_item["final_answer"]["limitations"] == [CANCELLED_ROUND_LIMITATION]
     assert round_item["delegation"]["route_kind"] == "direct"
     assert round_item["stage_summaries"][0]["id"] == "summary-a"
+
+
+def test_legacy_cancelled_limitation_infers_round_status() -> None:
+    round_item = ConversationRound(
+        round_id="legacy-cancelled",
+        question="Interrupted question",
+        stage_summaries=[],
+        final_answer=FinalAnswer(
+            title="Partial answer",
+            body="",
+            confidence=0.5,
+            limitations=[CANCELLED_ROUND_LIMITATION],
+        ),
+    )
+
+    assert round_item.status == "cancelled"
+
+
+def test_legacy_cancelled_record_response_includes_status() -> None:
+    conversation_id = "legacy-cancelled-api"
+    file_path = app_module.conversation_service.store.path / f"{conversation_id}.json"
+    file_path.write_text(
+        json.dumps(
+            {
+                "conversation_id": conversation_id,
+                "title": "Legacy cancelled",
+                "expert_count": 1,
+                "rounds": [
+                    {
+                        "round_id": "legacy-round",
+                        "question": "Interrupted question",
+                        "stage_summaries": [],
+                        "final_answer": {
+                            "title": "Partial answer",
+                            "body": "",
+                            "confidence": 0.5,
+                            "limitations": [CANCELLED_ROUND_LIMITATION],
+                        },
+                        "delegation": None,
+                    }
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    response = client.get(f"/api/conversations/{conversation_id}")
+    round_item = response.json()["rounds"][0]
+
+    assert response.status_code == 200
+    assert round_item["status"] == "cancelled"
 
 
 def test_cancelled_round_is_used_as_followup_context(monkeypatch) -> None:

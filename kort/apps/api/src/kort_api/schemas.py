@@ -4,11 +4,14 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+CANCELLED_ROUND_LIMITATION = "Conversation was paused by the user."
 
 
 class ProviderType(str, Enum):
@@ -189,6 +192,13 @@ class ConversationRound(BaseModel):
     stage_summaries: list[StageSummary]
     final_answer: FinalAnswer
     delegation: DelegationMetadata | None = None
+    status: Literal["complete", "cancelled"] = "complete"
+
+    @model_validator(mode="after")
+    def infer_cancelled_status_from_legacy_limitation(self) -> "ConversationRound":
+        if CANCELLED_ROUND_LIMITATION in self.final_answer.limitations:
+            self.status = "cancelled"
+        return self
 
 
 class ConversationResponse(BaseModel):
