@@ -50,13 +50,17 @@ def route_request(request: ConversationRequest) -> RouteDecision:
         return RouteDecision(kind="direct", reason_code="explicit_discussion_off")
 
     if request.level in {"low", "medium", "high"}:
+        # Use custom_max_rounds if provided, otherwise use default for level
+        max_rounds = request.custom_max_rounds if request.custom_max_rounds is not None else LEVEL_MAX_ROUNDS[request.level]
         return RouteDecision(
             kind="panel",
             reason_code=f"explicit_{request.level}",
-            max_rounds=LEVEL_MAX_ROUNDS[request.level],
+            max_rounds=max_rounds,
         )
 
     if is_auto_direct_prompt(request.question):
         return RouteDecision(kind="direct", reason_code="auto_trivial")
 
-    return RouteDecision(kind="panel", reason_code="auto_panel", max_rounds=LEVEL_MAX_ROUNDS["auto"])
+    # Auto mode: use custom_max_rounds if provided, otherwise use auto default
+    max_rounds = request.custom_max_rounds if request.custom_max_rounds is not None else LEVEL_MAX_ROUNDS["auto"]
+    return RouteDecision(kind="panel", reason_code="auto_panel", max_rounds=max_rounds)

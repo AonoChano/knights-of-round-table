@@ -760,3 +760,65 @@ def test_decide_continue_respects_max_rounds() -> None:
 
     assert result["should_continue"] is False
     assert result.get("early_stop") is not True  # Not early stop, just reached limit
+
+
+# ---------------------------------------------------------------------------
+# Custom max_rounds tests
+# ---------------------------------------------------------------------------
+
+
+def test_request_router_uses_custom_max_rounds() -> None:
+    """Router should use custom_max_rounds when provided"""
+    # Low level with custom 8 rounds (default would be 2)
+    request = ConversationRequest(question="Test question", level="low", custom_max_rounds=8)
+    decision = route_request(request)
+
+    assert decision.kind == "panel"
+    assert decision.max_rounds == 8
+
+    # Auto mode with custom 10 rounds (default would be 4)
+    request_auto = ConversationRequest(question="Complex task", level="auto", custom_max_rounds=10)
+    decision_auto = route_request(request_auto)
+
+    assert decision_auto.kind == "panel"
+    assert decision_auto.max_rounds == 10
+
+
+def test_request_router_respects_default_when_no_custom() -> None:
+    """Router should use default max_rounds when custom_max_rounds is None"""
+    request_low = ConversationRequest(question="Test", level="low")
+    decision_low = route_request(request_low)
+
+    assert decision_low.max_rounds == 2  # Default for low
+
+    request_high = ConversationRequest(question="Test", level="high")
+    decision_high = route_request(request_high)
+
+    assert decision_high.max_rounds == 8  # Default for high
+
+
+def test_custom_max_rounds_validation() -> None:
+    """custom_max_rounds should be validated between 1 and 12"""
+    # Valid values should pass
+    valid_request = ConversationRequest(question="Test", level="auto", custom_max_rounds=6)
+    assert valid_request.custom_max_rounds == 6
+
+    # Boundary values
+    min_request = ConversationRequest(question="Test", level="auto", custom_max_rounds=1)
+    assert min_request.custom_max_rounds == 1
+
+    max_request = ConversationRequest(question="Test", level="auto", custom_max_rounds=12)
+    assert max_request.custom_max_rounds == 12
+
+    # Out of range should fail
+    try:
+        ConversationRequest(question="Test", level="auto", custom_max_rounds=0)
+        assert False, "Should have raised validation error for 0"
+    except ValueError:
+        pass
+
+    try:
+        ConversationRequest(question="Test", level="auto", custom_max_rounds=13)
+        assert False, "Should have raised validation error for 13"
+    except ValueError:
+        pass

@@ -184,6 +184,7 @@ class ConversationRequest(BaseModel):
     level: str = Field(default="auto", pattern=r"^(off|auto|low|medium|high)$")
     conversation_id: str | None = Field(default=None)
     deep_think: bool = False
+    custom_max_rounds: int | None = Field(default=None, ge=1, le=12)
 
 
 class ConversationRenameRequest(BaseModel):

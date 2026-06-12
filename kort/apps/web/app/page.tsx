@@ -703,6 +703,7 @@ function HomeExperience() {
   const [talkingActive, setTalkingActive] = useState(false);
   const [discussionLevel, setDiscussionLevel] = useState<DiscussionLevel>(DEFAULT_DISCUSSION_LEVEL);
   const [deepThink, setDeepThink] = useState(false);
+  const [customMaxRounds, setCustomMaxRounds] = useState<number | null>(null);
   const [conversations, setConversations] = useState<ConversationListItem[]>([]);
   const [conversationsError, setConversationsError] = useState<string | null>(null);
   const [conversationsLoading, setConversationsLoading] = useState(true);
@@ -1611,9 +1612,12 @@ function HomeExperience() {
         discussionLevel,
         deepThink: discussionLevel === "off" ? deepThink : false,
       });
-      const body: Record<string, string | boolean> = { question, level: discussionLevel };
+      const body: Record<string, string | boolean | number> = { question, level: discussionLevel };
       if (discussionLevel === "off") {
         body.deep_think = deepThink;
+      }
+      if (customMaxRounds !== null) {
+        body.custom_max_rounds = customMaxRounds;
       }
       body.conversation_id = convId;
 
@@ -2229,6 +2233,8 @@ function HomeExperience() {
               locale={locale}
               setDiscussionLevel={setDiscussionLevel}
               setDeepThink={setDeepThink}
+              customMaxRounds={customMaxRounds}
+              setCustomMaxRounds={setCustomMaxRounds}
             />
           </div>
           <div className="flex items-center gap-2">
@@ -2965,12 +2971,16 @@ function DiscussionModePicker({
   locale,
   setDiscussionLevel,
   setDeepThink,
+  customMaxRounds,
+  setCustomMaxRounds,
 }: {
   discussionLevel: DiscussionLevel;
   deepThink: boolean;
   locale: Locale;
   setDiscussionLevel: Dispatch<SetStateAction<DiscussionLevel>>;
   setDeepThink: Dispatch<SetStateAction<boolean>>;
+  customMaxRounds: number | null;
+  setCustomMaxRounds: Dispatch<SetStateAction<number | null>>;
 }) {
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const pickerRef = useRef<HTMLDivElement>(null);
@@ -3054,6 +3064,39 @@ function DiscussionModePicker({
             <Check className="discussion-level-check discussion-level-check-inline" size={14} aria-hidden="true" />
           ) : null}
         </button>
+      ) : null}
+      {discussionLevel !== "off" ? (
+        <div className="discussion-mode-control" style={{ marginLeft: "8px" }}>
+          <label style={{ display: "flex", alignItems: "center", gap: "6px", fontSize: "13px" }}>
+            <span>Max rounds:</span>
+            <input
+              type="number"
+              min="1"
+              max="12"
+              value={customMaxRounds ?? ""}
+              onChange={(e) => {
+                const val = e.target.value;
+                if (val === "") {
+                  setCustomMaxRounds(null);
+                } else {
+                  const num = parseInt(val, 10);
+                  if (num >= 1 && num <= 12) {
+                    setCustomMaxRounds(num);
+                  }
+                }
+              }}
+              placeholder="Auto"
+              style={{
+                width: "60px",
+                padding: "4px 6px",
+                border: "1px solid #e0e0e0",
+                borderRadius: "4px",
+                fontSize: "13px",
+              }}
+              title="Custom max rounds (1-12, leave empty for auto)"
+            />
+          </label>
+        </div>
       ) : null}
     </div>
   );
