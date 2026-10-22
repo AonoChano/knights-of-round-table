@@ -29,6 +29,7 @@ from .schemas import (
     ConversationRound,
     DelegatedAgent,
     DelegationMetadata,
+    DiscussionMessage,
     FinalAnswer,
     ProviderProfile,
     StageSummary,
@@ -165,6 +166,7 @@ def _assistant_history_body(round_item: ConversationRound) -> str:
 def _cancelled_round_from_events(events: list[str], fallback_question: str) -> ConversationRound | None:
     question = fallback_question.strip()
     collected_summaries: list[StageSummary] = []
+    collected_messages: list[DiscussionMessage] = []
     final_body = ""
     delegation: DelegationMetadata | None = None
 
@@ -187,6 +189,11 @@ def _cancelled_round_from_events(events: list[str], fallback_question: str) -> C
                 collected_summaries.append(StageSummary.model_validate(payload))
             except Exception as exc:
                 logger.debug("conversation_job.skip_invalid_summary error=%s", exc)
+        elif name == "discussion_message":
+            try:
+                collected_messages.append(DiscussionMessage.model_validate(payload))
+            except Exception as exc:
+                logger.debug("conversation_job.skip_invalid_message error=%s", exc)
         elif name == "final_delta":
             delta = payload.get("delta")
             if isinstance(delta, str):
@@ -206,6 +213,7 @@ def _cancelled_round_from_events(events: list[str], fallback_question: str) -> C
             limitations=[CANCELLED_ROUND_LIMITATION],
         ),
         delegation=delegation,
+        discussion_messages=collected_messages,
         status="cancelled",
     )
 
@@ -636,6 +644,7 @@ class VisibleConversationService:
             question_to_ask = request.question
 
         collected_summaries: list[StageSummary] = []
+        collected_messages: list[DiscussionMessage] = []
         final_body = ""
         delegation: DelegationMetadata | None = None
 
@@ -736,6 +745,16 @@ class VisibleConversationService:
                         except (json.JSONDecodeError, KeyError, IndexError):
                             pass
 
+                    if sse_event.startswith("event: discussion_message"):
+                        try:
+                            collected_messages.append(
+                                DiscussionMessage.model_validate(
+                                    json.loads(sse_event.split("data: ", 1)[1])
+                                )
+                            )
+                        except (json.JSONDecodeError, KeyError, IndexError, ValueError):
+                            pass
+
                     if sse_event.startswith("event: summary_complete"):
                         collected_summaries.append(
                             StageSummary.model_validate(json.loads(sse_event.split("data: ", 1)[1]))
@@ -765,6 +784,7 @@ class VisibleConversationService:
                 stage_summaries=collected_summaries,
                 final_answer=final_answer,
                 delegation=delegation,
+                discussion_messages=collected_messages,
             )
 
             if existing:
@@ -827,6 +847,7 @@ class VisibleConversationService:
                     limitations=[CANCELLED_ROUND_LIMITATION],
                 ),
                 delegation=delegation,
+                discussion_messages=collected_messages,
                 status="cancelled",
             )
             if existing:

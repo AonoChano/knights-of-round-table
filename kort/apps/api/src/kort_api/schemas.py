@@ -179,6 +179,15 @@ class DelegationMetadata(BaseModel):
     convergence_score: float | None = None
 
 
+class DiscussionMessage(BaseModel):
+    id: str
+    round: int
+    speaker: str
+    nickname: str
+    role: str
+    text: str
+
+
 class ConversationRequest(BaseModel):
     question: str = Field(min_length=1, max_length=4000)
     level: str = Field(default="auto", pattern=r"^(off|auto|low|medium|high)$")
@@ -198,6 +207,7 @@ class ConversationRound(BaseModel):
     stage_summaries: list[StageSummary]
     final_answer: FinalAnswer
     delegation: DelegationMetadata | None = None
+    discussion_messages: list[DiscussionMessage] = Field(default_factory=list)
     status: Literal["complete", "cancelled"] = "complete"
 
     @model_validator(mode="after")

@@ -45,6 +45,14 @@ def _provider_by_id(providers: list[dict], provider_id: str) -> dict | None:
     return None
 
 
+def _profile_for_agent(agent: dict, provider: dict) -> ProviderProfile:
+    profile = ProviderProfile.model_validate(provider)
+    model = str(agent.get("model") or "").strip()
+    if model:
+        return profile.model_copy(update={"default_model": model})
+    return profile
+
+
 def _call_model(
     agent: dict,
     provider: dict,
@@ -54,7 +62,7 @@ def _call_model(
     *,
     disable_thinking: bool = False,
 ) -> str:
-    profile = ProviderProfile.model_validate(provider)
+    profile = _profile_for_agent(agent, provider)
     client = OpenAICompatibleClient(secrets)
     return client.chat(provider=profile, prompt=user_prompt, system_prompt=system_prompt, disable_thinking=disable_thinking)
 
@@ -68,7 +76,7 @@ def _call_model_stream(
     *,
     disable_thinking: bool = False,
 ) -> Iterator[str]:
-    profile = ProviderProfile.model_validate(provider)
+    profile = _profile_for_agent(agent, provider)
     client = OpenAICompatibleClient(secrets)
     yield from client.stream_chat(provider=profile, prompt=user_prompt, system_prompt=system_prompt, disable_thinking=disable_thinking)
 
@@ -312,16 +320,22 @@ def _critics_review(state: DiscussionState) -> dict:
     if not critics or not expert_outputs:
         return {"discussion_transcript": ["[No critics available for review]"]}
 
+    nickname_by_name = {
+        agent.get("name", ""): agent.get("nickname", agent.get("name", ""))
+        for agent in agents
+    }
+
     combined_outputs = "\n\n---\n\n".join(
-        f"[{name}]:\n{text}" for name, text in expert_outputs.items()
+        f"[{nickname_by_name.get(name, name)}]:\n{text}"
+        for name, text in expert_outputs.items()
     )
 
-    def _invoke_critic(critic: dict) -> tuple[str, str]:
+    def _invoke_critic(critic: dict) -> tuple[str, str, str]:
         name = critic.get("name", "unknown")
         nickname = critic.get("nickname", name)
         provider = _provider_by_id(providers, critic.get("provider_profile", ""))
         if not provider:
-            return nickname, f"[{nickname} had no valid provider]"
+            return name, nickname, f"[{nickname} had no valid provider]"
 
         prompt = (
             f"You are a critical reviewer. Below are expert analyses for the question.\n\n"
@@ -345,18 +359,20 @@ def _critics_review(state: DiscussionState) -> dict:
         except Exception:
             review = f"[{nickname} encountered an unexpected error]"
 
-        return nickname, review
+        return name, nickname, review
 
     transcript_entries: list[str] = []
+    reviews: dict[str, str] = {}
 
     with ThreadPoolExecutor(max_workers=len(critics)) as executor:
         future_map = {executor.submit(_invoke_critic, c): c for c in critics}
         for future in as_completed(future_map):
-            nickname, review = future.result()
+            name, nickname, review = future.result()
+            reviews[name] = review
             transcript_entries.append(f"[{nickname} (Round {current_round + 1} review)]:\n{review}")
 
     return {
-        "critic_reviews": {},
+        "critic_reviews": reviews,
         "discussion_transcript": transcript_entries,
     }
 
@@ -579,7 +595,7 @@ def _stream_final_answer(state: DiscussionState) -> Iterator[str]:
         )
 
     try:
-        profile = ProviderProfile.model_validate(provider)
+        profile = _profile_for_agent(agent, provider)
         client = OpenAICompatibleClient(secrets)
         for chunk in client.stream_chat(
             provider=profile,
@@ -811,6 +827,27 @@ def run_discussion_stream(
     def _sse(event: str, payload: dict) -> str:
         return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
+    agents_by_name = {a.get("name", ""): a for a in agents_dicts}
+
+    def _message_events(round_number: int, outputs: dict[str, str]) -> list[str]:
+        events = []
+        for name, text in outputs.items():
+            agent = agents_by_name.get(name, {})
+            events.append(
+                _sse(
+                    "discussion_message",
+                    {
+                        "id": f"r{round_number}-{name}",
+                        "round": round_number,
+                        "speaker": name,
+                        "nickname": agent.get("nickname", name),
+                        "role": agent.get("role", "expert"),
+                        "text": text,
+                    },
+                )
+            )
+        return events
+
     if max_rounds <= 0:
         yield _sse("thinking_complete", {})
         for chunk in _stream_final_answer(state):
@@ -818,14 +855,18 @@ def run_discussion_stream(
         return
 
     while True:
+        round_number = state.get("current_round", 0) + 1
         yield _sse("talking_active", {})
         expert_output = _experts_think(state)
         state = _merge_state(state, expert_output)
+        for event in _message_events(round_number, expert_output.get("expert_outputs", {})):
+            yield event
 
         critic_output = _critics_review(state)
         state = _merge_state(state, critic_output)
+        for event in _message_events(round_number, critic_output.get("critic_reviews", {})):
+            yield event
 
-        round_number = state.get("current_round", 0) + 1
         sid = f"summary-round-{round_number}"
 
         summarizer_agent, provider_dict = _pick_summarizer(
@@ -839,7 +880,7 @@ def run_discussion_stream(
             yield _sse("summary_start", {"id": sid})
 
             streamed_text = ""
-            profile = ProviderProfile.model_validate(provider_dict)
+            profile = _profile_for_agent(summarizer_agent, provider_dict)
             client = OpenAICompatibleClient(secrets)
             try:
                 for chunk in client.stream_chat(
@@ -956,7 +997,7 @@ async def _run_summarizer_task(
     )
 
     def _sync_summarize() -> list[str]:
-        profile = ProviderProfile.model_validate(provider_dict)
+        profile = _profile_for_agent(summarizer_agent, provider_dict)
         sclient = OpenAICompatibleClient(secrets)
         events: list[str] = []
         streamed = ""
@@ -1045,7 +1086,7 @@ async def run_solo_thinking_stream(
         agents_dicts, providers_dicts, secrets
     )
 
-    profile = ProviderProfile.model_validate(provider)
+    profile = _profile_for_agent(agent, provider)
     client = OpenAICompatibleClient(secrets)
 
     # -- shared state --------------------------------------------------------

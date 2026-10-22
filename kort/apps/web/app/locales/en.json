@@ -1,9 +1,27 @@
 {
   "thinking": {
     "pools": [
-      ["Framing the question", "Tracing the clues", "Calibrating context", "Looking for evidence", "Extracting the point"],
-      ["Weighing interpretations", "Checking assumptions", "Linking context", "Organizing judgment", "Narrowing the path"],
-      ["Structuring the answer", "Compressing the conclusion", "Checking boundaries", "Filling details", "Preparing the response"]
+      [
+        "Framing the question",
+        "Tracing the clues",
+        "Calibrating context",
+        "Looking for evidence",
+        "Extracting the point"
+      ],
+      [
+        "Weighing interpretations",
+        "Checking assumptions",
+        "Linking context",
+        "Organizing judgment",
+        "Narrowing the path"
+      ],
+      [
+        "Structuring the answer",
+        "Compressing the conclusion",
+        "Checking boundaries",
+        "Filling details",
+        "Preparing the response"
+      ]
     ],
     "talking": "Discussing",
     "done": "Thinking complete",
@@ -20,11 +38,36 @@
     "usingEnvVar": "using environment variable"
   },
   "discussionLevels": [
-    { "id": "off", "label": "Off", "tag": "Discussion off", "code": "OFF" },
-    { "id": "auto", "label": "Auto", "tag": "Balanced review", "code": "AUTO" },
-    { "id": "low", "label": "Low", "tag": "Light round", "code": "LOW" },
-    { "id": "medium", "label": "Medium", "tag": "Focused debate", "code": "MID" },
-    { "id": "high", "label": "High", "tag": "Deep council", "code": "HIGH" }
+    {
+      "id": "off",
+      "label": "Off",
+      "tag": "Discussion off",
+      "code": "OFF"
+    },
+    {
+      "id": "auto",
+      "label": "Auto",
+      "tag": "Balanced review",
+      "code": "AUTO"
+    },
+    {
+      "id": "low",
+      "label": "Low",
+      "tag": "Light round",
+      "code": "LOW"
+    },
+    {
+      "id": "medium",
+      "label": "Medium",
+      "tag": "Focused debate",
+      "code": "MID"
+    },
+    {
+      "id": "high",
+      "label": "High",
+      "tag": "Deep council",
+      "code": "HIGH"
+    }
   ],
   "ui": {
     "addExpert": "Add expert",
@@ -123,7 +166,14 @@
     "more": "More",
     "networkError": "network error",
     "newChatPrompt": "What would you like to resolve today?",
-    "newChatPrompts": ["What should we resolve today?", "Where should we start?", "Bring the question to the round table.", "What needs a closer look?", "What should we break down?", "Tell me what is stuck."],
+    "newChatPrompts": [
+      "What should we resolve today?",
+      "Where should we start?",
+      "Bring the question to the round table.",
+      "What needs a closer look?",
+      "What should we break down?",
+      "Tell me what is stuck."
+    ],
     "newConversation": "New chat",
     "nickname": "Nickname",
     "notLoaded": "Not loaded",
@@ -201,5 +251,24 @@
       "label": "Display name",
       "provider_type": "Provider type"
     }
+  },
+  "room": {
+    "back": "Back to chat",
+    "openRoom": "View discussion",
+    "watchLive": "Watch discussion live",
+    "ongoing": "In session",
+    "adjourned": "Session adjourned",
+    "transcript": "Transcript",
+    "round": "Round {round}",
+    "seats": "{seats} seated · {messages} remarks",
+    "switchToDay": "Switch to daylight study",
+    "switchToNight": "Switch to night round table",
+    "waiting": "The knights are taking their seats…",
+    "play": "Resume",
+    "pause": "Pause",
+    "prev": "Previous remark",
+    "next": "Next remark",
+    "absent": "This seat did not speak this round",
+    "review": "Replay this discussion"
   }
 }

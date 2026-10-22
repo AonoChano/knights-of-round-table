@@ -116,7 +116,13 @@ class OpenAICompatibleClient:
 
         try:
             with httpx.stream("POST", url, headers=headers, json=payload, timeout=120) as response:
-                response.raise_for_status()
+                if response.status_code >= 400:
+                    # 必须先读 body：流式响应未 read 时访问 .text 会抛 ResponseNotRead
+                    response.read()
+                    raise ModelCallError(
+                        f"Model stream failed with HTTP {response.status_code}: "
+                        f"{sanitize_error_text(response.text)}"
+                    )
                 for line in response.iter_lines():
                     if not line.startswith("data:"):
                         continue
@@ -133,9 +139,6 @@ class OpenAICompatibleClient:
                     delta = data.get("choices", [{}])[0].get("delta", {}).get("content")
                     if isinstance(delta, str) and delta:
                         yield delta
-        except httpx.HTTPStatusError as exc:
-            detail = sanitize_error_text(exc.response.text)
-            raise ModelCallError(f"Model stream failed with HTTP {exc.response.status_code}: {detail}") from exc
         except httpx.HTTPError as exc:
             raise ModelCallError(f"Model stream failed: {exc}") from exc
 
@@ -185,7 +188,12 @@ class OpenAICompatibleClient:
         async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
             try:
                 async with client.stream("POST", url, headers=headers, json=payload) as response:
-                    response.raise_for_status()
+                    if response.status_code >= 400:
+                        await response.aread()
+                        raise ModelCallError(
+                            f"Model stream failed with HTTP {response.status_code}: "
+                            f"{sanitize_error_text(response.text)}"
+                        )
                     async for line in response.aiter_lines():
                         if not line.startswith("data:"):
                             continue
@@ -208,8 +216,5 @@ class OpenAICompatibleClient:
                         content = delta.get("content")
                         if isinstance(content, str) and content:
                             yield {"type": "answer", "text": content}
-            except httpx.HTTPStatusError as exc:
-                detail = sanitize_error_text(exc.response.text)
-                raise ModelCallError(f"Model stream failed with HTTP {exc.response.status_code}: {detail}") from exc
             except httpx.HTTPError as exc:
                 raise ModelCallError(f"Model stream failed: {exc}") from exc

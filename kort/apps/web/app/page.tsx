@@ -57,6 +57,8 @@ import {
 } from "simple-icons";
 import { loadLocale, saveLocale, localeStatusText, t, nextThinkingLabel, discussionLevels } from "./locale";
 import type { DiscussionLevel, Locale } from "./locale";
+import { AgentStrip } from "../components/discussion/AgentStrip";
+import { DiscussionView } from "../components/discussion/DiscussionView";
 
 type TimerHandle = ReturnType<typeof setTimeout>;
 
@@ -116,6 +118,7 @@ type ConversationRound = {
   stage_summaries: StageSummary[];
   final_answer: FinalAnswer;
   delegation?: DelegationInfo | null;
+  discussion_messages?: DiscussionMessage[];
   status?: "complete" | "cancelled";
 };
 
@@ -141,7 +144,19 @@ type MessagePair = {
   timeline: TimelineItem[];
   finalBody: string;
   delegation?: DelegationInfo | null;
+  discussion?: DiscussionMessage[];
 };
+
+type DiscussionMessage = {
+  id: string;
+  round: number;
+  speaker: string;
+  nickname: string;
+  role: string;
+  text: string;
+};
+
+type DiscussionViewTarget = { source: "live" } | { source: "pair"; pair: MessagePair };
 
 type ProviderProfile = {
   provider_id: string;
@@ -249,6 +264,7 @@ type StreamSlot = {
   paused: boolean;
   conversation: ConversationResponse | null;
   streamError: string | null;
+  discussionMessages: DiscussionMessage[];
 };
 
 const TRANSIENT_TIMELINE_IDS = new Set(["thinking-active", "talking-active"]);
@@ -367,6 +383,7 @@ function createEmptySlot(): StreamSlot {
     paused: false,
     conversation: null,
     streamError: null,
+    discussionMessages: [],
   };
 }
 
@@ -521,6 +538,38 @@ function parseDelegationInfo(value: unknown): DelegationInfo | null {
     max_rounds: maxRounds,
     agents,
   };
+}
+
+function parseDiscussionMessage(value: unknown): DiscussionMessage | null {
+  if (!value || typeof value !== "object") return null;
+  const item = value as Record<string, unknown>;
+  const speaker = typeof item.speaker === "string" ? item.speaker : "";
+  const text = typeof item.text === "string" ? item.text : "";
+  if (!speaker || !text) return null;
+  const round = typeof item.round === "number" ? item.round : 0;
+  return {
+    id: typeof item.id === "string" ? item.id : `r${round}-${speaker}`,
+    round,
+    speaker,
+    nickname: typeof item.nickname === "string" && item.nickname ? item.nickname : speaker,
+    role: typeof item.role === "string" ? item.role : "expert",
+    text,
+  };
+}
+
+function parseDiscussionMessages(value: unknown): DiscussionMessage[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map(parseDiscussionMessage)
+    .filter((item): item is DiscussionMessage => Boolean(item));
+}
+
+function appendDiscussionMessage(
+  current: DiscussionMessage[],
+  message: DiscussionMessage
+): DiscussionMessage[] {
+  if (current.some((item) => item.id === message.id)) return current;
+  return [...current, message];
 }
 
 function markdownTitle(markdown: string, fallback: string) {
@@ -728,6 +777,8 @@ function HomeExperience() {
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [requestPhase, setRequestPhase] = useState<StreamSlot["requestPhase"]>(null);
   const [delegationInfo, setDelegationInfo] = useState<DelegationInfo | null>(null);
+  const [discussionMessages, setDiscussionMessages] = useState<DiscussionMessage[]>([]);
+  const [discussionView, setDiscussionView] = useState<DiscussionViewTarget | null>(null);
 
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -743,6 +794,7 @@ function HomeExperience() {
   const rawBodyBySummary = useRef<Record<string, string>>({});
   const timelineRef = useRef<TimelineItem[]>([]);
   const finalBodyRef = useRef("");
+  const discussionMessagesRef = useRef<DiscussionMessage[]>([]);
   const messagePairsRef = useRef<MessagePair[]>([]);
   const submittedQuestionRef = useRef<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -776,6 +828,8 @@ function HomeExperience() {
     setStreamError(slot.streamError);
     setRequestPhase(slot.requestPhase);
     setDelegationInfo(slot.delegationInfo);
+    setDiscussionMessages(slot.discussionMessages);
+    setDiscussionView(null);
   }
 
   function flushStateToSlot(slot: StreamSlot) {
@@ -795,6 +849,7 @@ function HomeExperience() {
     slot.streamError = streamError;
     slot.requestPhase = requestPhase;
     slot.delegationInfo = delegationInfo;
+    slot.discussionMessages = discussionMessagesRef.current;
   }
 
   function saveCurrentSlot() {
@@ -929,6 +984,8 @@ function HomeExperience() {
     setStreamError(null);
     setRequestPhase(null);
     setDelegationInfo(null);
+    setDiscussionMessages([]);
+    setDiscussionView(null);
   }
 
   function fullReset() {
@@ -1014,6 +1071,10 @@ function HomeExperience() {
   useEffect(() => {
     finalBodyRef.current = finalBody;
   }, [finalBody]);
+
+  useEffect(() => {
+    discussionMessagesRef.current = discussionMessages;
+  }, [discussionMessages]);
 
   useEffect(() => {
     messagePairsRef.current = messagePairs;
@@ -1293,9 +1354,15 @@ function HomeExperience() {
             timeline: timelineItems,
             finalBody: round.final_answer.body,
             delegation: round.delegation ?? null,
+            discussion: parseDiscussionMessages(round.discussion_messages),
           };
         });
         setMessagePairsSynced(pairs);
+        const lastRound = payload.rounds[payload.rounds.length - 1];
+        const restoredMessages = parseDiscussionMessages(lastRound?.discussion_messages);
+        discussionMessagesRef.current = restoredMessages;
+        setDiscussionMessages(restoredMessages);
+        setDiscussionView(null);
       }
       clientLog("info", "conversation detail load completed", {
         conversationId,
@@ -1519,6 +1586,7 @@ function HomeExperience() {
         timeline: cancelledTimeline,
         finalBody: slot.finalBody,
         delegation: slot.delegationInfo,
+        discussion: slot.discussionMessages,
       };
       slot.messagePairs = [...slot.messagePairs, cancelledPair];
       setMessagePairsSynced(slot.messagePairs);
@@ -1529,6 +1597,9 @@ function HomeExperience() {
       setFinalBody("");
       slot.timeline = [];
       slot.thinkingComplete = false;
+      slot.discussionMessages = [];
+      setDiscussionMessages([]);
+      setDiscussionView(null);
       committedCancelledTurn = true;
     }
     setTimeline(committedCancelledTurn ? [] : cancelledTimeline);
@@ -1746,6 +1817,13 @@ function HomeExperience() {
       slot.requestPhase = "delegating";
       return;
     }
+    if (message.event === "discussion_message") {
+      const parsed = parseDiscussionMessage(message.data);
+      if (parsed) {
+        slot.discussionMessages = appendDiscussionMessage(slot.discussionMessages, parsed);
+      }
+      return;
+    }
     if (message.event === "early_stop_detected") {
       // Update delegation info with early stop metadata
       if (slot.delegationInfo && message.data) {
@@ -1863,6 +1941,14 @@ function HomeExperience() {
           delegationPhaseTimerRef.current = null;
         }, 450);
       }, 1200);
+      return;
+    }
+
+    if (message.event === "discussion_message") {
+      const parsed = parseDiscussionMessage(message.data);
+      if (parsed) {
+        setDiscussionMessages((current) => appendDiscussionMessage(current, parsed));
+      }
       return;
     }
 
@@ -2049,6 +2135,7 @@ function HomeExperience() {
             timeline: timelineItems,
             finalBody: lastRound.final_answer.body,
             delegation: lastRound.delegation ?? delegationInfo,
+            discussion: parseDiscussionMessages(lastRound.discussion_messages),
           },
         ]);
       }
@@ -2163,6 +2250,32 @@ function HomeExperience() {
 
   const hasRun = Boolean(submittedQuestion || conversation || loading || messagePairs.length > 0);
   const tr = t(locale);
+  const hasDiscussion = discussionMessages.length > 0;
+
+  const discussionSession = useMemo(() => {
+    if (!discussionView) return null;
+    if (discussionView.source === "live") {
+      return {
+        question: submittedQuestion ?? conversation?.title ?? "",
+        messages: discussionMessages,
+        agents: delegationInfo?.agents ?? [],
+        streaming: loading,
+      };
+    }
+    return {
+      question: discussionView.pair.question,
+      messages: discussionView.pair.discussion ?? [],
+      agents: discussionView.pair.delegation?.agents ?? [],
+      streaming: false,
+    };
+  }, [
+    conversation?.title,
+    delegationInfo?.agents,
+    discussionMessages,
+    discussionView,
+    loading,
+    submittedQuestion,
+  ]);
 
   useEffect(() => {
     if (hasRun) return;
@@ -2245,31 +2358,77 @@ function HomeExperience() {
           </div>
         </header>
 
-        <div className="conversation-scroll">
-          <div className={cn("conversation-inner", !hasRun && "conversation-empty")}>
+        {discussionSession ? (
+          <DiscussionView
+            question={discussionSession.question}
+            messages={discussionSession.messages}
+            agents={discussionSession.agents}
+            streaming={discussionSession.streaming}
+            locale={locale}
+            onBack={() => setDiscussionView(null)}
+          />
+        ) : (
+          <>
+            <div className="conversation-scroll">
+              <div className={cn("conversation-inner", !hasRun && "conversation-empty")}>
+                {hasRun ? (
+                  <ConversationView
+                    conversation={conversation}
+                    loading={loading}
+                    thinkingComplete={thinkingComplete}
+                    elapsed={elapsed}
+                    question={submittedQuestion}
+                    timeline={visibleTimeline}
+                    finalBody={finalBody}
+                    streamError={streamError}
+                    messagePairs={messagePairs}
+                    requestPhase={requestPhase}
+                    delegationInfo={delegationInfo}
+                    locale={locale}
+                    liveDiscussion={discussionMessages}
+                    onToggleThinking={toggleCurrentThinkingDrawer}
+                    onOpenLiveDiscussion={
+                      hasDiscussion ? () => setDiscussionView({ source: "live" }) : undefined
+                    }
+                    onOpenPairDiscussion={(pair) => setDiscussionView({ source: "pair", pair })}
+                    onViewPairThinking={(pair) => {
+                      setDrawerTimeline(pair.timeline);
+                      setDrawerOpen(true);
+                    }}
+                  />
+                ) : (
+                  <div className="new-chat-start">
+                    <div className="new-chat-prompt">{newChatPrompt}</div>
+                    <Composer
+                      input={input}
+                      loading={loading}
+                      paused={paused}
+                      pauseFlash={pauseFlash}
+                      locale={locale}
+                      setInput={setInput}
+                      onSubmit={() => void sendQuestion()}
+                      onPause={pauseConversation}
+                    />
+                  </div>
+                )}
+              </div>
+            </div>
+
             {hasRun ? (
-              <ConversationView
-                conversation={conversation}
-                loading={loading}
-                thinkingComplete={thinkingComplete}
-                elapsed={elapsed}
-                question={submittedQuestion}
-                timeline={visibleTimeline}
-                finalBody={finalBody}
-                streamError={streamError}
-                messagePairs={messagePairs}
-                requestPhase={requestPhase}
-                delegationInfo={delegationInfo}
-                locale={locale}
-                onToggleThinking={toggleCurrentThinkingDrawer}
-                onViewPairThinking={(pair) => {
-                  setDrawerTimeline(pair.timeline);
-                  setDrawerOpen(true);
-                }}
-              />
-            ) : (
-              <div className="new-chat-start">
-                <div className="new-chat-prompt">{newChatPrompt}</div>
+              <div className="composer-dock">
+                {hasDiscussion ? (
+                  <div className="discussion-cta-row">
+                    <button
+                      type="button"
+                      className="discussion-cta"
+                      onClick={() => setDiscussionView({ source: "live" })}
+                    >
+                      <UsersRound size={14} aria-hidden="true" />
+                      <span>{loading ? tr.room.watchLive : tr.room.openRoom}</span>
+                      <span className="discussion-cta-count">{discussionMessages.length}</span>
+                    </button>
+                  </div>
+                ) : null}
                 <Composer
                   input={input}
                   loading={loading}
@@ -2281,24 +2440,9 @@ function HomeExperience() {
                   onPause={pauseConversation}
                 />
               </div>
-            )}
-          </div>
-        </div>
-
-        {hasRun ? (
-          <div className="composer-dock">
-            <Composer
-              input={input}
-              loading={loading}
-              paused={paused}
-              pauseFlash={pauseFlash}
-              locale={locale}
-              setInput={setInput}
-              onSubmit={() => void sendQuestion()}
-              onPause={pauseConversation}
-            />
-          </div>
-        ) : null}
+            ) : null}
+          </>
+        )}
       </section>
 
       {drawerOpen ? (
@@ -2752,7 +2896,10 @@ function ConversationView({
   requestPhase,
   delegationInfo,
   locale,
+  liveDiscussion,
   onToggleThinking,
+  onOpenLiveDiscussion,
+  onOpenPairDiscussion,
   onViewPairThinking,
 }: {
   conversation: ConversationResponse | null;
@@ -2767,7 +2914,10 @@ function ConversationView({
   requestPhase: StreamSlot["requestPhase"];
   delegationInfo: DelegationInfo | null;
   locale: Locale;
+  liveDiscussion: DiscussionMessage[];
   onToggleThinking: () => void;
+  onOpenLiveDiscussion?: () => void;
+  onOpenPairDiscussion: (pair: MessagePair) => void;
   onViewPairThinking: (pair: MessagePair) => void;
 }) {
   const tr = t(locale);
@@ -2776,6 +2926,7 @@ function ConversationView({
     const cleanBody = markdownBody(pair.finalBody) || pair.finalBody;
     const hasTimeline = pair.timeline.length > 0;
     const wasCancelled = hasTimeline && !cleanBody;
+    const pairDiscussion = pair.discussion ?? [];
     return (
       <div key={`turn-${idx}`} className="conversation-stack">
         <div className="user-message">{pair.question}</div>
@@ -2794,7 +2945,13 @@ function ConversationView({
                 <div className="answer-body markdown-body mt-2">
                   <Markdown content={cleanBody} />
                 </div>
-                <MessageActions body={cleanBody} locale={locale} delegation={pair.delegation ?? null} />
+                <MessageActions
+                  body={cleanBody}
+                  locale={locale}
+                  delegation={pair.delegation ?? null}
+                  discussion={pairDiscussion}
+                  onReview={pairDiscussion.length > 0 ? () => onOpenPairDiscussion(pair) : undefined}
+                />
               </>
             ) : wasCancelled ? (
               <div className="cancelled-badge mt-2 text-xs text-muted">{tr.ui.cancelled}</div>
@@ -2871,7 +3028,13 @@ function ConversationView({
                   <div className="answer-body markdown-body">
                     <Markdown content={finalBody} />
                   </div>
-                  <MessageActions body={finalBody} locale={locale} delegation={delegationInfo} />
+                  <MessageActions
+                    body={finalBody}
+                    locale={locale}
+                    delegation={delegationInfo}
+                    discussion={liveDiscussion}
+                    onReview={liveDiscussion.length > 0 ? onOpenLiveDiscussion : undefined}
+                  />
                 </>
               ) : null}
             </div>
@@ -2919,7 +3082,19 @@ function delegationTooltip(locale: Locale, delegation: DelegationInfo | null) {
   return lines.join("\n");
 }
 
-function MessageActions({ body, locale, delegation }: { body: string; locale: Locale; delegation?: DelegationInfo | null }) {
+function MessageActions({
+  body,
+  locale,
+  delegation,
+  discussion,
+  onReview,
+}: {
+  body: string;
+  locale: Locale;
+  delegation?: DelegationInfo | null;
+  discussion: DiscussionMessage[];
+  onReview?: () => void;
+}) {
   const [copied, setCopied] = useState(false);
   const copy = t(locale).ui;
   const tooltip = delegationTooltip(locale, delegation ?? null);
@@ -2936,22 +3111,34 @@ function MessageActions({ body, locale, delegation }: { body: string; locale: Lo
   }
 
   return (
-    <div className="message-actions" aria-label={copy.messageActions}>
-      <button
-        className="message-action-button"
-        onClick={() => void copyBody()}
-        type="button"
-        title={copy.copy}
-      >
-        <Copy size={15} aria-hidden="true" />
-        <span className="sr-only">{copy.copy}</span>
-      </button>
-      <span className="delegation-badge" data-tooltip={tooltip} tabIndex={0}>
-        <UsersRound size={14} aria-hidden="true" />
-        <span>{copy.delegationInfo}</span>
-      </span>
-      {copied ? <span className="message-action-status">{copy.copied}</span> : null}
-    </div>
+    <>
+      <div className="message-actions" aria-label={copy.messageActions}>
+        <button
+          className="message-action-button"
+          onClick={() => void copyBody()}
+          type="button"
+          title={copy.copy}
+        >
+          <Copy size={15} aria-hidden="true" />
+          <span className="sr-only">{copy.copy}</span>
+        </button>
+        <AgentStrip
+          agents={delegation?.agents ?? []}
+          messages={discussion}
+          locale={locale}
+          tooltip={tooltip}
+        />
+        {copied ? <span className="message-action-status">{copy.copied}</span> : null}
+      </div>
+      {onReview ? (
+        <div className="discussion-review-row">
+          <button type="button" className="discussion-review-button" onClick={onReview}>
+            <UsersRound size={14} aria-hidden="true" />
+            <span>{t(locale).room.review}</span>
+          </button>
+        </div>
+      ) : null}
+    </>
   );
 }
 

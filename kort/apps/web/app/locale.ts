@@ -57,6 +57,12 @@ export const t = (locale: Locale) => {
       complete: copy.thinking.complete,
     },
     status: copy.status,
+    room: {
+      ...copy.room,
+      round: (round: number) => formatTemplate(copy.room.round, { round }),
+      seats: (seats: number, messages: number) =>
+        formatTemplate(copy.room.seats, { seats, messages }),
+    },
     ui: {
       ...copy.ui,
       apiKeyPlaceholderNew: (envKey: string) =>

@@ -12,10 +12,14 @@ from kort_api.providers import ProviderStore
 from kort_api.request_router import RouteDecision, route_request
 from kort_api.schemas import (
     CANCELLED_ROUND_LIMITATION,
+    AgentDefinition,
     ConversationRecord,
     ConversationRequest,
     ConversationRound,
+    DiscussionMessage,
     FinalAnswer,
+    ProviderProfile,
+    ProviderType,
 )
 
 
@@ -507,6 +511,66 @@ def test_panel_expert_and_critic_calls_disable_provider_thinking(monkeypatch) ->
     assert ("critic", True) in calls
 
 
+def test_discussion_stream_emits_speaker_messages(monkeypatch) -> None:
+    def fake_call_model(*, agent, **_kwargs):
+        return f"{agent['nickname']} speaks"
+
+    monkeypatch.setattr(orchestration, "_call_model", fake_call_model)
+    monkeypatch.setattr(orchestration, "_stream_final_answer", lambda _state: iter(["final answer"]))
+
+    agents = [
+        AgentDefinition(
+            name="expert-a",
+            nickname="Expert A",
+            role="expert",
+            provider_profile="deepseek",
+            model="deepseek-chat",
+            system_prompt="",
+        ),
+        AgentDefinition(
+            name="critic-a",
+            nickname="Critic A",
+            role="critic",
+            provider_profile="deepseek",
+            model="deepseek-chat",
+            system_prompt="",
+        ),
+    ]
+    providers = [
+        ProviderProfile(
+            provider_id="deepseek",
+            label="DeepSeek",
+            provider_type=ProviderType.deepseek,
+            base_url="https://api.deepseek.com",
+            api_style="openai",
+            default_model="deepseek-chat",
+            env_key_name="DEEPSEEK_API_KEY",
+        )
+    ]
+
+    events = list(
+        orchestration.run_discussion_stream(
+            question="Should we rewrite the orchestrator?",
+            agents=agents,
+            providers=providers,
+            secrets={"deepseek": "secret-test-key"},
+            max_rounds=1,
+        )
+    )
+
+    payloads = [
+        DiscussionMessage.model_validate(json.loads(event.split("data: ", 1)[1]))
+        for event in events
+        if event.startswith("event: discussion_message")
+    ]
+
+    assert [(m.speaker, m.role) for m in payloads] == [("expert-a", "expert"), ("critic-a", "critic")]
+    assert [m.round for m in payloads] == [1, 1]
+    assert payloads[0].text == "Expert A speaks"
+    assert payloads[1].nickname == "Critic A"
+    assert any(event.startswith("event: thinking_complete") for event in events)
+
+
 def test_stream_conversation_uses_client_supplied_conversation_id() -> None:
     conversation_id = "client-generated-conversation"
     response = client.post(
@@ -835,3 +899,92 @@ def test_custom_max_rounds_validation() -> None:
         assert False, "Should have raised validation error for 13"
     except ValueError:
         pass
+
+
+def test_agent_model_overrides_provider_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[dict] = []
+
+    class _Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {"choices": [{"message": {"content": "ok"}}]}
+
+    def fake_post(url: str, **kwargs) -> _Response:
+        calls.append(kwargs["json"])
+        return _Response()
+
+    monkeypatch.setattr("kort_api.model_client.httpx.post", fake_post)
+
+    provider = {
+        "provider_id": "deepseek",
+        "label": "DeepSeek",
+        "provider_type": "deepseek",
+        "base_url": "https://api.deepseek.com",
+        "api_style": "openai",
+        "default_model": "provider-default-model",
+        "env_key_name": "DEEPSEEK_API_KEY",
+        "enabled": True,
+        "capabilities": ["chat"],
+    }
+
+    orchestration._call_model(
+        agent={"model": "agent-specific-model", "system_prompt": "sys"},
+        provider=provider,
+        system_prompt="sys",
+        user_prompt="hi",
+        secrets={"deepseek": "sk-test"},
+    )
+    orchestration._call_model(
+        agent={"model": "", "system_prompt": "sys"},
+        provider=provider,
+        system_prompt="sys",
+        user_prompt="hi",
+        secrets={"deepseek": "sk-test"},
+    )
+
+    assert calls[0]["model"] == "agent-specific-model"
+    assert calls[1]["model"] == "provider-default-model"
+
+
+def test_model_stream_reports_http_error_without_reading_closed_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from kort_api.model_client import ModelCallError, OpenAICompatibleClient
+
+    class _StreamResponse:
+        status_code = 400
+        text = '{"error": {"message": "The model `gpt-4.1-mini` does not exist"}}'
+
+        def __enter__(self) -> "_StreamResponse":
+            return self
+
+        def __exit__(self, *_exc) -> bool:
+            return False
+
+        def read(self) -> None:
+            return None
+
+        def iter_lines(self):
+            raise AssertionError("error responses must not be iterated")
+
+    monkeypatch.setattr("kort_api.model_client.httpx.stream", lambda *args, **kwargs: _StreamResponse())
+
+    provider = ProviderProfile(
+        provider_id="deepseek",
+        label="DeepSeek",
+        provider_type=ProviderType.deepseek,
+        base_url="https://api.deepseek.com",
+        api_style="openai",
+        default_model="gpt-4.1-mini",
+        env_key_name="DEEPSEEK_API_KEY",
+    )
+    client = OpenAICompatibleClient({"deepseek": "sk-secret-value"})
+
+    with pytest.raises(ModelCallError) as excinfo:
+        list(client.stream_chat(provider=provider, prompt="hi", system_prompt="sys"))
+
+    assert "HTTP 400" in str(excinfo.value)
+    assert "gpt-4.1-mini" in str(excinfo.value)
+    assert "sk-secret-value" not in str(excinfo.value)
