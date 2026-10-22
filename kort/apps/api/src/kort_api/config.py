@@ -28,6 +28,10 @@ class Settings(BaseSettings):
     secrets_file: Path = Field(
         default=Path(__file__).resolve().parents[4] / "runtime" / "data" / "provider-secrets.local.json"
     )
+    memory_budget_tokens: int = 320
+    memory_auto_dream: bool = True
+    memory_dream_min_episodes: int = 6
+    memory_dream_min_hours: int = 24
     cors_origins: list[str] = Field(
         default_factory=lambda: [
             "http://localhost:3000",

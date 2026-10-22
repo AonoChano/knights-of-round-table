@@ -146,13 +146,16 @@ class AgentLoader:
     def update_agent(self, name: str, data: AgentUpdateRequest) -> tuple[AgentView | None, str]:
         if not AGENT_NAME_RE.fullmatch(name):
             return None, "not_found"
-        if name in SYSTEM_AGENTS:
-            return None, "system_protected"
 
         agent_dir = self.agents_root / name
         existing = self._read_definition(agent_dir)
         if existing is None:
             return None, "not_found"
+
+        # A system agent may move to another provider or model, but the round table is built
+        # around its role, so that one field stays fixed.
+        if name in SYSTEM_AGENTS and data.role is not None and data.role != existing.role:
+            return None, "system_role_locked"
 
         update_data = data.model_dump(exclude_none=True)
         if not update_data:

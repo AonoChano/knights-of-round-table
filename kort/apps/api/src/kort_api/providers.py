@@ -2,17 +2,46 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from urllib.parse import urlparse
 
+from .model_client import ModelCallError, normalize_style
 from .schemas import (
-    ProviderConnectivityRequest,
-    ProviderConnectivityResponse,
     ProviderProfile,
     ProviderProfileUpdate,
     ProviderSecretStatus,
     ProviderSecretUpdate,
 )
 from .storage import read_json, write_json
+
+
+def provider_api_key(provider: ProviderProfile, secrets: dict[str, str]) -> str:
+    """Saved key first, then the environment variable named by the profile."""
+    return (secrets.get(provider.provider_id) or os.getenv(provider.env_key_name, "")).strip()
+
+
+def provider_supports_calls(provider: ProviderProfile) -> bool:
+    try:
+        normalize_style(provider.api_style)
+    except ModelCallError:
+        return False
+    return True
+
+
+def provider_is_reachable(provider: ProviderProfile, secrets: dict[str, str]) -> bool:
+    if not provider.enabled or not provider_supports_calls(provider):
+        return False
+    return provider.provider_type == "ollama" or bool(provider_api_key(provider, secrets))
+
+
+def model_is_selected(provider: ProviderProfile, model: str) -> bool:
+    """Disabling a listed model retires the seats that use it.
+
+    A model the profile never listed is left to the vendor: agents are commonly bound to a legacy
+    ID that the published /models list no longer shows, and refusing those silently empties the table.
+    """
+    chosen = (model or provider.default_model).strip()
+    if not chosen:
+        return False
+    return all(item.id != chosen or item.enabled for item in provider.models)
 
 
 class ProviderStore:
@@ -37,10 +66,35 @@ class ProviderStore:
         self.save_profiles(ordered)
         return profiles[provider_id]
 
+    def create(self, provider_id: str, update: ProviderProfileUpdate) -> ProviderProfile:
+        profiles = {item.provider_id: item for item in self.list_profiles()}
+        if provider_id in profiles:
+            raise ValueError(f"Provider {provider_id} already exists.")
+        return self.upsert(provider_id, update)
+
+    def delete_profile(self, provider_id: str) -> bool:
+        profiles = self.list_profiles()
+        remaining = [item for item in profiles if item.provider_id != provider_id]
+        if len(remaining) == len(profiles):
+            return False
+        self.save_profiles(remaining)
+        secrets = self._read_secrets()
+        if provider_id in secrets:
+            secrets.pop(provider_id)
+            write_json(self.secrets_path, secrets)
+        return True
+
+    def get_saved_key(self, provider_id: str) -> str:
+        return self._read_secrets().get(provider_id, "")
+
     def list_secret_statuses(self) -> list[ProviderSecretStatus]:
         secrets = self._read_secrets()
         return [
-            ProviderSecretStatus(provider_id=profile.provider_id, configured=bool(secrets.get(profile.provider_id)))
+            ProviderSecretStatus(
+                provider_id=profile.provider_id,
+                configured=bool(secrets.get(profile.provider_id, "").strip()),
+                env_configured=bool(os.getenv(profile.env_key_name, "").strip()),
+            )
             for profile in self.list_profiles()
         ]
 
@@ -53,65 +107,6 @@ class ProviderStore:
         secrets[provider_id] = update.api_key
         write_json(self.secrets_path, secrets)
         return ProviderSecretStatus(provider_id=provider_id, configured=True)
-
-    def test_connectivity(
-        self, provider_id: str, request: ProviderConnectivityRequest
-    ) -> ProviderConnectivityResponse:
-        profiles = {item.provider_id: item for item in self.list_profiles()}
-        profile = profiles.get(provider_id)
-
-        if profile is None:
-            return ProviderConnectivityResponse(
-                provider_id=provider_id,
-                ok=False,
-                status="not_found",
-                message="Provider profile was not found.",
-            )
-
-        if not profile.enabled:
-            return ProviderConnectivityResponse(
-                provider_id=provider_id,
-                ok=False,
-                status="disabled",
-                message="Provider profile is disabled.",
-            )
-
-        parsed = urlparse(profile.base_url)
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            return ProviderConnectivityResponse(
-                provider_id=provider_id,
-                ok=False,
-                status="invalid_base_url",
-                message="Provider base_url must be an absolute http(s) URL.",
-            )
-
-        has_request_key = bool(request.api_key and request.api_key.strip())
-        has_saved_key = bool(self._read_secrets().get(provider_id, "").strip())
-        has_env_key = bool(os.getenv(profile.env_key_name, "").strip())
-        if not has_request_key and not has_saved_key and not has_env_key and profile.provider_type != "ollama":
-            return ProviderConnectivityResponse(
-                provider_id=provider_id,
-                ok=False,
-                status="missing_key",
-                message=f"No API key was supplied and {profile.env_key_name} is empty.",
-            )
-
-        if has_request_key:
-            source = "temporary input"
-        elif has_saved_key:
-            source = "saved local key"
-        else:
-            source = f"environment variable {profile.env_key_name}"
-
-        if profile.provider_type == "ollama" and not has_request_key and not has_saved_key and not has_env_key:
-            source = "local Ollama without API key"
-
-        return ProviderConnectivityResponse(
-            provider_id=provider_id,
-            ok=True,
-            status="ready",
-            message=f"Profile is ready for {profile.default_model} using {source}.",
-        )
 
     def read_secrets(self) -> dict[str, str]:
         raw = read_json(self.secrets_path, default={})

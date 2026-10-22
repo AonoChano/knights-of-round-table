@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Literal
+from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -22,7 +23,35 @@ class ProviderType(str, Enum):
     kimi = "kimi"
     minimax = "minimax"
     ollama = "ollama"
+    bailian = "bailian"
+    qianwen = "qianwen"
+    xiaomi = "xiaomi"
+    openrouter = "openrouter"
     custom = "custom"
+
+
+BillingType = Literal["pay_as_you_go", "token_plan", "coding_plan", "local", "custom"]
+ValidateStatus = Literal[
+    "valid",
+    "invalid_base_url",
+    "missing_key",
+    "unauthorized",
+    "unreachable",
+    "not_found",
+    "rejected",
+    "error",
+]
+
+
+class ManagedModel(BaseModel):
+    """One model a user added under a provider slot."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    label: str = ""
+    enabled: bool = True
+    capabilities: list[str] = Field(default_factory=list)
 
 
 class ProviderProfile(BaseModel):
@@ -37,6 +66,9 @@ class ProviderProfile(BaseModel):
     env_key_name: str
     enabled: bool = True
     capabilities: list[str] = Field(default_factory=list)
+    catalog_id: str = ""
+    billing_type: BillingType = "pay_as_you_go"
+    models: list[ManagedModel] = Field(default_factory=list)
 
 
 class ProviderProfileUpdate(BaseModel):
@@ -50,19 +82,32 @@ class ProviderProfileUpdate(BaseModel):
     env_key_name: str
     enabled: bool = True
     capabilities: list[str] = Field(default_factory=list)
+    catalog_id: str = ""
+    billing_type: BillingType = "pay_as_you_go"
+    models: list[ManagedModel] = Field(default_factory=list)
 
 
-class ProviderConnectivityRequest(BaseModel):
+class ProviderValidateRequest(BaseModel):
+    """Pre-save probe: the profile is not persisted yet, so it carries its own fields."""
+
     model_config = ConfigDict(extra="forbid")
 
+    base_url: str
+    api_style: str = "openai"
+    provider_type: ProviderType = ProviderType.custom
     api_key: str | None = Field(default=None, max_length=4096)
+    provider_id: str | None = Field(default=None, pattern=r"^[a-z0-9-]+$")
+    env_key_name: str = ""
+    models: list[str] = Field(default_factory=list)
 
 
-class ProviderConnectivityResponse(BaseModel):
-    provider_id: str
+class ProviderValidateResponse(BaseModel):
     ok: bool
-    status: Literal["ready", "disabled", "missing_key", "invalid_base_url", "not_found"]
+    status: ValidateStatus
     message: str
+    discovered_models: list[str] = Field(default_factory=list)
+    missing_models: list[str] = Field(default_factory=list)
+    latency_ms: int = 0
 
 
 class ProviderSecretUpdate(BaseModel):
@@ -72,8 +117,11 @@ class ProviderSecretUpdate(BaseModel):
 
 
 class ProviderSecretStatus(BaseModel):
+    """`configured` is the locally saved key; `env_configured` is the fallback the runtime can use."""
+
     provider_id: str
     configured: bool
+    env_configured: bool = False
 
 
 class AgentDefinition(BaseModel):
@@ -189,6 +237,8 @@ class DiscussionMessage(BaseModel):
 
 
 class ConversationRequest(BaseModel):
+    """Routing inputs for one generation; built server-side from the branch being answered."""
+
     question: str = Field(min_length=1, max_length=4000)
     level: str = Field(default="auto", pattern=r"^(off|auto|low|medium|high)$")
     conversation_id: str | None = Field(default=None)
@@ -196,25 +246,55 @@ class ConversationRequest(BaseModel):
     custom_max_rounds: int | None = Field(default=None, ge=1, le=12)
 
 
+class BranchRequest(BaseModel):
+    """One createBranch(parentNode, message) call: send, edit, or retry."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    parent_id: str | None = None
+    role: Literal["user", "assistant"]
+    content: str = ""
+    level: str = Field(default="auto", pattern=r"^(off|auto|low|medium|high)$")
+    deep_think: bool = False
+    custom_max_rounds: int | None = Field(default=None, ge=1, le=12)
+
+    @model_validator(mode="after")
+    def content_matches_role(self) -> "BranchRequest":
+        if self.role == "user" and not self.content.strip():
+            raise ValueError("a user branch needs content")
+        if self.role == "assistant" and self.content.strip():
+            raise ValueError("an assistant branch is generated, not supplied")
+        return self
+
+
+class ActivePathRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    node_id: str
+
+
 class ConversationRenameRequest(BaseModel):
     title: str = Field(min_length=1, max_length=200)
 
 
-class ConversationRound(BaseModel):
-    round_id: str
+class MessageNode(BaseModel):
+    node_id: str
+    parent_id: str | None = None
+    role: Literal["user", "assistant"]
+    content: str = ""
+    status: Literal["streaming", "complete", "error", "cancelled"] = "complete"
+    error: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
-    question: str
-    stage_summaries: list[StageSummary]
-    final_answer: FinalAnswer
+    stage_summaries: list[StageSummary] = Field(default_factory=list)
     delegation: DelegationMetadata | None = None
     discussion_messages: list[DiscussionMessage] = Field(default_factory=list)
-    status: Literal["complete", "cancelled"] = "complete"
+    active_child_id: str | None = None
 
-    @model_validator(mode="after")
-    def infer_cancelled_status_from_legacy_limitation(self) -> "ConversationRound":
-        if CANCELLED_ROUND_LIMITATION in self.final_answer.limitations:
-            self.status = "cancelled"
-        return self
+
+class MessageNodeView(MessageNode):
+    """Wire shape: children are derived from parent_id so storage has one source of truth."""
+
+    children: list[str] = Field(default_factory=list)
 
 
 class ConversationResponse(BaseModel):
@@ -223,7 +303,9 @@ class ConversationResponse(BaseModel):
     updated_at: datetime
     title: str
     expert_count: int
-    rounds: list[ConversationRound]
+    nodes: list[MessageNodeView] = Field(default_factory=list)
+    active_root_id: str | None = None
+    active_path: list[str] = Field(default_factory=list)
 
 
 class ConversationListItem(BaseModel):
@@ -258,7 +340,170 @@ class ConversationRecord(BaseModel):
     updated_at: datetime = Field(default_factory=utc_now)
     title: str
     expert_count: int
-    rounds: list[ConversationRound] = Field(default_factory=list)
+    nodes: list[MessageNode] = Field(default_factory=list)
+    active_root_id: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def upgrade_legacy_rounds(cls, data: object) -> object:
+        """Fold pre-tree stored conversations into a single linear branch."""
+        if not isinstance(data, dict) or data.get("nodes") or not data.get("rounds"):
+            return data
+        nodes: list[dict] = []
+        root_id: str | None = None
+        previous_id: str | None = None
+        for round_item in data["rounds"]:
+            if not isinstance(round_item, dict):
+                continue
+            base = str(round_item.get("round_id") or uuid4())
+            user_id, assistant_id = f"{base}-user", f"{base}-assistant"
+            limitation = (round_item.get("final_answer") or {}).get("limitations") or []
+            cancelled = round_item.get("status") == "cancelled" or CANCELLED_ROUND_LIMITATION in limitation
+            if previous_id is not None:
+                for node in nodes:
+                    if node["node_id"] == previous_id:
+                        node["active_child_id"] = user_id
+            else:
+                root_id = user_id
+            nodes.append(
+                {
+                    "node_id": user_id,
+                    "parent_id": previous_id,
+                    "role": "user",
+                    "content": str(round_item.get("question") or ""),
+                    "status": "complete",
+                    "created_at": round_item.get("created_at") or utc_now(),
+                    "active_child_id": assistant_id,
+                }
+            )
+            nodes.append(
+                {
+                    "node_id": assistant_id,
+                    "parent_id": user_id,
+                    "role": "assistant",
+                    "content": str((round_item.get("final_answer") or {}).get("body") or ""),
+                    "status": "cancelled" if cancelled else "complete",
+                    "created_at": round_item.get("created_at") or utc_now(),
+                    "stage_summaries": round_item.get("stage_summaries") or [],
+                    "delegation": round_item.get("delegation"),
+                    "discussion_messages": round_item.get("discussion_messages") or [],
+                }
+            )
+            previous_id = assistant_id
+        upgraded = {key: value for key, value in data.items() if key != "rounds"}
+        upgraded["nodes"] = nodes
+        upgraded["active_root_id"] = root_id
+        return upgraded
+
+
+class MemoryFactView(BaseModel):
+    id: str
+    scope: Literal["private", "shared"]
+    text: str
+    tags: list[str] = Field(default_factory=list)
+    confidence: float
+    importance: float
+    pinned: bool = False
+    source: str = ""
+    status: str = "active"
+    promoted_to: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class MemoryRememberRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    text: str = Field(min_length=2, max_length=600)
+    tags: list[str] = Field(default_factory=list, max_length=8)
+    scope: Literal["private", "shared"] = "private"
+    pinned: bool = False
+    confidence: float = Field(default=0.85, ge=0.0, le=1.0)
+    importance: float = Field(default=0.65, ge=0.0, le=1.0)
+
+
+class MemoryFactUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    text: str | None = Field(default=None, min_length=2, max_length=600)
+    pinned: bool | None = None
+    importance: float | None = Field(default=None, ge=0.0, le=1.0)
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    status: Literal["active", "archived"] | None = None
+
+
+class MemoryDreamRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    apply: bool = False
+    provider_id: str | None = None
+
+
+class MemoryDreamResponse(BaseModel):
+    agent: str
+    applied: bool
+    journal: str = ""
+    stats: dict[str, int] = Field(default_factory=dict)
+    added_facts: list[str] = Field(default_factory=list)
+    added_hunches: list[str] = Field(default_factory=list)
+    shared_promotions: list[str] = Field(default_factory=list)
+    rejected: list[str] = Field(default_factory=list)
+    self_narrative: str = ""
+    proposal: dict | None = None
+
+
+class MemoryStatusResponse(BaseModel):
+    agent: str
+    fact_count: int
+    shared_fact_count: int
+    episode_count: int
+    hunch_count: int
+    pending_episodes: int
+    last_dream_at: datetime | None = None
+    self_narrative: str = ""
+    preview: str = ""
+    budget_tokens: int
+    auto_dream: bool = True
+    dream_min_episodes: int = 6
+    dream_min_hours: int = 24
+
+
+class MemoryHunchView(BaseModel):
+    id: str
+    text: str
+    confidence: float
+    tags: list[str] = Field(default_factory=list)
+    status: str = "active"
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class MemoryEpisodeView(BaseModel):
+    id: str
+    question: str
+    answer_gist: str = ""
+    summaries: list[str] = Field(default_factory=list)
+    participants: list[str] = Field(default_factory=list)
+    importance: float = 0.5
+    created_at: datetime | None = None
+
+
+class MemoryDreamView(BaseModel):
+    id: str
+    created_at: datetime | None = None
+    journal: str = ""
+    stats: dict[str, int] = Field(default_factory=dict)
+
+
+class MemoryDetailResponse(BaseModel):
+    agent: str
+    self_narrative: str = ""
+    private_facts: list[MemoryFactView] = Field(default_factory=list)
+    shared_facts: list[MemoryFactView] = Field(default_factory=list)
+    hunches: list[MemoryHunchView] = Field(default_factory=list)
+    episodes: list[MemoryEpisodeView] = Field(default_factory=list)
+    dreams: list[MemoryDreamView] = Field(default_factory=list)
+    status: MemoryStatusResponse
 
 
 class HealthResponse(BaseModel):

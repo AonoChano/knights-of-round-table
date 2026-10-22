@@ -12,6 +12,7 @@ from uuid import uuid4
 from langgraph.graph import END, StateGraph
 
 from .model_client import ModelCallError, OpenAICompatibleClient
+from .providers import model_is_selected, provider_is_reachable
 from .request_router import LEVEL_MAX_ROUNDS, RouteDecision
 from .schemas import AgentDefinition, ProviderProfile
 
@@ -32,6 +33,7 @@ class DiscussionState(TypedDict):
     agents: list[dict]
     providers: list[dict]
     secrets: dict[str, str]
+    agent_contexts: dict[str, str]
 
 
 def _agent_by_role(agents: list[dict], role: str) -> list[dict]:
@@ -51,6 +53,16 @@ def _profile_for_agent(agent: dict, provider: dict) -> ProviderProfile:
     if model:
         return profile.model_copy(update={"default_model": model})
     return profile
+
+
+def _compose_system(agent: dict, agent_contexts: dict[str, str] | None) -> str:
+    base = str(agent.get("system_prompt") or "")
+    extra = str((agent_contexts or {}).get(str(agent.get("name") or ""), "")).strip()
+    return f"{base}\n\n{extra}".strip() if extra else base
+
+
+def _agent_system(agent: dict, state: DiscussionState) -> str:
+    return _compose_system(agent, state.get("agent_contexts"))
 
 
 def _call_model(
@@ -81,28 +93,132 @@ def _call_model_stream(
     yield from client.stream_chat(provider=profile, prompt=user_prompt, system_prompt=system_prompt, disable_thinking=disable_thinking)
 
 
-def _find_enabled_candidate(
+def _enabled_candidates(
     agents: list[dict],
     providers: list[dict],
     secrets: dict[str, str],
     preferred_roles: tuple[str, ...] = ("synthesizer", "expert", "summarizer", "critic"),
-) -> tuple[dict, dict] | None:
-    candidates: list[tuple[dict, dict, int]] = []
+) -> list[tuple[dict, dict]]:
+    collected: list[tuple[dict, dict, int]] = []
     for role in preferred_roles:
         for agent in agents:
             if agent.get("role") != role:
                 continue
-            provider = _provider_by_id(providers, agent.get("provider_profile", ""))
-            if not provider or not provider.get("enabled"):
+            raw_provider = _provider_by_id(providers, agent.get("provider_profile", ""))
+            if not raw_provider:
                 continue
-            has_key = bool(secrets.get(provider["provider_id"], "").strip())
-            if provider.get("api_style") == "openai" and (has_key or provider.get("provider_type") == "ollama"):
-                candidates.append((agent, provider, agent.get("priority", 0)))
-    if not candidates:
-        return None
-    candidates.sort(key=lambda item: item[2], reverse=True)
-    best = candidates[0]
-    return best[0], best[1]
+            try:
+                provider = ProviderProfile.model_validate(raw_provider)
+            except Exception:
+                continue
+            if not provider_is_reachable(provider, secrets):
+                continue
+            if not model_is_selected(provider, str(agent.get("model") or "")):
+                continue
+            collected.append((agent, raw_provider, int(agent.get("priority") or 0)))
+    collected.sort(key=lambda item: item[2], reverse=True)
+    return [(agent, provider) for agent, provider, _ in collected]
+
+
+def _clip(text: str, limit: int = 200) -> str:
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _call_first_working(
+    candidates: list[tuple[dict, dict]],
+    *,
+    user_prompt: str,
+    secrets: dict[str, str],
+    system_prompt: str | None = None,
+    agent_contexts: dict[str, str] | None = None,
+    disable_thinking: bool = False,
+) -> str:
+    """Run the first candidate that answers; one rejected key must not sink the whole reply.
+
+    ``system_prompt`` stays None for persona-driven calls so each candidate speaks as its own
+    agent; a fixed prompt is passed for machinery like the route classifier.
+    """
+    errors: list[str] = []
+    for agent, provider in candidates:
+        try:
+            return _call_model(
+                agent=agent,
+                provider=provider,
+                system_prompt=(
+                    _compose_system(agent, agent_contexts) if system_prompt is None else system_prompt
+                ),
+                user_prompt=user_prompt,
+                secrets=secrets,
+                disable_thinking=disable_thinking,
+            )
+        except ModelCallError as exc:
+            errors.append(f"{provider.get('provider_id')}: {exc}")
+    raise ModelCallError("; ".join(errors) or "no enabled provider is available")
+
+
+def _stream_first_working(
+    candidates: list[tuple[dict, dict]],
+    *,
+    user_prompt: str,
+    secrets: dict[str, str],
+    system_prompt: str | None = None,
+    agent_contexts: dict[str, str] | None = None,
+    disable_thinking: bool = False,
+) -> Iterator[str]:
+    errors: list[str] = []
+    for agent, provider in candidates:
+        started = False
+        try:
+            for chunk in _call_model_stream(
+                agent=agent,
+                provider=provider,
+                system_prompt=(
+                    _compose_system(agent, agent_contexts) if system_prompt is None else system_prompt
+                ),
+                user_prompt=user_prompt,
+                secrets=secrets,
+                disable_thinking=disable_thinking,
+            ):
+                started = True
+                yield chunk
+        except ModelCallError as exc:
+            # Only a candidate that never opened its stream is safe to replace.
+            if started:
+                raise
+            errors.append(f"{provider.get('provider_id')}: {exc}")
+            continue
+        return
+    raise ModelCallError("; ".join(errors) or "no enabled provider is available")
+
+
+async def _stream_thinking_first_working(
+    client: OpenAICompatibleClient,
+    candidates: list[tuple[dict, dict]],
+    *,
+    question: str,
+    agent_contexts: dict[str, str] | None = None,
+) -> AsyncIterator[dict[str, str]]:
+    errors: list[str] = []
+    for agent, provider in candidates:
+        profile = _profile_for_agent(agent, provider)
+        opened = False
+        try:
+            async for chunk in client.stream_model_with_thinking(
+                provider=profile,
+                prompt=question,
+                system_prompt=_compose_system(agent, agent_contexts),
+                disable_thinking=False,
+                enable_thinking=True,
+            ):
+                opened = True
+                yield chunk
+        except ModelCallError as exc:
+            if opened:
+                raise
+            errors.append(f"{provider.get('provider_id')}: {exc}")
+            continue
+        return
+    raise ModelCallError("; ".join(errors) or "no enabled provider is available")
 
 
 def _summarize_round(state: DiscussionState) -> dict:
@@ -173,7 +289,7 @@ def _summarize_round(state: DiscussionState) -> dict:
         raw = _call_model(
             agent=summarizer_agent,
             provider=provider,
-            system_prompt=summarizer_agent.get("system_prompt", ""),
+            system_prompt=_agent_system(summarizer_agent, state),
             user_prompt=summarizer_prompt,
             secrets=secrets,
             disable_thinking=True,
@@ -280,7 +396,7 @@ def _experts_think(state: DiscussionState) -> dict:
             output = _call_model(
                 agent=expert,
                 provider=provider,
-                system_prompt=expert.get("system_prompt", ""),
+                system_prompt=_agent_system(expert, state),
                 user_prompt=prompt,
                 secrets=secrets,
                 disable_thinking=True,
@@ -349,7 +465,7 @@ def _critics_review(state: DiscussionState) -> dict:
             review = _call_model(
                 agent=critic,
                 provider=provider,
-                system_prompt=critic.get("system_prompt", ""),
+                system_prompt=_agent_system(critic, state),
                 user_prompt=prompt,
                 secrets=secrets,
                 disable_thinking=True,
@@ -511,70 +627,7 @@ def _decide_continue(state: DiscussionState) -> dict:
     return {"should_continue": True}
 
 
-def _produce_final_answer(state: DiscussionState) -> dict:
-    agents = state["agents"]
-    providers = state["providers"]
-    secrets = state["secrets"]
-    question = state["question"]
-
-    candidate = _find_enabled_candidate(agents, providers, secrets)
-    if not candidate:
-        return {
-            "final_answer_text": (
-                "No enabled OpenAI-compatible provider with a saved API key is available. "
-                "Add a provider key in Settings, then try again."
-            )
-        }
-
-    agent, provider = candidate
-    transcript = "\n\n---\n\n".join(state.get("discussion_transcript", []))
-    stage_summaries = state.get("stage_summaries", [])
-
-    summary_context = ""
-    for s in stage_summaries:
-        if isinstance(s, dict):
-            summary_context += f"\n### {s.get('title', '')}\n{s.get('body', '')}"
-
-    prompt = (
-        "Answer the user's question directly. Keep the answer clear, structured, and practical. "
-        "Do not mention internal experts, orchestration, hidden reasoning, or chain-of-thought.\n\n"
-        f"User question:\n{question.strip()}"
-    )
-
-    if transcript.strip():
-        prompt += (
-            "\n\nContext from prior analysis (use this to inform your answer, "
-            "but do not reference it directly):\n"
-            f"{summary_context[-3000:]}"
-        )
-
-    try:
-        body = _call_model(
-            agent=agent,
-            provider=provider,
-            system_prompt=agent.get("system_prompt", ""),
-            user_prompt=prompt,
-            secrets=secrets,
-            disable_thinking=True,
-        )
-    except ModelCallError:
-        body = "The final response could not be generated. Please check your provider configuration."
-
-    return {"final_answer_text": body}
-
-
-def _stream_final_answer(state: DiscussionState) -> Iterator[str]:
-    agents = state["agents"]
-    providers = state["providers"]
-    secrets = state["secrets"]
-    question = state["question"]
-
-    candidate = _find_enabled_candidate(agents, providers, secrets)
-    if not candidate:
-        yield "No enabled provider available. Add a provider key in Settings."
-        return
-
-    agent, provider = candidate
+def _final_answer_prompt(state: DiscussionState) -> str:
     stage_summaries = state.get("stage_summaries", [])
     summary_context = ""
     for s in stage_summaries:
@@ -584,7 +637,7 @@ def _stream_final_answer(state: DiscussionState) -> Iterator[str]:
     prompt = (
         "Answer the user's question directly. Keep the answer clear, structured, and practical. "
         "Do not mention internal experts, orchestration, hidden reasoning, or chain-of-thought.\n\n"
-        f"User question:\n{question.strip()}"
+        f"User question:\n{state['question'].strip()}"
     )
 
     if summary_context.strip():
@@ -593,19 +646,49 @@ def _stream_final_answer(state: DiscussionState) -> Iterator[str]:
             "but do not reference it directly):\n"
             f"{summary_context[-3000:]}"
         )
+    return prompt
+
+
+def _produce_final_answer(state: DiscussionState) -> dict:
+    candidates = _enabled_candidates(state["agents"], state["providers"], state["secrets"])
+    if not candidates:
+        return {
+            "final_answer_text": (
+                "No enabled OpenAI-compatible provider with a saved API key is available. "
+                "Add a provider key in Settings, then try again."
+            )
+        }
 
     try:
-        profile = _profile_for_agent(agent, provider)
-        client = OpenAICompatibleClient(secrets)
-        for chunk in client.stream_chat(
-            provider=profile,
-            prompt=prompt,
-            system_prompt=agent.get("system_prompt", ""),
+        body = _call_first_working(
+            candidates,
+            user_prompt=_final_answer_prompt(state),
+            secrets=state["secrets"],
+            agent_contexts=state.get("agent_contexts"),
             disable_thinking=True,
-        ):
-            yield chunk
-    except ModelCallError:
-        yield "The final response could not be generated."
+        )
+    except ModelCallError as exc:
+        body = f"The final response could not be generated. Please check your provider configuration. ({_clip(str(exc))})"
+
+    return {"final_answer_text": body}
+
+
+def _stream_final_answer(state: DiscussionState) -> Iterator[str]:
+    candidates = _enabled_candidates(state["agents"], state["providers"], state["secrets"])
+    if not candidates:
+        yield "No enabled provider available. Add a provider key in Settings."
+        return
+
+    try:
+        yield from _stream_first_working(
+            candidates,
+            user_prompt=_final_answer_prompt(state),
+            secrets=state["secrets"],
+            agent_contexts=state.get("agent_contexts"),
+            disable_thinking=True,
+        )
+    except ModelCallError as exc:
+        yield f"The final response could not be generated. ({_clip(str(exc))})"
 
 
 def _parse_route_classifier_output(text: str) -> str | None:
@@ -641,16 +724,15 @@ def classify_auto_route(
 ) -> RouteDecision:
     agents_dicts = [a.model_dump(mode="json") for a in agents]
     providers_dicts = [p.model_dump(mode="json") for p in providers]
-    candidate = _find_enabled_candidate(
+    candidates = _enabled_candidates(
         agents_dicts,
         providers_dicts,
         secrets,
         preferred_roles=("synthesizer", "expert", "summarizer"),
     )
-    if not candidate:
+    if not candidates:
         return RouteDecision(kind="panel", reason_code="auto_classifier_unavailable", max_rounds=LEVEL_MAX_ROUNDS["auto"])
 
-    agent, provider = candidate
     prompt = (
         "Classify the user's latest message for a chat product that can either answer directly "
         "or run a costly multi-agent expert panel. Return exactly one JSON object: "
@@ -665,9 +747,8 @@ def classify_auto_route(
     )
 
     try:
-        raw = _call_model(
-            agent=agent,
-            provider=provider,
+        raw = _call_first_working(
+            candidates,
             system_prompt="You are a strict request router. Output only valid JSON.",
             user_prompt=prompt,
             secrets=secrets,
@@ -716,6 +797,7 @@ def run_discussion(
     providers: list[ProviderProfile],
     secrets: dict[str, str],
     max_rounds: int = 4,
+    agent_contexts: dict[str, str] | None = None,
 ) -> Iterator[dict]:
     graph = build_discussion_graph()
     compiled = graph.compile()
@@ -736,6 +818,7 @@ def run_discussion(
         "agents": agents_dicts,
         "providers": providers_dicts,
         "secrets": secrets,
+        "agent_contexts": agent_contexts or {},
     }
 
     final_text = ""
@@ -773,6 +856,7 @@ def run_direct_answer_stream(
     agents: list[AgentDefinition],
     providers: list[ProviderProfile],
     secrets: dict[str, str],
+    agent_contexts: dict[str, str] | None = None,
 ) -> Iterator[str]:
     agents_dicts = [a.model_dump(mode="json") for a in agents]
     providers_dicts = [p.model_dump(mode="json") for p in providers]
@@ -790,6 +874,7 @@ def run_direct_answer_stream(
         "agents": agents_dicts,
         "providers": providers_dicts,
         "secrets": secrets,
+        "agent_contexts": agent_contexts or {},
     }
 
     def _sse(event: str, payload: dict) -> str:
@@ -805,6 +890,7 @@ def run_discussion_stream(
     providers: list[ProviderProfile],
     secrets: dict[str, str],
     max_rounds: int = 4,
+    agent_contexts: dict[str, str] | None = None,
 ) -> Iterator[str]:
     agents_dicts = [a.model_dump(mode="json") for a in agents]
     providers_dicts = [p.model_dump(mode="json") for p in providers]
@@ -822,6 +908,7 @@ def run_discussion_stream(
         "agents": agents_dicts,
         "providers": providers_dicts,
         "secrets": secrets,
+        "agent_contexts": agent_contexts or {},
     }
 
     def _sse(event: str, payload: dict) -> str:
@@ -886,7 +973,7 @@ def run_discussion_stream(
                 for chunk in client.stream_chat(
                     provider=profile,
                     prompt=prompt,
-                    system_prompt=summarizer_agent.get("system_prompt", ""),
+                    system_prompt=_agent_system(summarizer_agent, state),
                     disable_thinking=True,
                 ):
                     streamed_text += chunk
@@ -982,6 +1069,7 @@ async def _run_summarizer_task(
     think_text: str,
     stage_index: int,
     output_queue: asyncio.Queue[str],
+    agent_context: str = "",
 ) -> None:
     """Run a sync summarizer stream in a thread executor and push SSE events
     into *output_queue*.  The task is designed to be cancellable."""
@@ -1006,7 +1094,11 @@ async def _run_summarizer_task(
             for chunk in sclient.stream_chat(
                 provider=profile,
                 prompt=prompt,
-                system_prompt=summarizer_agent.get("system_prompt", ""),
+                system_prompt=(
+                    f"{summarizer_agent.get('system_prompt', '')}\n\n{agent_context}".strip()
+                    if agent_context
+                    else summarizer_agent.get("system_prompt", "")
+                ),
                 disable_thinking=True,
             ):
                 streamed += chunk
@@ -1063,6 +1155,7 @@ async def run_solo_thinking_stream(
     agents: list[AgentDefinition],
     providers: list[ProviderProfile],
     secrets: dict[str, str],
+    agent_contexts: dict[str, str] | None = None,
 ) -> AsyncIterator[str]:
     """Async generator that streams a single model through visible summaries.
 
@@ -1075,18 +1168,16 @@ async def run_solo_thinking_stream(
     providers_dicts = [p.model_dump(mode="json") for p in providers]
 
     # -- resolve models ------------------------------------------------------
-    candidate = _find_enabled_candidate(agents_dicts, providers_dicts, secrets)
-    if not candidate:
+    candidates = _enabled_candidates(agents_dicts, providers_dicts, secrets)
+    if not candidates:
         yield _make_sse("thinking_complete", {"elapsed_ms": 0})
         yield _make_sse("final_delta", {"delta": "No enabled provider available. Add a provider key in Settings."})
         return
 
-    agent, provider = candidate
     summarizer_agent, summarizer_provider_dict = _pick_summarizer(
         agents_dicts, providers_dicts, secrets
     )
 
-    profile = _profile_for_agent(agent, provider)
     client = OpenAICompatibleClient(secrets)
 
     # -- shared state --------------------------------------------------------
@@ -1106,12 +1197,11 @@ async def run_solo_thinking_stream(
         answer_started = False
 
         try:
-            async for chunk in client.stream_model_with_thinking(
-                provider=profile,
-                prompt=question,
-                system_prompt=agent.get("system_prompt", ""),
-                disable_thinking=False,
-                enable_thinking=True,
+            async for chunk in _stream_thinking_first_working(
+                client,
+                candidates,
+                question=question,
+                agent_contexts=agent_contexts,
             ):
                 if chunk["type"] == "think":
                     think_buffer += chunk["text"]
@@ -1135,6 +1225,9 @@ async def run_solo_thinking_stream(
                                 chunk_text,
                                 current_stage,
                                 output_queue,
+                                (agent_contexts or {}).get(
+                                    str(summarizer_agent.get("name") or ""), ""
+                                ),
                             )
                         )
                         summarizer_tasks.add(task)
@@ -1170,7 +1263,7 @@ async def run_solo_thinking_stream(
                 _make_sse("thinking_complete", {"elapsed_ms": timer.elapsed_ms})
             )
             await output_queue.put(
-                _make_sse("final_delta", {"delta": f"Model error: {exc}"})
+                _make_sse("final_delta", {"delta": f"Model error: {_clip(str(exc))}"})
             )
         except Exception:
             await output_queue.put(
