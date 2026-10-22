@@ -4,7 +4,7 @@
   "packageManager": "pnpm@10.10.0",
   "scripts": {
     "dev": "node scripts/dev-stop.mjs --quiet && concurrently -n API,WEB,WARMUP -c blue,green,gray --kill-others-on-fail=false \"pnpm dev:api\" \"pnpm dev:web\" \"node scripts/dev-warmup.mjs\"",
-    "dev:api": "cd apps/api && python -m uvicorn kort_api.main:app --app-dir src --reload --reload-dir src --host 127.0.0.1 --port 8000",
+    "dev:api": "cd apps/api && ..\\..\\..\\.venv\\Scripts\\python.exe -m uvicorn kort_api.main:app --app-dir src --reload --reload-dir src --host 127.0.0.1 --port 8000",
     "dev:web": "pnpm --dir apps/web dev",
     "dev:stop": "node scripts/dev-stop.mjs",
     "dev:doctor": "node scripts/dev-stop.mjs --check",
@@ -12,5 +12,13 @@
   },
   "devDependencies": {
     "concurrently": "^9.2.1"
+  },
+  "pnpm": {
+    "overrides": {
+      "nanoid@3": "3.3.20",
+      "postcss": "8.5.31",
+      "sharp": "0.35.5",
+      "source-map-js": "1.2.2"
+    }
   }
 }

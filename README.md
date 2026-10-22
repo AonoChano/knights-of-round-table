@@ -68,10 +68,14 @@ Then open:
 ### Backend
 
 ```bash
+py -3.13 -m venv .venv
+.venv\Scripts\activate
 cd kort/apps/api
 pip install -e ".[dev]"
 python -m uvicorn kort_api.main:app --reload --port 8000
 ```
+
+`pnpm dev` uses `.venv\Scripts\python.exe` directly, so activation is only needed for manual commands.
 
 Optional `.env`:
 

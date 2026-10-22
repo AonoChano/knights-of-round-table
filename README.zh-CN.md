@@ -68,10 +68,14 @@ docker compose up --build
 ### 后端
 
 ```bash
+py -3.13 -m venv .venv
+.venv\Scripts\activate
 cd kort/apps/api
 pip install -e ".[dev]"
 python -m uvicorn kort_api.main:app --reload --port 8000
 ```
+
+`pnpm dev` 会直接使用 `.venv\Scripts\python.exe`，只有手动执行命令时才需要激活虚拟环境。
 
 可选 `.env`：
 
