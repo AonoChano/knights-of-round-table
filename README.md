@@ -45,7 +45,8 @@ Product boundary: raw expert discussion, provider reasoning content, and interna
 | Thinking UX | Collapsed thinking entry, right-side drawer, completed state, structured summary nodes |
 | Orchestration | LangGraph discussion flow with experts, critics, summarizer, synthesizer, configurable depth |
 | Request routing | Simple prompts can skip full panel orchestration |
-| Agents | File‑backed agents with role, prompt, provider profile, priority, Skill access |
+| Agents | File‑backed agents with role, prompt, persona, provider profile, priority, Skill access |
+| Memory | Per-agent episodic/semantic memory with audit-friendly dream consolidation, shared/private scopes, token-budgeted retrieval |
 | Providers | Runtime provider profiles, local key status, connectivity checks, OpenAI‑compatible calls |
 | Persistence | Only visible projections are persisted; raw hidden discussion never exposed |
 
@@ -107,7 +108,9 @@ kort/
 │   │       ├── agents.py       # Agent loader and CRUD
 │   │       ├── conversations.py # Visible conversation store and SSE service
 │   │       ├── model_client.py # OpenAI-compatible model client
+│   │       ├── memory.py       # Agent memory, retrieval and dream consolidation
 │   │       ├── orchestration.py # LangGraph runtime
+│   │       ├── prompting.py    # Persona, Skills and memory prompt assembly
 │   │       ├── providers.py    # Provider profiles and local secrets
 │   │       ├── request_router.py
 │   │       └── schemas.py      # Pydantic contracts
@@ -120,6 +123,8 @@ kort/
 │   ├── agents/                 # Agent folders and agent.yaml files
 │   ├── providers/              # Provider metadata
 │   ├── skills/                 # Global Skills
+│   ├── memory_seed/            # Shared seed facts copied on first use
+│   ├── memory/                 # Personal runtime memory (git-ignored)
 │   └── data/                   # Local runtime data
 └── docs/
     └── architecture-rules.md
@@ -189,6 +194,28 @@ priority: 20
 
 Read [How To Make A Agent](kort/runtime/agents/How%20To%20Make%20A%20Agent.md) for the file protocol.
 
+### Memory
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/api/memory` | Status for every agent |
+| `GET` | `/api/memory/{agent_name}?query=` | Counts plus a retrieval preview |
+| `GET` | `/api/memory/{agent_name}/detail` | Facts, hunches, episodes and dream journal for the settings panel |
+| `POST` | `/api/memory/{agent_name}/remember` | Save a fact (private by default, optional shared/pinned) |
+| `PATCH` | `/api/memory/{agent_name}/facts/{fact_id}` | Edit text, pin state, confidence/importance or status |
+| `DELETE` | `/api/memory/{agent_name}/facts/{fact_id}` | Archive a fact (kept on disk for audit) |
+| `POST` | `/api/memory/{agent_name}/facts/{fact_id}/promote` | Promote a private fact to shared user memory |
+| `POST` | `/api/memory/{agent_name}/dream` | Propose (`apply: false`) or apply a consolidation pass |
+
+Dream responses include a journal, per-operation stats and, for proposals, the
+strict-JSON payload the model returned. Applied dreams snapshot the agent folder
+first; raw expert transcripts are never written to memory.
+
+The web app exposes the same surface under **Settings → Memory**: pick an expert,
+inspect facts, hunches, episodes and the dream journal, add or archive memories,
+pin them, promote private facts to shared memory, and run a dream dry-run or a
+real consolidation pass.
+
 ### Conversations
 
 | Method | Path | Purpose |
@@ -219,6 +246,10 @@ Request example:
 | `creative-thinker` | expert | `deepseek-chat` |
 | `logician-main` | expert | `deepseek-chat` |
 | `critic-main` | critic | `deepseek-chat` |
+| `archivist` | expert | `deepseek-v4-flash` |
+| `dream-weaver` | expert | `deepseek-v4-flash` |
+| `field-scribe` | expert | `deepseek-v4-flash` |
+| `gardener` | critic | `deepseek-v4-flash` |
 | `summarizer-main` | summarizer | `deepseek-chat` |
 | `synthesizer-main` | synthesizer | `deepseek-chat` |
 
@@ -236,6 +267,10 @@ System agents are protected from GUI deletion or editing.
 | `final-answer-structure` | Final answer structure template |
 
 Global Skills are shared. Private agent Skills can be added under `kort/runtime/agents/{name}/skills/` and are managed through the filesystem.
+
+The four newer agents also carry a `persona.md`, `self_seed.md` and
+`memory_seed.jsonl`, plus one private Skill each. Their memory is consolidated by
+the dream cycle described in the agent guide.
 
 ## Tech Stack
 
