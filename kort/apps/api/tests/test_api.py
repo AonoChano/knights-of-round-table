@@ -1,68 +1,45 @@
 import json
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
 
 import kort_api.app as app_module
 import kort_api.orchestration as orchestration
-from kort_api.agents import AgentLoader
-from kort_api.conversations import ConversationJob, ConversationStore, VisibleConversationService
-from kort_api.providers import ProviderStore
+from kort_api.conversations import ConversationJob, ConversationStore
 from kort_api.request_router import RouteDecision, route_request
 from kort_api.schemas import (
-    CANCELLED_ROUND_LIMITATION,
     AgentDefinition,
     ConversationRecord,
     ConversationRequest,
-    ConversationRound,
+    DelegationMetadata,
     DiscussionMessage,
-    FinalAnswer,
+    MessageNode,
     ProviderProfile,
     ProviderType,
+    StageSummary,
 )
 
 
 client = TestClient(app_module.app)
 
 
-@pytest.fixture(autouse=True)
-def isolated_app_stores(tmp_path: Path) -> None:
-    """Keep API tests away from the developer's local runtime data."""
-    runtime_root = tmp_path / "runtime"
-    providers_root = tmp_path / "providers"
-    data_root = tmp_path / "data"
-    providers_root.mkdir(parents=True)
-    data_root.mkdir(parents=True)
-
-    profiles_file = providers_root / "profiles.json"
-    secrets_file = data_root / "provider-secrets.local.json"
-    conversations_path = data_root / "conversations.json"
-
-    profiles_file.write_text(
-        json.dumps(
-            [
-                {
-                    "provider_id": "deepseek",
-                    "label": "DeepSeek",
-                    "provider_type": "deepseek",
-                    "base_url": "https://api.deepseek.com",
-                    "api_style": "openai",
-                    "default_model": "deepseek-chat",
-                    "env_key_name": "DEEPSEEK_API_KEY",
-                    "enabled": True,
-                    "capabilities": ["chat", "reasoning"],
-                }
-            ],
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
+def _post_user_branch(question: str, *, conversation_id: str | None = None, **fields):
+    cid = conversation_id or f"test-{uuid4()}"
+    response = client.post(
+        f"/api/conversations/{cid}/branches",
+        json={"parent_id": None, "role": "user", "content": question, **fields},
     )
+    return response, cid
 
-    app_module.provider_store = ProviderStore(profiles_file, secrets_file)
-    app_module.agent_loader = AgentLoader(runtime_root)
-    app_module.conversation_service = VisibleConversationService(ConversationStore(conversations_path))
+
+def _node_ids(conversation_id: str) -> tuple[str, str]:
+    payload = client.get(f"/api/conversations/{conversation_id}").json()
+    user_node = next(node for node in payload["nodes"] if node["role"] == "user")
+    assistant_node = next(node for node in payload["nodes"] if node["role"] == "assistant")
+    return user_node["node_id"], assistant_node["node_id"]
+
 
 
 # ---------------------------------------------------------------------------
@@ -168,12 +145,12 @@ def test_developer_log_level_can_be_updated() -> None:
 
 
 def test_visible_conversation_payload_hides_internal_discussion() -> None:
-    response = client.post("/api/conversations/stream", json={"question": "How should I structure the MVP?", "level": "off"})
+    response, _ = _post_user_branch("How should I structure the MVP?", level="off")
 
     assert response.status_code == 200
     assert "raw_discussion" not in response.text
     assert "discussion_transcript" not in response.text
-    assert "event: conversation_complete" in response.text
+    assert "event: node_complete" in response.text
 
 
 def test_request_router_directs_simple_auto_prompt() -> None:
@@ -200,13 +177,13 @@ def test_auto_greeting_stream_uses_direct_route_without_thinking_events(monkeypa
 
     monkeypatch.setattr("kort_api.conversations.run_direct_answer_stream", fake_direct_stream)
 
-    response = client.post("/api/conversations/stream", json={"question": "你好", "level": "auto"})
+    response, _ = _post_user_branch("你好", level="auto")
     events = _event_names(response.text)
 
     assert response.status_code == 200
-    assert "conversation_start" in events
+    assert "branch_started" in events
     assert "final_delta" in events
-    assert "conversation_complete" in events
+    assert "node_complete" in events
     assert "talking_active" not in events
     assert "thinking_active" not in events
     assert "summary_start" not in events
@@ -224,12 +201,12 @@ def test_auto_small_talk_can_be_directed_by_classifier(monkeypatch) -> None:
     monkeypatch.setattr("kort_api.conversations.classify_auto_route", fake_classifier)
     monkeypatch.setattr("kort_api.conversations.run_direct_answer_stream", fake_direct_stream)
 
-    response = client.post("/api/conversations/stream", json={"question": "你今天好吗？", "level": "auto"})
+    response, _ = _post_user_branch("你今天好吗？", level="auto")
     events = _event_names(response.text)
 
     assert response.status_code == 200
     assert "final_delta" in events
-    assert "conversation_complete" in events
+    assert "node_complete" in events
     assert "talking_active" not in events
     assert "summary_complete" not in events
     assert "thinking_complete" not in events
@@ -246,7 +223,7 @@ def test_explicit_low_level_keeps_panel_route(monkeypatch) -> None:
 
     monkeypatch.setattr("kort_api.conversations.run_discussion_stream", fake_discussion_stream)
 
-    response = client.post("/api/conversations/stream", json={"question": "你好", "level": "low"})
+    response, _ = _post_user_branch("你好", level="low")
     events = _event_names(response.text)
 
     assert response.status_code == 200
@@ -270,10 +247,7 @@ def test_deep_think_off_level_uses_solo_route(monkeypatch) -> None:
     monkeypatch.setattr("kort_api.conversations.run_solo_thinking_stream", fake_solo_stream)
     monkeypatch.setattr("kort_api.conversations.run_discussion_stream", fail_discussion_stream)
 
-    response = client.post(
-        "/api/conversations/stream",
-        json={"question": "主线？", "level": "off", "deep_think": True},
-    )
+    response, _ = _post_user_branch("主线？", level="off", deep_think=True)
     events = _event_names(response.text)
 
     assert response.status_code == 200
@@ -292,10 +266,7 @@ def test_stream_persists_delegation_metadata(monkeypatch) -> None:
 
     monkeypatch.setattr("kort_api.conversations.run_direct_answer_stream", fake_direct_stream)
 
-    response = client.post(
-        "/api/conversations/stream",
-        json={"question": "Hello", "level": "off"},
-    )
+    response, _ = _post_user_branch("Hello", level="off")
 
     assert response.status_code == 200
     assert "event: delegation_complete" in response.text
@@ -309,83 +280,96 @@ def test_new_post_replaces_running_job() -> None:
     old_job = ConversationJob(conversation_id)
     app_module.conversation_service.jobs[conversation_id] = old_job
 
-    response = client.post(
-        "/api/conversations/stream",
-        json={"conversation_id": conversation_id, "question": "Hello", "level": "off"},
-    )
+    response, _ = _post_user_branch("Hello", conversation_id=conversation_id, level="off")
 
     assert response.status_code == 200
     assert old_job.cancel_requested is True
     assert app_module.conversation_service.jobs[conversation_id] is not old_job
 
 
-def test_cancel_persists_partial_round_from_cached_events() -> None:
+def _seed_cancelled_conversation(conversation_id: str) -> None:
+    service = app_module.conversation_service
+    user = MessageNode(node_id="user-1", role="user", content="Interrupted question")
+    assistant = MessageNode(
+        node_id="assistant-1",
+        parent_id="user-1",
+        role="assistant",
+        content="",
+        status="cancelled",
+    )
+    user.active_child_id = assistant.node_id
+    service.store.append(
+        ConversationRecord(
+            conversation_id=conversation_id,
+            title="Cancelled",
+            expert_count=1,
+            nodes=[user, assistant],
+            active_root_id=user.node_id,
+        )
+    )
+
+
+def test_cancel_keeps_partial_assistant_node() -> None:
     conversation_id = "cancelled-history"
     service = app_module.conversation_service
-    job = ConversationJob(conversation_id, question="Keep this as context", expert_count=1)
-    job.append(service._sse("conversation_start", {"conversation_id": conversation_id, "question": "Keep this as context"}))
-    job.append(
-        service._sse(
-            "delegation_complete",
-            {
-                "route_kind": "direct",
-                "reason_code": "off_direct",
-                "discussion_level": "off",
-                "deep_think": False,
-                "participant_count": 1,
-                "max_rounds": 0,
-                "agents": [],
-            },
+    user = MessageNode(node_id="user-1", role="user", content="Keep this as context")
+    assistant = MessageNode(
+        node_id="assistant-1",
+        parent_id="user-1",
+        role="assistant",
+        status="streaming",
+    )
+    user.active_child_id = assistant.node_id
+    service.store.append(
+        ConversationRecord(
+            conversation_id=conversation_id,
+            title="Keep this as context",
+            expert_count=1,
+            nodes=[user, assistant],
+            active_root_id=user.node_id,
         )
     )
-    job.append(
-        service._sse(
-            "summary_complete",
-            {
-                "id": "summary-a",
-                "stage": "thinking",
-                "title": "Framing",
-                "snippet": "Framing the question",
-                "details": "I am framing the question.",
-                "confidence": 0.7,
-                "tree_nodes": [],
-            },
-        )
+    job = ConversationJob(
+        conversation_id,
+        user_node_id=user.node_id,
+        assistant_node_id=assistant.node_id,
+        question=user.content,
+        expert_count=1,
     )
-    job.append(service._sse("final_delta", {"delta": "partial answer"}))
+    job.partial_body = "partial answer"
+    job.partial_summaries = [
+        StageSummary(
+            id="summary-a",
+            stage="thinking",
+            title="Framing",
+            snippet="Framing the question",
+            details="I am framing the question.",
+            confidence=0.7,
+        )
+    ]
+    job.delegation = DelegationMetadata(
+        route_kind="direct",
+        reason_code="off_direct",
+        discussion_level="off",
+        deep_think=False,
+        participant_count=1,
+    )
     service.jobs[conversation_id] = job
 
     response = client.post(f"/api/conversations/{conversation_id}/cancel")
     detail = client.get(f"/api/conversations/{conversation_id}").json()
-    round_item = detail["rounds"][0]
+    assistant_node = next(node for node in detail["nodes"] if node["role"] == "assistant")
 
     assert response.status_code == 200
     assert response.json()["cancelled"] is True
-    assert round_item["question"] == "Keep this as context"
-    assert round_item["status"] == "cancelled"
-    assert round_item["final_answer"]["body"] == "partial answer"
-    assert round_item["final_answer"]["limitations"] == [CANCELLED_ROUND_LIMITATION]
-    assert round_item["delegation"]["route_kind"] == "direct"
-    assert round_item["stage_summaries"][0]["id"] == "summary-a"
+    assert assistant_node["content"] == "partial answer"
+    assert assistant_node["status"] == "cancelled"
+    assert assistant_node["delegation"]["route_kind"] == "direct"
+    assert assistant_node["stage_summaries"][0]["id"] == "summary-a"
+    assert detail["active_path"] == [user.node_id, assistant.node_id]
 
 
-def test_legacy_cancelled_limitation_infers_round_status() -> None:
-    round_item = ConversationRound(
-        round_id="legacy-cancelled",
-        question="Interrupted question",
-        stage_summaries=[],
-        final_answer=FinalAnswer(
-            title="Partial answer",
-            body="",
-            confidence=0.5,
-            limitations=[CANCELLED_ROUND_LIMITATION],
-        ),
-    )
-
-    assert round_item.status == "cancelled"
-
-
-def test_legacy_cancelled_record_response_includes_status() -> None:
+def test_legacy_rounds_are_folded_into_a_linear_tree() -> None:
     conversation_id = "legacy-cancelled-api"
     file_path = app_module.conversation_service.store.path / f"{conversation_id}.json"
     file_path.write_text(
@@ -403,7 +387,7 @@ def test_legacy_cancelled_record_response_includes_status() -> None:
                             "title": "Partial answer",
                             "body": "",
                             "confidence": 0.5,
-                            "limitations": [CANCELLED_ROUND_LIMITATION],
+                            "limitations": ["Conversation was paused by the user."],
                         },
                         "delegation": None,
                     }
@@ -415,20 +399,20 @@ def test_legacy_cancelled_record_response_includes_status() -> None:
         encoding="utf-8",
     )
 
-    response = client.get(f"/api/conversations/{conversation_id}")
-    round_item = response.json()["rounds"][0]
+    detail = client.get(f"/api/conversations/{conversation_id}").json()
+    user_node = next(node for node in detail["nodes"] if node["role"] == "user")
+    assistant_node = next(node for node in detail["nodes"] if node["role"] == "assistant")
 
-    assert response.status_code == 200
-    assert round_item["status"] == "cancelled"
+    assert user_node["content"] == "Interrupted question"
+    assert assistant_node["status"] == "cancelled"
+    assert assistant_node["parent_id"] == user_node["node_id"]
+    assert detail["active_path"] == [user_node["node_id"], assistant_node["node_id"]]
+    assert user_node["children"] == [assistant_node["node_id"]]
 
 
-def test_cancelled_round_is_used_as_followup_context(monkeypatch) -> None:
+def test_cancelled_reply_is_used_as_followup_context(monkeypatch) -> None:
     conversation_id = "cancelled-context"
-    service = app_module.conversation_service
-    job = ConversationJob(conversation_id, question="Interrupted question", expert_count=1)
-    service.jobs[conversation_id] = job
-    client.post(f"/api/conversations/{conversation_id}/cancel")
-
+    _seed_cancelled_conversation(conversation_id)
     captured: dict[str, str] = {}
 
     def fake_direct_stream(**kwargs):
@@ -438,14 +422,141 @@ def test_cancelled_round_is_used_as_followup_context(monkeypatch) -> None:
     monkeypatch.setattr("kort_api.conversations.run_direct_answer_stream", fake_direct_stream)
 
     response = client.post(
-        "/api/conversations/stream",
-        json={"conversation_id": conversation_id, "question": "Continue from there", "level": "off"},
+        f"/api/conversations/{conversation_id}/branches",
+        json={"parent_id": "assistant-1", "role": "user", "content": "Continue from there", "level": "off"},
     )
 
     assert response.status_code == 200
     assert "User: Interrupted question" in captured["question"]
     assert "Assistant: [Response was stopped by the user.]" in captured["question"]
     assert captured["question"].endswith("User: Continue from there")
+
+
+def test_editing_user_message_keeps_original_branch(monkeypatch) -> None:
+    def fake_direct_stream(**_kwargs):
+        yield 'event: final_delta\ndata: {"delta": "edited reply"}\n\n'
+
+    monkeypatch.setattr("kort_api.conversations.run_direct_answer_stream", fake_direct_stream)
+    conversation_id = "edit-branch"
+    _, _ = _post_user_branch("Original question", conversation_id=conversation_id, level="off")
+    original_user, original_assistant = _node_ids(conversation_id)
+
+    edited = client.post(
+        f"/api/conversations/{conversation_id}/branches",
+        json={"parent_id": None, "role": "user", "content": "Edited question", "level": "off"},
+    )
+    detail = client.get(f"/api/conversations/{conversation_id}").json()
+
+    assert edited.status_code == 200
+    assert len(detail["nodes"]) == 4
+    roots = [node for node in detail["nodes"] if node["parent_id"] is None]
+    assert [node["content"] for node in roots] == ["Original question", "Edited question"]
+    assert roots[0]["active_child_id"] == original_assistant
+    assert roots[0]["children"] == [original_assistant]
+    assert original_user in [node["node_id"] for node in detail["nodes"]]
+    assert detail["active_root_id"] == roots[1]["node_id"]
+    assert detail["nodes"][-1]["content"] == "edited reply"
+
+
+def test_retry_adds_assistant_sibling_without_prior_reply_in_context(monkeypatch) -> None:
+    questions: list[str] = []
+
+    def fake_direct_stream(**kwargs):
+        questions.append(kwargs["question"])
+        yield f'event: final_delta\ndata: {json.dumps({"delta": f"reply {len(questions)}"})}\n\n'
+
+    monkeypatch.setattr("kort_api.conversations.run_direct_answer_stream", fake_direct_stream)
+    conversation_id = "retry-branch"
+    _post_user_branch("Only question", conversation_id=conversation_id, level="off")
+    user_id, first_assistant = _node_ids(conversation_id)
+
+    retry = client.post(
+        f"/api/conversations/{conversation_id}/branches",
+        json={"parent_id": user_id, "role": "assistant", "level": "off"},
+    )
+    detail = client.get(f"/api/conversations/{conversation_id}").json()
+    user_node = next(node for node in detail["nodes"] if node["node_id"] == user_id)
+
+    assert retry.status_code == 200
+    assert len(user_node["children"]) == 2
+    assert first_assistant in user_node["children"]
+    assert user_node["active_child_id"] == user_node["children"][1]
+    assert detail["active_path"] == [user_id, user_node["children"][1]]
+    assert questions[-1] == "User: Only question"
+    assert "reply 1" not in questions[-1]
+
+
+def test_selecting_a_branch_changes_the_next_context(monkeypatch) -> None:
+    def fake_direct_stream(**kwargs):
+        marker = "edited" if "Edited" in kwargs["question"].splitlines()[-1] else "original"
+        yield f'event: final_delta\ndata: {json.dumps({"delta": f"{marker} answer"})}\n\n'
+
+    monkeypatch.setattr("kort_api.conversations.run_direct_answer_stream", fake_direct_stream)
+    conversation_id = "switch-branch"
+    _post_user_branch("Original question", conversation_id=conversation_id, level="off")
+    _, original_assistant = _node_ids(conversation_id)
+    client.post(
+        f"/api/conversations/{conversation_id}/branches",
+        json={"parent_id": None, "role": "user", "content": "Edited question", "level": "off"},
+    )
+
+    switched = client.post(
+        f"/api/conversations/{conversation_id}/active-path",
+        json={"node_id": original_assistant},
+    )
+    assert switched.status_code == 200
+    assert switched.json()["active_path"][-1] == original_assistant
+
+    captured: dict[str, str] = {}
+
+    def fake_followup_stream(**kwargs):
+        captured["question"] = kwargs["question"]
+        yield 'event: final_delta\ndata: {"delta": "follow-up"}\n\n'
+
+    monkeypatch.setattr("kort_api.conversations.run_direct_answer_stream", fake_followup_stream)
+    followup = client.post(
+        f"/api/conversations/{conversation_id}/branches",
+        json={"parent_id": original_assistant, "role": "user", "content": "Follow up", "level": "off"},
+    )
+
+    assert followup.status_code == 200
+    assert "Assistant: original answer" in captured["question"]
+    assert "edited answer" not in captured["question"]
+    assert captured["question"].endswith("User: Follow up")
+
+
+def test_generation_failure_keeps_error_node_and_retry_can_replace_it(monkeypatch) -> None:
+    def failing_stream(**_kwargs):
+        raise RuntimeError("provider exploded")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr("kort_api.conversations.run_direct_answer_stream", failing_stream)
+    conversation_id = "error-branch"
+    response, _ = _post_user_branch("Will it fail?", conversation_id=conversation_id, level="off")
+    detail = client.get(f"/api/conversations/{conversation_id}").json()
+    user_id, failed_id = _node_ids(conversation_id)
+    failed = next(node for node in detail["nodes"] if node["node_id"] == failed_id)
+
+    assert response.status_code == 200
+    assert failed["status"] == "error"
+    assert "provider exploded" in failed["error"]
+
+    def working_stream(**_kwargs):
+        yield 'event: final_delta\ndata: {"delta": "recovered"}\n\n'
+
+    monkeypatch.setattr("kort_api.conversations.run_direct_answer_stream", working_stream)
+    retry = client.post(
+        f"/api/conversations/{conversation_id}/branches",
+        json={"parent_id": user_id, "role": "assistant", "level": "off"},
+    )
+    recovered = client.get(f"/api/conversations/{conversation_id}").json()
+    user_node = next(node for node in recovered["nodes"] if node["node_id"] == user_id)
+    active = next(node for node in recovered["nodes"] if node["node_id"] == recovered["active_path"][-1])
+
+    assert retry.status_code == 200
+    assert len(user_node["children"]) == 2
+    assert active["content"] == "recovered"
+    assert active["status"] == "complete"
 
 
 def test_panel_expert_and_critic_calls_disable_provider_thinking(monkeypatch) -> None:
@@ -571,19 +682,16 @@ def test_discussion_stream_emits_speaker_messages(monkeypatch) -> None:
     assert any(event.startswith("event: thinking_complete") for event in events)
 
 
-def test_stream_conversation_uses_client_supplied_conversation_id() -> None:
+def test_branch_stream_uses_client_supplied_conversation_id() -> None:
     conversation_id = "client-generated-conversation"
     response = client.post(
-        "/api/conversations/stream",
-        json={
-            "conversation_id": conversation_id,
-            "question": "Hello",
-            "level": "off",
-        },
+        f"/api/conversations/{conversation_id}/branches",
+        json={"parent_id": None, "role": "user", "content": "Hello", "level": "off"},
     )
 
     assert response.status_code == 200
     assert f'"conversation_id": "{conversation_id}"' in response.text
+    assert "event: branch_started" in response.text
 
 
 def test_conversation_store_reads_json_named_directory(tmp_path: Path) -> None:
@@ -607,38 +715,18 @@ def test_conversation_store_reads_json_named_directory(tmp_path: Path) -> None:
     assert [item.conversation_id for item in store.list_records()] == ["existing-history"]
 
 
-def test_provider_connectivity_does_not_echo_api_key() -> None:
-    response = client.post("/api/providers/deepseek/test", json={"api_key": "secret-test-key"})
-    payload = response.json()
-
-    assert response.status_code == 200
-    assert payload["provider_id"] == "deepseek"
-    assert payload["ok"] is True
-    assert payload["status"] == "ready"
-    assert "secret-test-key" not in response.text
-
-
-def test_provider_connectivity_requires_key_for_remote_provider(monkeypatch) -> None:
+def test_provider_secret_status_does_not_echo_secret(monkeypatch) -> None:
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
-    _clear_test_secret("deepseek")
-    response = client.post("/api/providers/deepseek/test", json={})
-    payload = response.json()
-
-    assert response.status_code == 200
-    assert payload["ok"] is False
-    assert payload["status"] == "missing_key"
-
-
-def test_provider_secret_status_does_not_echo_secret() -> None:
     response = client.put("/api/providers/deepseek/secret", json={"api_key": "secret-test-key"})
     payload = response.json()
 
     assert response.status_code == 200
-    assert payload == {"provider_id": "deepseek", "configured": True}
+    assert payload == {"provider_id": "deepseek", "configured": True, "env_configured": False}
     assert "secret-test-key" not in response.text
 
 
-def test_provider_secret_status_accepts_utf8_bom() -> None:
+def test_provider_secret_status_accepts_utf8_bom(monkeypatch) -> None:
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "secret-from-environment")
     app_module.provider_store.secrets_path.write_text(
         json.dumps({"deepseek": "secret-test-key"}, ensure_ascii=False, indent=2),
         encoding="utf-8-sig",
@@ -647,8 +735,21 @@ def test_provider_secret_status_accepts_utf8_bom() -> None:
     response = client.get("/api/provider-secrets")
 
     assert response.status_code == 200
-    assert response.json() == [{"provider_id": "deepseek", "configured": True}]
+    assert response.json() == [
+        {"provider_id": "deepseek", "configured": True, "env_configured": True}
+    ]
     assert "secret-test-key" not in response.text
+    assert "secret-from-environment" not in response.text
+
+
+def test_provider_secret_status_reports_env_only_key(monkeypatch) -> None:
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "secret-from-environment")
+
+    response = client.get("/api/provider-secrets")
+
+    assert response.json() == [
+        {"provider_id": "deepseek", "configured": False, "env_configured": True}
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -701,6 +802,32 @@ def test_update_agent_success() -> None:
 def test_update_agent_not_found() -> None:
     resp = client.put("/api/agents/nonexistent-agent", json={"nickname": "X"})
     assert resp.status_code == 404
+
+
+def test_system_agent_can_switch_provider() -> None:
+    _create("summarizer-main")
+
+    resp = client.put(
+        "/api/agents/summarizer-main",
+        json={"provider_profile": "kimi", "model": "kimi-k3"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["provider_profile"] == "kimi"
+    assert body["model"] == "kimi-k3"
+
+
+def test_system_agent_role_stays_locked() -> None:
+    _create("summarizer-main")
+
+    # The edit form always echoes the unchanged role, so only a real change may be refused.
+    kept = client.put("/api/agents/summarizer-main", json={"role": "expert", "nickname": "Renamed"})
+    assert kept.status_code == 200
+    assert kept.json()["nickname"] == "Renamed"
+
+    resp = client.put("/api/agents/summarizer-main", json={"role": "critic"})
+    assert resp.status_code == 409
+    assert "role" in resp.json()["detail"]
 
 
 def test_delete_agent_success() -> None:
