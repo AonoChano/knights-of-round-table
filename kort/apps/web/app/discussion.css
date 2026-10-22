@@ -442,33 +442,69 @@
   display: inline-block;
 }
 
-/* 席位条下方的回顾入口 */
-.discussion-review-row {
-  margin-top: 2px;
+/* ---------------------------------------------------- rendered speech text */
+
+/* 气泡与讨论记录里的正文按 Markdown / LaTeX 渲染，超出部分自己往下滚 */
+.discussion-bubble-text,
+.discussion-transcript-text {
+  overflow-x: hidden;
+  word-break: break-word;
 }
 
-.discussion-review-button {
-  display: inline-flex;
+.discussion-bubble-text {
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+
+.discussion-transcript-text {
+  font-size: 13px;
+  line-height: 1.6;
+  opacity: 0.85;
+}
+
+.discussion-bubble-text > :first-child,
+.discussion-transcript-text > :first-child {
+  margin-top: 0;
+}
+
+.discussion-bubble-text > :last-child,
+.discussion-transcript-text > :last-child {
+  margin-bottom: 0;
+}
+
+.discussion-shell .markdown-body pre {
+  font-size: 12px;
+  padding: 10px;
+}
+
+.discussion-shell .markdown-body .katex-display {
+  overflow-x: auto;
+  padding: 2px 0;
+}
+
+.discussion-shell[data-theme='night'] .markdown-body code {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+/* ------------------------------------------------------------ speed toggle */
+
+.discussion-speed {
+  min-width: 44px;
   height: 30px;
-  align-items: center;
-  gap: 6px;
-  border: 1px solid rgba(217, 119, 87, 0.28);
+  border: 0;
   border-radius: 999px;
-  background: rgba(217, 119, 87, 0.07);
-  color: #8a452f;
-  font-size: 12.5px;
-  font-weight: 600;
-  padding: 0 12px 0 10px;
-  transition:
-    background 180ms var(--ease-productive),
-    box-shadow 180ms var(--ease-productive),
-    transform 180ms var(--ease-productive);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.75;
+  transition: background 0.2s ease, opacity 0.2s ease;
 }
 
-.discussion-review-button:hover {
-  background: rgba(217, 119, 87, 0.14);
-  box-shadow: 0 8px 20px rgba(217, 119, 87, 0.16);
-  transform: translateY(-1px);
+.discussion-speed:hover {
+  background: rgba(128, 128, 128, 0.22);
+  opacity: 1;
 }
 
 @media (max-width: 900px) {

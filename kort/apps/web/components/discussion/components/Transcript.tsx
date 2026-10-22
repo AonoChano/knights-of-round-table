@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react';
+import { Markdown } from '../../Markdown';
 import { isAbsentUtterance } from '../lines';
 import type { DiscussionMessage, Participant } from '../types';
 
@@ -30,12 +31,22 @@ export function Transcript({
   onJump,
 }: Props) {
   const ref = useRef<HTMLDivElement>(null);
+  /** 用户往上翻记录时停止跟随，回到底部才恢复自动下滚 */
+  const pinnedToBottom = useRef(true);
   const night = theme === 'night';
   const byId = Object.fromEntries(cast.map((seat) => [seat.id, seat]));
 
   useEffect(() => {
-    ref.current?.scrollTo({ top: ref.current.scrollHeight, behavior: 'smooth' });
+    if (!pinnedToBottom.current) return;
+    const node = ref.current;
+    if (node) node.scrollTop = node.scrollHeight;
   }, [currentIndex, typedText.length, open]);
+
+  function trackScroll() {
+    const node = ref.current;
+    if (!node) return;
+    pinnedToBottom.current = node.scrollHeight - node.scrollTop - node.clientHeight < 48;
+  }
 
   return (
     <aside
@@ -52,7 +63,11 @@ export function Transcript({
           ×
         </button>
       </div>
-      <div ref={ref} className="scroll-thin flex-1 space-y-2 overflow-y-auto px-4 pb-4">
+      <div
+        ref={ref}
+        onScroll={trackScroll}
+        className="scroll-thin flex-1 space-y-2 overflow-y-auto px-4 pb-4"
+      >
         {messages.map((message, index) => {
           const seat = byId[message.speaker];
           const previous = messages[index - 1];
@@ -66,9 +81,16 @@ export function Transcript({
                   {roundLabel(message.round)}
                 </div>
               ) : null}
-              <button
+              <div
+                role="button"
+                tabIndex={0}
                 onClick={() => onJump(index)}
-                className={`w-full rounded-xl px-3 py-2.5 text-left transition-colors ${
+                onKeyDown={(event) => {
+                  if (event.key !== 'Enter' && event.key !== ' ') return;
+                  event.preventDefault();
+                  onJump(index);
+                }}
+                className={`w-full cursor-pointer rounded-xl px-3 py-2.5 text-left transition-colors ${
                   index === currentIndex
                     ? night
                       ? 'bg-amber-200/10'
@@ -91,9 +113,11 @@ export function Transcript({
                 {absent ? (
                   <p className="text-[13px] italic leading-relaxed opacity-45">{absentLabel}</p>
                 ) : (
-                  <p className="whitespace-pre-wrap text-[13px] leading-relaxed opacity-85">{text}</p>
+                  <div className="discussion-transcript-text markdown-body">
+                    <Markdown content={text} />
+                  </div>
                 )}
-              </button>
+              </div>
             </div>
           );
         })}

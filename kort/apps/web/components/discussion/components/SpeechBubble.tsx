@@ -1,11 +1,15 @@
+import { useEffect, useRef } from 'react';
+import { Markdown } from '../../Markdown';
 import type { Participant, ThemeMode } from '../types';
-import { STAGE_W } from '../layout';
+import { STAGE_H, STAGE_W } from '../layout';
 
 interface Props {
   x: number;
   y: number;
   /** 舞台缩放比；气泡反向缩放，保证座位缩小时文字依旧可读 */
   scale: number;
+  /** 舞台实际可见的像素窗口，气泡越出它就会被 overflow:hidden 裁掉 */
+  view: { width: number; height: number };
   participant: Participant;
   text: string;
   done: boolean;
@@ -14,13 +18,25 @@ interface Props {
 
 const W = 380;
 
-export function SpeechBubble({ x, y, scale, participant, text, done, theme }: Props) {
+export function SpeechBubble({ x, y, scale, view, participant, text, done, theme }: Props) {
   const halfVisual = W / 2 / scale;
-  const fits = halfVisual * 2 < STAGE_W - 32;
-  const center = fits ? Math.max(16 + halfVisual, Math.min(STAGE_W - 16 - halfVisual, x)) : STAGE_W / 2;
+  const visibleW = view.width > 0 ? Math.min(STAGE_W, view.width / scale) : STAGE_W;
+  const visibleTop = view.height > 0 ? (STAGE_H - Math.min(STAGE_H, view.height / scale)) / 2 : 0;
+  const lowEdge = (STAGE_W - visibleW) / 2 + 16 + halfVisual;
+  const highEdge = (STAGE_W + visibleW) / 2 - 16 - halfVisual;
+  const center = highEdge < lowEdge ? STAGE_W / 2 : Math.max(lowEdge, Math.min(highEdge, x));
   const visualLeft = center - halfVisual;
   const pointer = Math.max(28, Math.min(W - 28, (x - visualLeft) * scale));
   const night = theme === 'night';
+  const bodyRef = useRef<HTMLDivElement>(null);
+  // 气泡贴着座位向上长，正文超出时自己往下滚，而不是被舞台裁掉。
+  // 反向缩放会把布局高度放大 1/scale 倍，所以可用高度要按缩放后的视觉高度来算。
+  const bodyMaxHeight = Math.max(96, (y - visibleTop - 16) * scale - 88);
+
+  useEffect(() => {
+    const node = bodyRef.current;
+    if (node) node.scrollTop = node.scrollHeight;
+  }, [text]);
 
   return (
     <div
@@ -48,10 +64,14 @@ export function SpeechBubble({ x, y, scale, participant, text, done, theme }: Pr
               </span>
               <span className="truncate text-[12px] opacity-50">{participant.title}</span>
             </div>
-            <p>
-              {text}
-              {!done && <span className="caret">▍</span>}
-            </p>
+            <div
+              ref={bodyRef}
+              className="discussion-bubble-text markdown-body"
+              style={{ maxHeight: bodyMaxHeight }}
+            >
+              <Markdown content={text} />
+            </div>
+            {!done && <span className="caret">▍</span>}
             <div
               className="absolute -bottom-[11px] h-5 w-5 rotate-45"
               style={{

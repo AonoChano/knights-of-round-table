@@ -1,5 +1,6 @@
 import "./globals.css";
 import "./discussion.css";
+import "./models.css";
 import type { Metadata } from "next";
 import { ReactNode } from "react";
 

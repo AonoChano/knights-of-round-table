@@ -56,7 +56,21 @@ export const t = (locale: Locale) => {
       done: copy.thinking.done,
       complete: copy.thinking.complete,
     },
-    status: copy.status,
+    models: {
+      ...copy.models,
+      count: (count: number) => formatTemplate(copy.models.count, { count }),
+      selectedCount: (count: number) => formatTemplate(copy.models.selectedCount, { count }),
+      addedToast: (count: number) => formatTemplate(copy.models.addedToast, { count }),
+      fetchedCount: (count: number) => formatTemplate(copy.models.fetchedCount, { count }),
+      deleteBody: (model: string) => formatTemplate(copy.models.deleteBody, { model }),
+      deleteConfigBody: (config: string, count: number) =>
+        formatTemplate(copy.models.deleteConfigBody, { config, count }),
+      deleteLastModel: (provider: string) => formatTemplate(copy.models.deleteLastModel, { provider }),
+      probeFailed: (reason: string) => formatTemplate(copy.models.probeFailed, { reason }),
+      keyFromEnv: (envKey: string) => formatTemplate(copy.models.keyFromEnv, { envKey }),
+      keyKeepEnv: (envKey: string) => formatTemplate(copy.models.keyKeepEnv, { envKey }),
+      probeMissingModels: (models: string) => formatTemplate(copy.models.probeMissingModels, { models }),
+    },
     room: {
       ...copy.room,
       round: (round: number) => formatTemplate(copy.room.round, { round }),
@@ -65,10 +79,6 @@ export const t = (locale: Locale) => {
     },
     ui: {
       ...copy.ui,
-      apiKeyPlaceholderNew: (envKey: string) =>
-        formatTemplate(copy.ui.apiKeyPlaceholderNew, { envKey }),
-      configureSaveFailed: (error: string) =>
-        formatTemplate(copy.ui.configureSaveFailed, { error }),
       confirmDeleteExpert: (name: string) =>
         formatTemplate(copy.ui.confirmDeleteExpert, { name }),
       createAgentFailedHttp: (status: number) =>
@@ -93,32 +103,45 @@ export const t = (locale: Locale) => {
         formatTemplate(copy.ui.logLevelSaveFailed, { error }),
       requestTimedOut: (seconds: number) =>
         formatTemplate(copy.ui.requestTimedOut, { seconds }),
-      testFailed: (error: string) =>
-        formatTemplate(copy.ui.testFailed, { error }),
       thinkingElapsedActive: (duration: string) =>
         formatTemplate(copy.ui.thinkingElapsedActive, { duration }),
       thinkingElapsedComplete: (duration: string) =>
         formatTemplate(copy.ui.thinkingElapsedComplete, { duration }),
       updateAgentFailedHttp: (status: number) =>
         formatTemplate(copy.ui.updateAgentFailedHttp, { status }),
+      memoryActionFailed: (error: string) =>
+        formatTemplate(copy.ui.memoryActionFailed, { error }),
+      memoryDreamConfig: (state: string, episodes: number, hours: number) =>
+        formatTemplate(copy.ui.memoryDreamConfig, { state, episodes, hours }),
+      memoryDreamFailed: (error: string) =>
+        formatTemplate(copy.ui.memoryDreamFailed, { error }),
+      memoryDreamLast: (time: string) =>
+        formatTemplate(copy.ui.memoryDreamLast, { time }),
+      memoryDreamStats: (
+        facts: number,
+        updated: number,
+        hunches: number,
+        promotions: number,
+        archived: number,
+        rejected: number
+      ) =>
+        formatTemplate(copy.ui.memoryDreamStats, {
+          facts,
+          updated,
+          hunches,
+          promotions,
+          archived,
+          rejected,
+        }),
+      memoryLoadFailed: (error: string) =>
+        formatTemplate(copy.ui.memoryLoadFailed, { error }),
+      memorySaveFailed: (error: string) =>
+        formatTemplate(copy.ui.memorySaveFailed, { error }),
     },
   } as const;
 };
 
 export type T = ReturnType<typeof t>;
-
-export function localeStatusText(locale: Locale, message: string): string {
-  const dict = t(locale).status;
-  return message
-    .replace("Provider profile was not found.", dict.providerNotFound)
-    .replace("Provider profile is disabled.", dict.providerDisabled)
-    .replace("Provider base_url must be an absolute http(s) URL.", dict.providerBaseUrl)
-    .replace("No API key was supplied", dict.noApiKey)
-    .replace("Profile is ready", dict.profileReady)
-    .replace("using temporary input", dict.usingTempKey)
-    .replace("using saved local key", dict.usingSavedKey)
-    .replace("using environment variable", dict.usingEnvVar);
-}
 
 const LOCALE_KEY = "kort-locale";
 

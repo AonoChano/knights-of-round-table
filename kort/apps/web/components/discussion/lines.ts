@@ -1,32 +1,23 @@
 import type { DialogueLine, DiscussionMessage, Participant } from './types';
 
-const SENTENCE_SPLIT = /([。！？?!；;]\s*|\.\s+|\?\s+|!\s+)/;
-const MAX_SPEAK_CHARS = 168;
+const MAX_SPEAK_CHARS = 260;
+/** 只在句子或段落边界收口，避免把 Markdown 标记、公式和代码围栏截成半截 */
+const SPEAK_BREAKS = ['\n\n', '。', '！', '？', '；', '. ', '! ', '? ', '; ', '\n'];
 
-function clean(text: string): string {
-  return text
-    .replace(/```[\s\S]*?```/g, ' ')
-    .replace(/[#*_>`-]+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
+function cutAtBoundary(text: string, limit: number): string {
+  const head = text.slice(0, limit);
+  let cut = -1;
+  for (const mark of SPEAK_BREAKS) {
+    cut = Math.max(cut, head.lastIndexOf(mark) + mark.length - 1);
+  }
+  return cut > limit * 0.5 ? head.slice(0, cut + 1).trimEnd() : head;
 }
 
 /** 长分析只取开场几句，气泡负责“说出来”，完整记录留给讨论记录面板 */
 export function toSpeech(text: string): string {
-  const flat = clean(text);
-  if (!flat) return '';
+  const flat = text.trim();
   if (flat.length <= MAX_SPEAK_CHARS) return flat;
-
-  const parts = flat.split(SENTENCE_SPLIT);
-  let spoken = '';
-  for (let i = 0; i < parts.length; i += 2) {
-    const sentence = `${parts[i] ?? ''}${parts[i + 1] ?? ''}`;
-    if (!sentence.trim()) continue;
-    if ((spoken + sentence).length > MAX_SPEAK_CHARS) break;
-    spoken += sentence;
-  }
-  if (!spoken.trim()) spoken = flat.slice(0, MAX_SPEAK_CHARS);
-  return `${spoken.trim()}…`;
+  return `${cutAtBoundary(flat, MAX_SPEAK_CHARS)}…`;
 }
 
 function reactionsFor(

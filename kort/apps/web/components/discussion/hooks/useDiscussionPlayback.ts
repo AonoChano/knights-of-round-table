@@ -58,10 +58,8 @@ export function useDiscussionPlayback(lines: DialogueLine[], { participants, spe
       }, (line.absent ? 120 : holdMs(line.text.length)) / speed);
       return () => clearTimeout(timer);
     }
-    if (phase === 'end' && lines.length > 0) {
-      setIndex(0);
-      setTyped(0);
-      setPhase('typing');
+    if (phase === 'end') {
+      setPlaying(false);
     }
   }, [playing, phase, typed, index, line, lines.length, live, speed]);
 

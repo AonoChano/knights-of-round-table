@@ -1,7 +1,5 @@
 "use client";
 
-import "katex/dist/katex.min.css";
-
 import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -10,6 +8,7 @@ import {
   Bug,
   Check,
   ChevronDown,
+  ChevronLeft,
   ChevronRight,
   CircleStop,
   Copy,
@@ -21,6 +20,7 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Pencil,
+  RotateCcw,
   Save,
   SendHorizontal,
   Search,
@@ -35,30 +35,17 @@ import {
   X,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import ReactMarkdown from "react-markdown";
-import rehypeKatex from "rehype-katex";
-import remarkGfm from "remark-gfm";
-import remarkMath from "remark-math";
-import type { SimpleIcon } from "simple-icons";
-import {
-  siAnthropic,
-  siBaidu,
-  siClaude,
-  siClaudecode,
-  siDeepseek,
-  siGooglegemini,
-  siMinimax,
-  siMistralai,
-  siMoonshotai,
-  siOllama,
-  siOpenrouter,
-  siPerplexity,
-  siQwen,
-} from "simple-icons";
-import { loadLocale, saveLocale, localeStatusText, t, nextThinkingLabel, discussionLevels } from "./locale";
+import { loadLocale, saveLocale, t, nextThinkingLabel, discussionLevels } from "./locale";
+import { Markdown } from "../components/Markdown";
+import { ModelList } from "../components/models/ModelList";
+import { ProfileIcon } from "../components/models/ProviderIcon";
+import { modelsOf, pickDefaultModel } from "../components/models/managed";
+import { API_BASE } from "../components/models/api";
+import type { ProviderProfile, ProviderSecretStatus } from "../components/models/types";
 import type { DiscussionLevel, Locale } from "./locale";
 import { AgentStrip } from "../components/discussion/AgentStrip";
 import { DiscussionView } from "../components/discussion/DiscussionView";
+import { MemoryPanel } from "../components/memory/MemoryPanel";
 
 type TimerHandle = ReturnType<typeof setTimeout>;
 
@@ -79,13 +66,6 @@ type StageSummary = {
   details: string;
   confidence: number;
   tree_nodes: ThinkingTreeNode[];
-};
-
-type FinalAnswer = {
-  title: string;
-  body: string;
-  confidence: number;
-  limitations: string[];
 };
 
 type DelegatedAgent = {
@@ -111,15 +91,19 @@ type DelegationInfo = {
   convergence_score?: number | null;
 };
 
-type ConversationRound = {
-  round_id: string;
-  created_at: string;
-  question: string;
-  stage_summaries: StageSummary[];
-  final_answer: FinalAnswer;
+type MessageNode = {
+  node_id: string;
+  parent_id: string | null;
+  role: "user" | "assistant";
+  content: string;
+  status: "streaming" | "complete" | "error" | "cancelled";
+  error?: string | null;
+  created_at?: string;
+  stage_summaries?: StageSummary[];
   delegation?: DelegationInfo | null;
   discussion_messages?: DiscussionMessage[];
-  status?: "complete" | "cancelled";
+  active_child_id?: string | null;
+  children: string[];
 };
 
 type ConversationResponse = {
@@ -128,7 +112,9 @@ type ConversationResponse = {
   updated_at: string;
   title: string;
   expert_count: number;
-  rounds: ConversationRound[];
+  nodes: MessageNode[];
+  active_root_id: string | null;
+  active_path: string[];
 };
 
 type ConversationListItem = {
@@ -139,12 +125,10 @@ type ConversationListItem = {
   expert_count: number;
 };
 
-type MessagePair = {
-  question: string;
-  timeline: TimelineItem[];
-  finalBody: string;
-  delegation?: DelegationInfo | null;
-  discussion?: DiscussionMessage[];
+type BranchAttempt = {
+  parentId: string | null;
+  role: "user" | "assistant";
+  content: string;
 };
 
 type DiscussionMessage = {
@@ -156,19 +140,10 @@ type DiscussionMessage = {
   text: string;
 };
 
-type DiscussionViewTarget = { source: "live" } | { source: "pair"; pair: MessagePair };
+type DiscussionViewTarget =
+  | { source: "live" }
+  | { source: "node"; question: string; node: MessageNode };
 
-type ProviderProfile = {
-  provider_id: string;
-  label: string;
-  provider_type: string;
-  base_url: string;
-  api_style: string;
-  default_model: string;
-  env_key_name: string;
-  enabled: boolean;
-  capabilities: string[];
-};
 
 type AgentView = {
   name: string;
@@ -183,18 +158,6 @@ type AgentView = {
   priority: number;
 };
 
-type ProviderConnectivityResponse = {
-  provider_id: string;
-  ok: boolean;
-  status: "ready" | "disabled" | "missing_key" | "invalid_base_url" | "not_found";
-  message: string;
-};
-
-type ProviderSecretStatus = {
-  provider_id: string;
-  configured: boolean;
-};
-
 type LogLevel = "error" | "info" | "debug";
 
 type DeveloperDiagnostics = {
@@ -207,12 +170,13 @@ type DeveloperDiagnostics = {
   log_level: string;
 };
 
-type SettingsTab = "general" | "providers" | "experts" | "skills" | "data" | "developer";
+type SettingsTab = "general" | "providers" | "experts" | "memory" | "skills" | "data" | "developer";
 
 const settingsTabIcons: Record<SettingsTab, LucideIcon> = {
   general: SlidersHorizontal,
   providers: KeyRound,
   experts: UsersRound,
+  memory: Brain,
   skills: Wrench,
   data: Database,
   developer: Bug,
@@ -223,14 +187,6 @@ const AGENT_ROLE_OPTIONS = [
   { id: "summarizer", label: "Summarizer" },
   { id: "synthesizer", label: "Synthesizer" },
 ];
-
-type ProviderTextField =
-  | "label"
-  | "provider_type"
-  | "base_url"
-  | "api_style"
-  | "default_model"
-  | "env_key_name";
 
 type TimelineItem = {
   id: string;
@@ -253,7 +209,11 @@ type StreamSlot = {
   thinkingComplete: boolean;
   finalBody: string;
   timeline: TimelineItem[];
-  messagePairs: MessagePair[];
+  nodes: MessageNode[];
+  activeRootId: string | null;
+  streamingNodeId: string | null;
+  pendingRetryOf: string | null;
+  lastBranch: BranchAttempt | null;
   talkingActive: boolean;
   discussionLevel: DiscussionLevel;
   submittedQuestion: string | null;
@@ -372,7 +332,11 @@ function createEmptySlot(): StreamSlot {
     thinkingComplete: false,
     finalBody: "",
     timeline: [],
-    messagePairs: [],
+    nodes: [],
+    activeRootId: null,
+    streamingNodeId: null,
+    pendingRetryOf: null,
+    lastBranch: null,
     talkingActive: false,
     discussionLevel: loadDiscussionLevel(),
     submittedQuestion: null,
@@ -412,29 +376,15 @@ function dedupeTimelineItems(items: TimelineItem[]): TimelineItem[] {
   return deduped;
 }
 
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 
 const SENTENCE_BOUNDARY_RE = /[。！？…；\n]+/g;
-
-const fallbackProviders: ProviderProfile[] = [
-  {
-    provider_id: "deepseek",
-    label: "DeepSeek",
-    provider_type: "deepseek",
-    base_url: "https://api.deepseek.com",
-    api_style: "openai",
-    default_model: "deepseek-chat",
-    env_key_name: "DEEPSEEK_API_KEY",
-    enabled: true,
-    capabilities: ["chat", "reasoning"],
-  },
-];
 
 function settingsTabs(locale: Locale): Array<{ id: SettingsTab; label: string }> {
   return [
     { id: "general", label: t(locale).ui.general },
     { id: "providers", label: t(locale).ui.providers },
     { id: "experts", label: t(locale).ui.experts },
+    { id: "memory", label: t(locale).ui.memory },
     { id: "skills", label: t(locale).ui.skills },
     { id: "data", label: t(locale).ui.data },
     { id: "developer", label: t(locale).ui.developer },
@@ -669,8 +619,66 @@ function timelineFromStageSummaries(
   return items.length > 0 ? appendThinkingDoneNode(items, locale, elapsedSeconds) : [];
 }
 
-function isCancelledRound(round: ConversationRound): boolean {
-  return round.status === "cancelled";
+function activePathOf(nodes: MessageNode[], rootId: string | null): MessageNode[] {
+  const byId = new Map(nodes.map((node) => [node.node_id, node]));
+  const path: MessageNode[] = [];
+  const seen = new Set<string>();
+  let current = rootId ? byId.get(rootId) : undefined;
+  while (current && !seen.has(current.node_id)) {
+    seen.add(current.node_id);
+    path.push(current);
+    current = current.active_child_id ? byId.get(current.active_child_id) : undefined;
+  }
+  return path;
+}
+
+function activeLeafId(nodes: MessageNode[], rootId: string | null): string | null {
+  const path = activePathOf(nodes, rootId);
+  return path.length > 0 ? path[path.length - 1].node_id : null;
+}
+
+function siblingIdsOf(nodes: MessageNode[], node: MessageNode): string[] {
+  return nodes
+    .filter((item) => item.parent_id === node.parent_id && item.role === node.role)
+    .map((item) => item.node_id);
+}
+
+function upsertNode(nodes: MessageNode[], node: MessageNode): MessageNode[] {
+  const exists = nodes.some((item) => item.node_id === node.node_id);
+  const next = exists
+    ? nodes.map((item) => (item.node_id === node.node_id ? { ...item, ...node } : item))
+    : [...nodes, node];
+  return node.parent_id
+    ? next.map((item) =>
+        item.node_id === node.parent_id ? { ...item, active_child_id: node.node_id } : item
+      )
+    : next;
+}
+
+function parseMessageNode(value: unknown): MessageNode | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as Record<string, unknown>;
+  if (typeof raw.node_id !== "string" || (raw.role !== "user" && raw.role !== "assistant")) return null;
+  const status =
+    raw.status === "streaming" || raw.status === "error" || raw.status === "cancelled"
+      ? raw.status
+      : "complete";
+  return {
+    node_id: raw.node_id,
+    parent_id: typeof raw.parent_id === "string" ? raw.parent_id : null,
+    role: raw.role,
+    content: typeof raw.content === "string" ? raw.content : "",
+    status,
+    error: typeof raw.error === "string" ? raw.error : null,
+    created_at: typeof raw.created_at === "string" ? raw.created_at : undefined,
+    stage_summaries: Array.isArray(raw.stage_summaries) ? (raw.stage_summaries as StageSummary[]) : [],
+    delegation: (raw.delegation as DelegationInfo | null) ?? null,
+    discussion_messages: Array.isArray(raw.discussion_messages)
+      ? (raw.discussion_messages as DiscussionMessage[])
+      : [],
+    active_child_id: typeof raw.active_child_id === "string" ? raw.active_child_id : null,
+    children: Array.isArray(raw.children) ? raw.children.filter((item): item is string => typeof item === "string") : [],
+  };
 }
 
 function parseSseChunk(buffer: string): { events: StreamEvent[]; rest: string } {
@@ -733,11 +741,8 @@ function HomeExperience() {
   const [input, setInput] = useState("");
   const [submittedQuestion, setSubmittedQuestion] = useState<string | null>(null);
   const [conversation, setConversation] = useState<ConversationResponse | null>(null);
-  const [providers, setProviders] = useState<ProviderProfile[]>(fallbackProviders);
-  const [providerForms, setProviderForms] = useState<Record<string, ProviderProfile>>({});
-  const [providerKeys, setProviderKeys] = useState<Record<string, string>>({});
-  const [providerSecretStatus, setProviderSecretStatus] = useState<Record<string, boolean>>({});
-  const [providerStatus, setProviderStatus] = useState<Record<string, string>>({});
+  const [providers, setProviders] = useState<ProviderProfile[]>([]);
+  const [providerSecretStatus, setProviderSecretStatus] = useState<Record<string, ProviderSecretStatus>>({});
   const [agents, setAgents] = useState<AgentView[]>([]);
   const [agentsError, setAgentsError] = useState<string | null>(null);
   const [globalSkills, setGlobalSkills] = useState<string[]>([]);
@@ -756,7 +761,10 @@ function HomeExperience() {
   const [conversations, setConversations] = useState<ConversationListItem[]>([]);
   const [conversationsError, setConversationsError] = useState<string | null>(null);
   const [conversationsLoading, setConversationsLoading] = useState(true);
-  const [messagePairs, setMessagePairs] = useState<MessagePair[]>([]);
+  const [nodes, setNodes] = useState<MessageNode[]>([]);
+  const [activeRootId, setActiveRootId] = useState<string | null>(null);
+  const [streamingNodeId, setStreamingNodeId] = useState<string | null>(null);
+  const [pendingRetryOf, setPendingRetryOf] = useState<string | null>(null);
   const [currentConversationId, setCurrentConversationId] = useState<string | null>(null);
   const [pendingConvId, setPendingConvId] = useState<string | null>(null);
   const [drawerTimeline, setDrawerTimeline] = useState<TimelineItem[] | null>(null);
@@ -795,7 +803,7 @@ function HomeExperience() {
   const timelineRef = useRef<TimelineItem[]>([]);
   const finalBodyRef = useRef("");
   const discussionMessagesRef = useRef<DiscussionMessage[]>([]);
-  const messagePairsRef = useRef<MessagePair[]>([]);
+  const nodesRef = useRef<MessageNode[]>([]);
   const submittedQuestionRef = useRef<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const delegationPhaseTimerRef = useRef<TimerHandle | null>(null);
@@ -817,7 +825,10 @@ function HomeExperience() {
     setThinkingComplete(slot.thinkingComplete);
     setFinalBody(slot.finalBody);
     setTimeline(slot.timeline);
-    setMessagePairsSynced(slot.messagePairs);
+    setNodesSynced(slot.nodes);
+    setActiveRootId(slot.activeRootId);
+    setStreamingNodeId(slot.streamingNodeId);
+    setPendingRetryOf(slot.pendingRetryOf);
     setTalkingActive(slot.talkingActive);
     setDiscussionLevel(slot.discussionLevel);
     setDeepThink(slot.deepThink);
@@ -838,7 +849,10 @@ function HomeExperience() {
     slot.thinkingComplete = thinkingComplete;
     slot.finalBody = finalBody;
     slot.timeline = timeline;
-    slot.messagePairs = messagePairsRef.current;
+    slot.nodes = nodesRef.current;
+    slot.activeRootId = activeRootId;
+    slot.streamingNodeId = streamingNodeId;
+    slot.pendingRetryOf = pendingRetryOf;
     slot.talkingActive = talkingActive;
     slot.discussionLevel = discussionLevel;
     slot.deepThink = deepThink;
@@ -859,12 +873,10 @@ function HomeExperience() {
     flushStateToSlot(slot);
   }
 
-  function setMessagePairsSynced(
-    nextValue: MessagePair[] | ((current: MessagePair[]) => MessagePair[])
-  ) {
-    setMessagePairs((current) => {
+  function setNodesSynced(nextValue: MessageNode[] | ((current: MessageNode[]) => MessageNode[])) {
+    setNodes((current) => {
       const next = typeof nextValue === "function" ? nextValue(current) : nextValue;
-      messagePairsRef.current = next;
+      nodesRef.current = next;
       return next;
     });
   }
@@ -883,7 +895,10 @@ function HomeExperience() {
     setSlotVersion((v) => v + 1);
   }
 
-  function ensureSlotForSend(slotId: string, seedMessagePairs: MessagePair[] = []): StreamSlot {
+  function ensureSlotForSend(
+    slotId: string,
+    seed: { nodes: MessageNode[]; activeRootId: string | null } | null = null
+  ): StreamSlot {
     // save current slot before switching
     if (activeSlotId && activeSlotId !== slotId) {
       const cur = slotMapRef.current.get(activeSlotId);
@@ -893,7 +908,10 @@ function HomeExperience() {
     const ac = new AbortController();
     slot.abortController = ac;
     slot.loading = true;
-    slot.messagePairs = seedMessagePairs;
+    if (seed) {
+      slot.nodes = seed.nodes;
+      slot.activeRootId = seed.activeRootId;
+    }
     slotMapRef.current.set(slotId, slot);
     activeSlotIdRef.current = slotId;
     setActiveSlotId(slotId);
@@ -986,6 +1004,10 @@ function HomeExperience() {
     setDelegationInfo(null);
     setDiscussionMessages([]);
     setDiscussionView(null);
+    setNodesSynced([]);
+    setActiveRootId(null);
+    setStreamingNodeId(null);
+    setPendingRetryOf(null);
   }
 
   function fullReset() {
@@ -1003,7 +1025,10 @@ function HomeExperience() {
     });
     resetConversation();
     setSubmittedQuestion(null);
-    setMessagePairsSynced([]);
+    setNodesSynced([]);
+    setActiveRootId(null);
+    setStreamingNodeId(null);
+    setPendingRetryOf(null);
     setActiveSlotId(null);
     setCurrentConversationId(null);
     setConversation(null);
@@ -1077,8 +1102,8 @@ function HomeExperience() {
   }, [discussionMessages]);
 
   useEffect(() => {
-    messagePairsRef.current = messagePairs;
-  }, [messagePairs]);
+    nodesRef.current = nodes;
+  }, [nodes]);
 
   useEffect(() => {
     if (!loading || thinkingComplete) return;
@@ -1124,15 +1149,12 @@ function HomeExperience() {
       const response = await fetchWithTimeout(`${API_BASE}/api/providers`, {}, 6000);
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const payload = (await response.json()) as ProviderProfile[];
-      const next = payload.length ? payload : fallbackProviders;
-      setProviders(next);
-      setProviderForms(Object.fromEntries(next.map((item) => [item.provider_id, item])));
+      setProviders(payload);
     } catch (error) {
       clientLog("debug", "provider profiles load failed", {
         error: clientErrorMessage(error, t(locale).ui.backendUnavailable),
       });
-      setProviders(fallbackProviders);
-      setProviderForms(Object.fromEntries(fallbackProviders.map((item) => [item.provider_id, item])));
+      setProviders([]);
     }
   }
 
@@ -1141,7 +1163,7 @@ function HomeExperience() {
       const response = await fetchWithTimeout(`${API_BASE}/api/provider-secrets`, {}, 6000);
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const payload = (await response.json()) as ProviderSecretStatus[];
-      setProviderSecretStatus(Object.fromEntries(payload.map((item) => [item.provider_id, item.configured])));
+      setProviderSecretStatus(Object.fromEntries(payload.map((item) => [item.provider_id, item])));
     } catch (error) {
       clientLog("debug", "provider secret status load failed", {
         error: clientErrorMessage(error, t(locale).ui.backendUnavailable),
@@ -1315,7 +1337,6 @@ function HomeExperience() {
     resetConversation();
     setActiveSlotId(conversationId);
     setSlotVersion((v) => v + 1);
-    setMessagePairsSynced([]);
     setCurrentConversationId(conversationId);
     currentCidRef.current = conversationId;
     router.replace(`/?c=${conversationId}`, { scroll: false });
@@ -1341,33 +1362,26 @@ function HomeExperience() {
           setConversation(payload);
         }
       }
-      if (payload.rounds?.length) {
-        const pairs: MessagePair[] = payload.rounds.map((round) => {
-          const timelineItems = timelineFromStageSummaries(
-            round.stage_summaries,
-            locale,
-            undefined,
-            isCancelledRound(round)
-          );
-          return {
-            question: round.question,
-            timeline: timelineItems,
-            finalBody: round.final_answer.body,
-            delegation: round.delegation ?? null,
-            discussion: parseDiscussionMessages(round.discussion_messages),
-          };
-        });
-        setMessagePairsSynced(pairs);
-        const lastRound = payload.rounds[payload.rounds.length - 1];
-        const restoredMessages = parseDiscussionMessages(lastRound?.discussion_messages);
-        discussionMessagesRef.current = restoredMessages;
-        setDiscussionMessages(restoredMessages);
-        setDiscussionView(null);
-      }
+      const restoredNodes = payload.nodes ?? [];
+      setNodesSynced(restoredNodes);
+      setActiveRootId(payload.active_root_id ?? null);
+      const restoredPath = activePathOf(restoredNodes, payload.active_root_id ?? null);
+      const lastAssistant = [...restoredPath].reverse().find((node) => node.role === "assistant");
+      const restoredMessages = parseDiscussionMessages(lastAssistant?.discussion_messages);
+      discussionMessagesRef.current = restoredMessages;
+      setDiscussionMessages(restoredMessages);
+      setDiscussionView(null);
       clientLog("info", "conversation detail load completed", {
         conversationId,
-        rounds: payload.rounds.length,
+        nodes: restoredNodes.length,
       });
+      if (restoredNodes.some((node) => node.status === "streaming")) {
+        await resumeConversationStream(conversationId, {
+          nodes: restoredNodes,
+          activeRootId: payload.active_root_id ?? null,
+        });
+        return;
+      }
     } catch (error) {
       const message =
         error instanceof RequestTimeoutError
@@ -1377,10 +1391,19 @@ function HomeExperience() {
     }
   }
 
-  async function resumeConversationStream(conversationId: string): Promise<boolean> {
+  async function resumeConversationStream(
+    conversationId: string,
+    seed: { nodes: MessageNode[]; activeRootId: string | null } | null = null
+  ): Promise<boolean> {
     clearSentenceState();
-    const slot = ensureSlotForSend(conversationId);
-    const resumePlaceholder = t(locale).ui.restoreConversation;
+    const slot = ensureSlotForSend(conversationId, seed);
+    const resumableNode = seed?.nodes.find(
+      (node) => node.role === "assistant" && node.status === "streaming"
+    );
+    slot.streamingNodeId = resumableNode?.node_id ?? null;
+    slot.pendingRetryOf = null;
+    setStreamingNodeId(slot.streamingNodeId);
+    setPendingRetryOf(null);
     const resumeTitle = t(locale).ui.resumeConversation;
     const now = new Date().toISOString();
     slot.submittedQuestion = null;
@@ -1441,30 +1464,30 @@ function HomeExperience() {
             conversationId,
             event: event.event,
           });
-          if (event.event === "conversation_start") {
-            const question = String(event.data.question ?? "");
-            slot.submittedQuestion = question || null;
-            setSubmittedQuestion(question || null);
-            submittedQuestionRef.current = question || null;
-            if (question) {
+          if (event.event === "branch_started") {
+            const started = Array.isArray(event.data.nodes)
+              ? event.data.nodes.map(parseMessageNode).filter((node): node is MessageNode => node !== null)
+              : [];
+            const startedQuestion = started.find((node) => node.role === "user")?.content;
+            if (startedQuestion) {
               setConversations((prev) =>
                 prev.map((item) =>
                   item.conversation_id === conversationId
-                    ? { ...item, title: question.slice(0, 30), updated_at: new Date().toISOString() }
+                    ? { ...item, title: startedQuestion.slice(0, 30), updated_at: new Date().toISOString() }
                     : item
                 )
               );
             }
-            continue;
           }
           const slotForEvent = slotMapRef.current.get(conversationId);
+          const streamingIdBefore = slotForEvent?.streamingNodeId ?? null;
           if (slotForEvent) {
             applyEventToSlot(slotForEvent, event);
           }
           if (activeSlotIdRef.current !== conversationId) {
             const bgSlot = slotMapRef.current.get(conversationId);
             if (bgSlot) {
-              if (event.event === "conversation_complete") {
+              if (event.event === "node_complete") {
                 setUnreadConversationIds((current) => {
                   const next = new Set(current);
                   next.add(conversationId);
@@ -1474,7 +1497,10 @@ function HomeExperience() {
             }
             continue;
           }
-          handleStreamEvent(event);
+          handleStreamEvent(
+            event,
+            slotForEvent ? { streamingNodeId: streamingIdBefore, slot: slotForEvent } : undefined
+          );
         }
       }
       return true;
@@ -1573,39 +1599,34 @@ function HomeExperience() {
 
     clearSentenceState();
 
-    const cancelledTimeline = appendThinkingCancelledNode(slot.timeline, locale);
-    slot.timeline = cancelledTimeline;
-    slot.thinkingComplete = true;
-    slot.talkingActive = false;
-    slot.requestPhase = null;
-    const cancelledQuestion = slot.submittedQuestion ?? submittedQuestion;
-    let committedCancelledTurn = false;
-    if (cancelledQuestion) {
-      const cancelledPair: MessagePair = {
-        question: cancelledQuestion,
-        timeline: cancelledTimeline,
-        finalBody: slot.finalBody,
-        delegation: slot.delegationInfo,
-        discussion: slot.discussionMessages,
-      };
-      slot.messagePairs = [...slot.messagePairs, cancelledPair];
-      setMessagePairsSynced(slot.messagePairs);
-      slot.submittedQuestion = null;
-      submittedQuestionRef.current = null;
-      setSubmittedQuestion(null);
-      slot.finalBody = "";
-      setFinalBody("");
-      slot.timeline = [];
-      slot.thinkingComplete = false;
-      slot.discussionMessages = [];
-      setDiscussionMessages([]);
-      setDiscussionView(null);
-      committedCancelledTurn = true;
+    if (slot.streamingNodeId) {
+      slot.nodes = slot.nodes.map((node) =>
+        node.node_id === slot.streamingNodeId
+          ? { ...node, status: "cancelled" as const, content: slot.finalBody || node.content }
+          : node
+      );
+      setNodesSynced(slot.nodes);
     }
-    setTimeline(committedCancelledTurn ? [] : cancelledTimeline);
-    setThinkingComplete(!committedCancelledTurn);
+    slot.streamingNodeId = null;
+    slot.pendingRetryOf = null;
+    slot.submittedQuestion = null;
+    submittedQuestionRef.current = null;
+    setSubmittedQuestion(null);
+    slot.finalBody = "";
+    setFinalBody("");
+    slot.timeline = [];
+    setTimeline([]);
+    slot.thinkingComplete = false;
+    setThinkingComplete(false);
+    slot.talkingActive = false;
     setTalkingActive(false);
+    slot.requestPhase = null;
     setRequestPhase(null);
+    slot.discussionMessages = [];
+    setDiscussionMessages([]);
+    setDiscussionView(null);
+    setStreamingNodeId(null);
+    setPendingRetryOf(null);
 
     slot.loading = false;
     setLoading(false);
@@ -1621,14 +1642,24 @@ function HomeExperience() {
     setPendingConvId(null);
   }
 
-  async function sendQuestion() {
-    const question = input.trim();
-    if (!question) return;
+  function markStreamingNodeFailed(slot: StreamSlot, message: string) {
+    if (!slot.streamingNodeId) return false;
+    const failedId = slot.streamingNodeId;
+    slot.nodes = slot.nodes.map((node) =>
+      node.node_id === failedId
+        ? { ...node, status: "error" as const, error: message, content: slot.finalBody || node.content }
+        : node
+    );
+    slot.streamingNodeId = null;
+    return true;
+  }
 
+  async function runBranch(attempt: BranchAttempt) {
     const isNewConversation = !currentConversationId;
     const convId = currentConversationId ?? crypto.randomUUID();
-    let streamSlotId = convId;
-    const seedMessagePairs = isNewConversation ? [] : messagePairsRef.current;
+    const seed = isNewConversation
+      ? { nodes: [] as MessageNode[], activeRootId: null }
+      : { nodes: nodesRef.current, activeRootId };
 
     if (isNewConversation) {
       fullReset();
@@ -1641,19 +1672,25 @@ function HomeExperience() {
     clearSentenceState();
     setDrawerOpen(false);
 
-    const slot = ensureSlotForSend(convId, seedMessagePairs);
+    const slot = ensureSlotForSend(convId, seed);
+    slot.lastBranch = attempt;
+    slot.streamingNodeId = null;
+    slot.pendingRetryOf = attempt.role === "assistant" ? attempt.parentId : null;
+    setStreamingNodeId(null);
+    setPendingRetryOf(slot.pendingRetryOf);
     setCurrentConversationId(convId);
     currentCidRef.current = convId;
     router.replace(`/?c=${convId}`, { scroll: false });
-    setSubmittedQuestion(question);
-    submittedQuestionRef.current = question;
-    setInput("");
+    const liveQuestion = attempt.role === "user" ? attempt.content : null;
+    setSubmittedQuestion(liveQuestion);
+    submittedQuestionRef.current = liveQuestion;
+    if (attempt.role === "user") setInput("");
     setLoading(true);
     setStreamError(null);
 
     const controller = slot.abortController!;
     slot.streamError = null;
-    slot.submittedQuestion = question;
+    slot.submittedQuestion = liveQuestion;
     slot.discussionLevel = discussionLevel;
     slot.deepThink = discussionLevel === "off" ? deepThink : false;
     slot.requestPhase = "sent";
@@ -1665,7 +1702,7 @@ function HomeExperience() {
       setConversations((prev) => [
         {
           conversation_id: convId,
-          title: question.slice(0, 30),
+          title: attempt.content.slice(0, 30),
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
           expert_count: 0,
@@ -1677,29 +1714,34 @@ function HomeExperience() {
     }
 
     try {
-      clientLog("info", "conversation stream started", {
+      clientLog("info", "conversation branch started", {
         conversationId: convId,
         isNewConversation,
+        role: attempt.role,
         discussionLevel,
         deepThink: discussionLevel === "off" ? deepThink : false,
       });
-      const body: Record<string, string | boolean | number> = { question, level: discussionLevel };
+      const body: Record<string, string | boolean | number | null> = {
+        parent_id: attempt.parentId,
+        role: attempt.role,
+        content: attempt.role === "user" ? attempt.content : "",
+        level: discussionLevel,
+      };
       if (discussionLevel === "off") {
         body.deep_think = deepThink;
       }
       if (customMaxRounds !== null) {
         body.custom_max_rounds = customMaxRounds;
       }
-      body.conversation_id = convId;
 
-      const response = await fetch(`${API_BASE}/api/conversations/stream`, {
+      const response = await fetch(`${API_BASE}/api/conversations/${convId}/branches`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
         signal: controller.signal,
       });
 
-      clientLog("info", "conversation stream response", {
+      clientLog("info", "conversation branch response", {
         conversationId: convId,
         status: response.status,
         ok: response.ok,
@@ -1716,51 +1758,37 @@ function HomeExperience() {
 
       function streamEventHandler(message: StreamEvent) {
         clientLog("debug", "conversation stream event", {
-          conversationId: streamSlotId,
+          conversationId: convId,
           event: message.event,
         });
-        if (message.event === "conversation_start") {
-          const startedId = String(message.data.conversation_id ?? "");
-          if (startedId && startedId !== streamSlotId) {
-            const activeSlot = slotMapRef.current.get(streamSlotId);
-            if (activeSlot) {
-              slotMapRef.current.delete(streamSlotId);
-              slotMapRef.current.set(startedId, activeSlot);
-            }
-            streamSlotId = startedId;
-            activeSlotIdRef.current = startedId;
-            setActiveSlotId(startedId);
-            setPendingConvId(startedId);
-            setCurrentConversationId(startedId);
-            currentCidRef.current = startedId;
-            router.replace(`/?c=${startedId}`, { scroll: false });
-          }
-        }
-        const slotForEvent = slotMapRef.current.get(streamSlotId);
+        const slotForEvent = slotMapRef.current.get(convId);
+        const streamingIdBefore = slotForEvent?.streamingNodeId ?? null;
         if (slotForEvent) {
           applyEventToSlot(slotForEvent, message);
         }
-        if (activeSlotIdRef.current !== streamSlotId) {
+        if (activeSlotIdRef.current !== convId) {
           if (slotForEvent) {
-            if (message.event === "conversation_start") return;
             if (
               message.event === "thinking_complete" ||
-              message.event === "conversation_complete" ||
+              message.event === "node_complete" ||
               message.event === "error"
             ) {
               setSlotVersion((v) => v + 1);
             }
-            if (message.event === "conversation_complete") {
+            if (message.event === "node_complete") {
               setUnreadConversationIds((current) => {
                 const next = new Set(current);
-                next.add(streamSlotId);
+                next.add(convId);
                 return next;
               });
             }
           }
           return;
         }
-        handleStreamEvent(message);
+        handleStreamEvent(
+          message,
+          slotForEvent ? { streamingNodeId: streamingIdBefore, slot: slotForEvent } : undefined
+        );
       }
 
       while (!done) {
@@ -1783,31 +1811,112 @@ function HomeExperience() {
       }
     } catch (e: unknown) {
       if (isExpectedAbortError(e)) {
-        clientLog("info", "conversation stream aborted by user", { conversationId: streamSlotId });
+        clientLog("info", "conversation stream aborted by user", { conversationId: convId });
       } else {
         const message = clientErrorMessage(e, t(locale).ui.backendUnavailable);
-        slot.streamError = message;
-        if (activeSlotIdRef.current === streamSlotId) {
-          setStreamError(message);
+        const nodeFailed = markStreamingNodeFailed(slot, message);
+        if (!nodeFailed) slot.streamError = message;
+        if (activeSlotIdRef.current === convId) {
+          setNodesSynced(slot.nodes);
+          setStreamingNodeId(null);
+          setStreamError(nodeFailed ? null : message);
         }
         clientLog("error", "conversation stream failed", {
-          conversationId: streamSlotId,
+          conversationId: convId,
           error: message,
         });
       }
     } finally {
+      if (slot.streamingNodeId) {
+        markStreamingNodeFailed(slot, t(locale).ui.backendUnavailable);
+        if (activeSlotIdRef.current === convId) {
+          setNodesSynced(slot.nodes);
+          setStreamingNodeId(null);
+        }
+      }
       slot.loading = false;
-      if (activeSlotIdRef.current === streamSlotId) {
+      if (activeSlotIdRef.current === convId) {
         setLoading(false);
       }
       setSlotVersion((v) => v + 1);
       abortControllerRef.current = null;
-      clientLog("debug", "conversation stream settled", { conversationId: streamSlotId });
+      clientLog("debug", "conversation stream settled", { conversationId: convId });
+    }
+  }
+
+  async function sendQuestion() {
+    const question = input.trim();
+    if (!question || loading) return;
+    if (currentConversationId && !activeRootId) return;
+    await runBranch({
+      parentId: currentConversationId ? activeLeafId(nodesRef.current, activeRootId) : null,
+      role: "user",
+      content: question,
+    });
+  }
+
+  async function submitEditedMessage(node: MessageNode, content: string) {
+    const trimmed = content.trim();
+    if (!trimmed || loading) return;
+    await runBranch({ parentId: node.parent_id, role: "user", content: trimmed });
+  }
+
+  async function retryMessage(userNode: MessageNode) {
+    if (loading) return;
+    await runBranch({ parentId: userNode.node_id, role: "assistant", content: "" });
+  }
+
+  async function selectBranch(nodeId: string) {
+    const conversationId = currentConversationId;
+    if (!conversationId || loading) return;
+    const previous = nodesRef.current;
+    const previousRoot = activeRootId;
+    try {
+      const response = await fetch(`${API_BASE}/api/conversations/${conversationId}/active-path`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ node_id: nodeId }),
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const payload = (await response.json()) as ConversationResponse;
+      setNodesSynced(payload.nodes);
+      setActiveRootId(payload.active_root_id ?? null);
+      setConversation(payload);
+      const slot = slotMapRef.current.get(conversationId);
+      if (slot) {
+        slot.nodes = payload.nodes;
+        slot.activeRootId = payload.active_root_id ?? null;
+      }
+      const path = activePathOf(payload.nodes, payload.active_root_id ?? null);
+      const lastAssistant = [...path].reverse().find((node) => node.role === "assistant");
+      const messages = parseDiscussionMessages(lastAssistant?.discussion_messages);
+      discussionMessagesRef.current = messages;
+      setDiscussionMessages(messages);
+      setDiscussionView(null);
+    } catch (error) {
+      setNodesSynced(previous);
+      setActiveRootId(previousRoot);
+      clientLog("info", "branch switch failed", {
+        conversationId,
+        error: clientErrorMessage(error, t(locale).ui.backendUnavailable),
+      });
     }
   }
 
   function applyEventToSlot(slot: StreamSlot, message: StreamEvent) {
-    if (message.event === "conversation_start") {
+    if (message.event === "branch_started") {
+      const startedNodes = Array.isArray(message.data.nodes)
+        ? message.data.nodes.map(parseMessageNode).filter((node): node is MessageNode => node !== null)
+        : [];
+      for (const node of startedNodes) {
+        slot.nodes = upsertNode(slot.nodes, node);
+      }
+      if (typeof message.data.active_root_id === "string") {
+        slot.activeRootId = message.data.active_root_id;
+      }
+      slot.streamingNodeId = startedNodes.find((node) => node.role === "assistant")?.node_id ?? null;
+      slot.pendingRetryOf = null;
+      slot.submittedQuestion = null;
       slot.requestPhase = "sent";
       return;
     }
@@ -1892,16 +2001,31 @@ function HomeExperience() {
       slot.requestPhase = null;
       const delta = String(message.data.delta ?? "");
       slot.finalBody = slot.finalBody + delta;
+      if (slot.streamingNodeId) {
+        const streamingId = slot.streamingNodeId;
+        slot.nodes = slot.nodes.map((node) =>
+          node.node_id === streamingId ? { ...node, content: slot.finalBody } : node
+        );
+      }
       return;
     }
-    if (message.event === "conversation_complete") {
-      slot.finalBody = String(message.data.final_body ?? slot.finalBody);
+    if (message.event === "node_complete") {
+      const completed = parseMessageNode(message.data.node);
+      if (completed) {
+        slot.nodes = upsertNode(slot.nodes, completed);
+      }
+      if (typeof message.data.active_root_id === "string") {
+        slot.activeRootId = message.data.active_root_id;
+      }
+      slot.finalBody = "";
       slot.loading = false;
       slot.requestPhase = null;
       slot.streamError = null;
-      slot.conversation = message.data as unknown as ConversationResponse;
+      slot.streamingNodeId = null;
+      slot.pendingRetryOf = null;
+      slot.submittedQuestion = null;
+      slot.thinkingComplete = false;
       const visibleTimeline = withoutTransientTimelineItems(slot.timeline);
-      slot.thinkingComplete = visibleTimeline.length > 0;
       slot.timeline =
         visibleTimeline.length > 0 ? appendThinkingDoneNode(visibleTimeline, locale, slot.elapsed) : [];
       return;
@@ -1914,16 +2038,55 @@ function HomeExperience() {
       return;
     }
     if (message.event === "error") {
+      const errorMessage = String(
+        message.data.message ?? message.data.error ?? t(locale).ui.backendUnavailable
+      );
       slot.loading = false;
       slot.requestPhase = null;
-      slot.streamError = String(message.data.message ?? message.data.error ?? t(locale).ui.backendUnavailable);
+      if (!markStreamingNodeFailed(slot, errorMessage)) {
+        slot.streamError = errorMessage;
+      }
       return;
     }
   }
 
-  function handleStreamEvent(message: StreamEvent) {
-    if (message.event === "conversation_start") {
+  function handleStreamEvent(
+    message: StreamEvent,
+    streamContext?: { streamingNodeId: string | null; slot: StreamSlot }
+  ) {
+    if (message.event === "branch_started") {
+      const started = Array.isArray(message.data.nodes)
+        ? message.data.nodes.map(parseMessageNode).filter((node): node is MessageNode => node !== null)
+        : [];
+      if (started.length > 0) {
+        setNodesSynced((current) => started.reduce(upsertNode, current));
+      }
+      const startedRoot = typeof message.data.active_root_id === "string" ? message.data.active_root_id : null;
+      setActiveRootId(startedRoot);
+      const streamingAssistant = started.find((node) => node.role === "assistant");
+      setStreamingNodeId(streamingAssistant?.node_id ?? null);
+      setPendingRetryOf(null);
+      submittedQuestionRef.current = null;
+      setSubmittedQuestion(null);
       setRequestPhase("sent");
+      const title = typeof message.data.title === "string" ? message.data.title : "";
+      const cid = typeof message.data.conversation_id === "string" ? message.data.conversation_id : currentConversationId;
+      if (cid) {
+        setConversation((current) =>
+          current && current.conversation_id === cid
+            ? { ...current, title: title || current.title }
+            : current
+        );
+        if (title) {
+          setConversations((prev) =>
+            prev.map((item) =>
+              item.conversation_id === cid
+                ? { ...item, title, updated_at: new Date().toISOString() }
+                : item
+            )
+          );
+        }
+      }
       return;
     }
 
@@ -2106,149 +2269,105 @@ function HomeExperience() {
       return;
     }
 
-    if (message.event === "conversation_complete") {
-      const conv = message.data as unknown as ConversationResponse;
-      setConversation(conv);
+    if (message.event === "node_complete") {
+      const completed = parseMessageNode(message.data.node);
+      if (completed) {
+        setNodesSynced((current) => upsertNode(current, completed));
+      }
+      if (typeof message.data.active_root_id === "string") {
+        setActiveRootId(message.data.active_root_id);
+      }
+      const cid =
+        typeof message.data.conversation_id === "string"
+          ? message.data.conversation_id
+          : currentConversationId;
+      const completedTitle = typeof message.data.title === "string" ? message.data.title : null;
+      if (cid) {
+        setConversation((current) => {
+          const now = new Date().toISOString();
+          if (current && current.conversation_id === cid) {
+            return {
+              ...current,
+              title: completedTitle ?? current.title,
+              updated_at: now,
+            };
+          }
+          return {
+            conversation_id: cid,
+            created_at: now,
+            updated_at: now,
+            title: completedTitle ?? "",
+            expert_count: 0,
+            nodes: [],
+            active_root_id: null,
+            active_path: [],
+          };
+        });
+      }
       setStreamError(null);
       setRequestPhase(null);
-      setCurrentConversationId(conv.conversation_id);
-      const question = submittedQuestionRef.current;
       submittedQuestionRef.current = null;
       setSubmittedQuestion(null);
-      setTimeline([]);
+      setStreamingNodeId(null);
+      setPendingRetryOf(null);
+      setThinkingComplete(false);
+      setTalkingActive(false);
       setFinalBody("");
-      if (question && conv.rounds.length > 0) {
-        const lastRound = conv.rounds[conv.rounds.length - 1];
+      if (completed && completed.role === "assistant") {
         const timelineItems = timelineFromStageSummaries(
-          lastRound.stage_summaries,
+          completed.stage_summaries,
           locale,
           elapsed,
-          isCancelledRound(lastRound)
+          completed.status === "cancelled"
         );
         if (drawerOpen && drawerTimeline === null) {
           setDrawerTimeline(timelineItems);
         }
-        setMessagePairsSynced((prev) => [
-          ...prev,
-          {
-            question: lastRound.question,
-            timeline: timelineItems,
-            finalBody: lastRound.final_answer.body,
-            delegation: lastRound.delegation ?? delegationInfo,
-            discussion: parseDiscussionMessages(lastRound.discussion_messages),
-          },
-        ]);
       }
+      setTimeline([]);
       if (pendingConvId) {
         setPendingConvId(null);
       }
+      setLoading(false);
       void loadConversations();
+      return;
     }
 
     if (message.event === "error") {
+      const errorMessage = String(
+        message.data.message ?? message.data.error ?? t(locale).ui.backendUnavailable
+      );
       setLoading(false);
       setRequestPhase(null);
-      setStreamError(String(message.data.message ?? message.data.error ?? t(locale).ui.backendUnavailable));
-      return;
-    }
-  }
-
-  async function saveProvider(providerId: string) {
-    const provider = providerForms[providerId];
-    if (!provider) return;
-    const copy = t(locale).ui;
-
-    setProviderStatus((current) => ({ ...current, [providerId]: copy.savingConfig }));
-    try {
-      const response = await fetch(`${API_BASE}/api/providers/${providerId}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          label: provider.label,
-          provider_type: provider.provider_type,
-          base_url: provider.base_url,
-          api_style: provider.api_style,
-          default_model: provider.default_model,
-          env_key_name: provider.env_key_name,
-          enabled: provider.enabled,
-          capabilities: provider.capabilities,
-        }),
-      });
-
-      setProviderStatus((current) => ({
-        ...current,
-        [providerId]: response.ok ? copy.configurationSaved : copy.saveConfigFailedFields,
-      }));
-      await loadProviders();
-    } catch (error) {
-      setProviderStatus((current) => ({
-        ...current,
-        [providerId]: copy.configureSaveFailed(clientErrorMessage(error, copy.networkError)),
-      }));
-    }
-  }
-
-  async function saveProviderSecret(providerId: string) {
-    const apiKey = providerKeys[providerId];
-    const copy = t(locale).ui;
-    if (!apiKey?.trim()) {
-      setProviderStatus((current) => ({ ...current, [providerId]: copy.enterApiKeyFirst }));
-      return;
-    }
-
-    setProviderStatus((current) => ({ ...current, [providerId]: copy.savingApiKey }));
-    try {
-      const response = await fetch(`${API_BASE}/api/providers/${providerId}/secret`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ api_key: apiKey }),
-      });
-      if (response.ok) {
-        setProviderKeys((current) => ({ ...current, [providerId]: "" }));
-        setProviderSecretStatus((current) => ({ ...current, [providerId]: true }));
-        setProviderStatus((current) => ({ ...current, [providerId]: copy.apiKeySavedRuntime }));
-        return;
+      const failedId = streamContext?.streamingNodeId ?? streamingNodeId;
+      const failedNode = failedId
+        ? streamContext?.slot.nodes.find((node) => node.node_id === failedId) ?? null
+        : null;
+      if (failedNode) {
+        setNodesSynced((current) => upsertNode(current, failedNode));
+        setStreamingNodeId(null);
+        setStreamError(null);
+      } else if (failedId) {
+        setStreamingNodeId(null);
+        setStreamError(null);
+      } else {
+        setStreamError(errorMessage);
       }
-      setProviderStatus((current) => ({ ...current, [providerId]: copy.apiKeySaveFailed }));
-    } catch (error) {
-      setProviderStatus((current) => ({
-        ...current,
-        [providerId]: `${copy.apiKeySaveFailed}: ${clientErrorMessage(error, copy.networkError)}`,
-      }));
+      submittedQuestionRef.current = null;
+      setSubmittedQuestion(null);
+      return;
     }
   }
 
-  async function testProvider(providerId: string) {
-    const provider = providerForms[providerId];
-    const apiKey = providerKeys[providerId];
-    if (!provider) return;
-    const copy = t(locale).ui;
-
-    setProviderStatus((current) => ({ ...current, [providerId]: copy.testing }));
-    try {
-      const response = await fetch(`${API_BASE}/api/providers/${providerId}/test`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ api_key: apiKey || null }),
-      });
-      const payload = (await response.json().catch(() => ({ message: "" }))) as ProviderConnectivityResponse;
-      setProviderStatus((current) => ({
-        ...current,
-        [providerId]: response.ok ? localeStatusText(locale, payload.message) : copy.testFailedBackend,
-      }));
-    } catch (error) {
-      setProviderStatus((current) => ({
-        ...current,
-        [providerId]: copy.testFailed(clientErrorMessage(error, copy.backendUnavailable)),
-      }));
-    }
+  async function refreshModels() {
+    await Promise.all([loadProviders(), loadProviderSecretStatuses()]);
   }
 
   const visibleTimeline = useMemo(() => {
     return dedupeTimelineItems(timeline);
   }, [timeline]);
 
-  const hasRun = Boolean(submittedQuestion || conversation || loading || messagePairs.length > 0);
+  const hasRun = Boolean(submittedQuestion || loading || nodes.length > 0);
   const tr = t(locale);
   const hasDiscussion = discussionMessages.length > 0;
 
@@ -2263,9 +2382,9 @@ function HomeExperience() {
       };
     }
     return {
-      question: discussionView.pair.question,
-      messages: discussionView.pair.discussion ?? [],
-      agents: discussionView.pair.delegation?.agents ?? [],
+      question: discussionView.question,
+      messages: discussionView.node.discussion_messages ?? [],
+      agents: discussionView.node.delegation?.agents ?? [],
       streaming: false,
     };
   }, [
@@ -2373,7 +2492,10 @@ function HomeExperience() {
               <div className={cn("conversation-inner", !hasRun && "conversation-empty")}>
                 {hasRun ? (
                   <ConversationView
-                    conversation={conversation}
+                    nodes={nodes}
+                    activeRootId={activeRootId}
+                    streamingNodeId={streamingNodeId}
+                    pendingRetryOf={pendingRetryOf}
                     loading={loading}
                     thinkingComplete={thinkingComplete}
                     elapsed={elapsed}
@@ -2381,7 +2503,6 @@ function HomeExperience() {
                     timeline={visibleTimeline}
                     finalBody={finalBody}
                     streamError={streamError}
-                    messagePairs={messagePairs}
                     requestPhase={requestPhase}
                     delegationInfo={delegationInfo}
                     locale={locale}
@@ -2390,9 +2511,21 @@ function HomeExperience() {
                     onOpenLiveDiscussion={
                       hasDiscussion ? () => setDiscussionView({ source: "live" }) : undefined
                     }
-                    onOpenPairDiscussion={(pair) => setDiscussionView({ source: "pair", pair })}
-                    onViewPairThinking={(pair) => {
-                      setDrawerTimeline(pair.timeline);
+                    onEditMessage={(node, content) => void submitEditedMessage(node, content)}
+                    onRetryMessage={(userNode) => void retryMessage(userNode)}
+                    onSelectBranch={(nodeId) => void selectBranch(nodeId)}
+                    onOpenNodeDiscussion={(nodeQuestion, node) =>
+                      setDiscussionView({ source: "node", question: nodeQuestion, node })
+                    }
+                    onViewNodeThinking={(node) => {
+                      setDrawerTimeline(
+                        timelineFromStageSummaries(
+                          node.stage_summaries,
+                          locale,
+                          elapsed,
+                          node.status === "cancelled"
+                        )
+                      );
                       setDrawerOpen(true);
                     }}
                   />
@@ -2416,7 +2549,7 @@ function HomeExperience() {
 
             {hasRun ? (
               <div className="composer-dock">
-                {hasDiscussion ? (
+                {hasDiscussion && loading ? (
                   <div className="discussion-cta-row">
                     <button
                       type="button"
@@ -2424,7 +2557,7 @@ function HomeExperience() {
                       onClick={() => setDiscussionView({ source: "live" })}
                     >
                       <UsersRound size={14} aria-hidden="true" />
-                      <span>{loading ? tr.room.watchLive : tr.room.openRoom}</span>
+                      <span>{tr.room.watchLive}</span>
                       <span className="discussion-cta-count">{discussionMessages.length}</span>
                     </button>
                   </div>
@@ -2465,10 +2598,7 @@ function HomeExperience() {
           agentsError={agentsError}
           globalSkills={globalSkills}
           providers={providers}
-          providerForms={providerForms}
-          providerKeys={providerKeys}
-          providerSecretStatus={providerSecretStatus}
-          providerStatus={providerStatus}
+          secretStatus={providerSecretStatus}
           settingsTab={settingsTab}
           locale={locale}
           developerMode={developerMode}
@@ -2478,13 +2608,9 @@ function HomeExperience() {
           setLocale={setLocale}
           setDeveloperMode={setDeveloperMode}
           setLogLevel={setLogLevel}
-          setProviderForms={setProviderForms}
-          setProviderKeys={setProviderKeys}
           setSettingsOpen={setSettingsOpen}
           setSettingsTab={setSettingsTab}
-          saveProvider={saveProvider}
-          saveProviderSecret={saveProviderSecret}
-          testProvider={testProvider}
+          onModelsChanged={refreshModels}
           refreshDeveloperDiagnostics={() => void loadDeveloperDiagnostics()}
           onAddExpert={() => {
             setExpertModalMode("create");
@@ -2512,7 +2638,9 @@ function HomeExperience() {
             if (expertModalMode === "create") {
               await createAgent(data);
             } else if (editingAgent) {
-              await updateAgent(editingAgent.name, data as Record<string, unknown>);
+              // The PUT contract takes identity from the path, so `name` is not an updatable field.
+              const { name: agentName, ...updates } = data;
+              await updateAgent(agentName, updates);
             }
           }}
         />
@@ -2884,7 +3012,10 @@ function waitingStatusText(
 }
 
 function ConversationView({
-  conversation,
+  nodes,
+  activeRootId,
+  streamingNodeId,
+  pendingRetryOf,
   loading,
   thinkingComplete,
   elapsed,
@@ -2892,17 +3023,22 @@ function ConversationView({
   timeline,
   finalBody,
   streamError,
-  messagePairs,
   requestPhase,
   delegationInfo,
   locale,
   liveDiscussion,
   onToggleThinking,
   onOpenLiveDiscussion,
-  onOpenPairDiscussion,
-  onViewPairThinking,
+  onEditMessage,
+  onRetryMessage,
+  onSelectBranch,
+  onOpenNodeDiscussion,
+  onViewNodeThinking,
 }: {
-  conversation: ConversationResponse | null;
+  nodes: MessageNode[];
+  activeRootId: string | null;
+  streamingNodeId: string | null;
+  pendingRetryOf: string | null;
   loading: boolean;
   thinkingComplete: boolean;
   elapsed: number;
@@ -2910,53 +3046,112 @@ function ConversationView({
   timeline: TimelineItem[];
   finalBody: string;
   streamError: string | null;
-  messagePairs: MessagePair[];
   requestPhase: StreamSlot["requestPhase"];
   delegationInfo: DelegationInfo | null;
   locale: Locale;
   liveDiscussion: DiscussionMessage[];
   onToggleThinking: () => void;
   onOpenLiveDiscussion?: () => void;
-  onOpenPairDiscussion: (pair: MessagePair) => void;
-  onViewPairThinking: (pair: MessagePair) => void;
+  onEditMessage: (node: MessageNode, content: string) => void;
+  onRetryMessage: (userNode: MessageNode) => void;
+  onSelectBranch: (nodeId: string) => void;
+  onOpenNodeDiscussion: (question: string, node: MessageNode) => void;
+  onViewNodeThinking: (node: MessageNode) => void;
 }) {
   const tr = t(locale);
+  const copy = tr.ui;
+  const path = activePathOf(nodes, activeRootId);
+  const liveNodeId =
+    streamingNodeId ??
+    path.find((node) => node.role === "assistant" && node.status === "streaming")?.node_id ??
+    null;
+  const [editingNodeId, setEditingNodeId] = useState<string | null>(null);
+  const [editDraft, setEditDraft] = useState("");
+  const editRef = useRef<HTMLTextAreaElement>(null);
 
-  function renderTurn(pair: MessagePair, idx: number) {
-    const cleanBody = markdownBody(pair.finalBody) || pair.finalBody;
-    const hasTimeline = pair.timeline.length > 0;
-    const wasCancelled = hasTimeline && !cleanBody;
-    const pairDiscussion = pair.discussion ?? [];
-    return (
-      <div key={`turn-${idx}`} className="conversation-stack">
-        <div className="user-message">{pair.question}</div>
-        <div className="assistant-row">
-          <div className="assistant-content">
-            {hasTimeline ? (
-              <button className="thinking-block" onClick={() => onViewPairThinking(pair)} type="button">
-                <span className="thinking-title">
-                  {pair.timeline[pair.timeline.length - 1]?.title ?? tr.thinking.complete}
-                </span>
-                <ChevronRight className="thinking-chevron" size={14} aria-hidden="true" />
-              </button>
-            ) : null}
-            {cleanBody ? (
-              <>
-                <div className="answer-body markdown-body mt-2">
-                  <Markdown content={cleanBody} />
-                </div>
-                <MessageActions
-                  body={cleanBody}
-                  locale={locale}
-                  delegation={pair.delegation ?? null}
-                  discussion={pairDiscussion}
-                  onReview={pairDiscussion.length > 0 ? () => onOpenPairDiscussion(pair) : undefined}
-                />
-              </>
-            ) : wasCancelled ? (
-              <div className="cancelled-badge mt-2 text-xs text-muted">{tr.ui.cancelled}</div>
-            ) : null}
+  useEffect(() => {
+    if (!editingNodeId) return;
+    const textarea = editRef.current;
+    if (!textarea) return;
+    textarea.focus();
+    textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+  }, [editingNodeId]);
+
+  function startEditing(node: MessageNode) {
+    setEditingNodeId(node.node_id);
+    setEditDraft(node.content);
+  }
+
+  function cancelEditing() {
+    setEditingNodeId(null);
+    setEditDraft("");
+  }
+
+  function submitEditing(node: MessageNode) {
+    const content = editDraft.trim();
+    if (!content) return;
+    cancelEditing();
+    onEditMessage(node, content);
+  }
+
+  function renderBranchNav(node: MessageNode) {
+    if (loading) return null;
+    const ids = siblingIdsOf(nodes, node);
+    if (ids.length < 2) return null;
+    return <BranchNav ids={ids} activeId={node.node_id} locale={locale} onSelect={onSelectBranch} />;
+  }
+
+  function renderUserMessage(node: MessageNode) {
+    if (editingNodeId === node.node_id) {
+      return (
+        <div className="message-editor" key={`editor-${node.node_id}`}>
+          <textarea
+            ref={editRef}
+            className="message-editor-input"
+            value={editDraft}
+            rows={3}
+            onChange={(event) => setEditDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
+                submitEditing(node);
+              }
+              if (event.key === "Escape") cancelEditing();
+            }}
+          />
+          <div className="message-editor-actions">
+            <span className="message-editor-hint">{copy.editMessage}</span>
+            <button className="small-button" type="button" onClick={cancelEditing}>
+              {copy.cancel}
+            </button>
+            <button
+              className="small-button small-button-primary"
+              type="button"
+              disabled={!editDraft.trim()}
+              onClick={() => submitEditing(node)}
+            >
+              {copy.send}
+            </button>
           </div>
+        </div>
+      );
+    }
+    return (
+      <div className="user-message-row" key={`user-${node.node_id}`}>
+        <div className="user-message">{node.content}</div>
+        <div className="user-message-actions">
+          {renderBranchNav(node)}
+          {!loading ? (
+            <button
+              className="message-edit-button"
+              type="button"
+              title={copy.edit}
+              aria-label={copy.edit}
+              onClick={() => startEditing(node)}
+            >
+              <Pencil size={13} aria-hidden="true" />
+            </button>
+          ) : null}
         </div>
       </div>
     );
@@ -2971,77 +3166,239 @@ function ConversationView({
   const lastCompleteTitle = [...timeline].reverse().find(
     (item) => item.status === "complete"
   )?.title;
-  const hasLiveTimelineItems = timeline.some(
-    (item) => item.status === "active" || item.status === "talking" || item.status === "streaming"
-  );
-  const isHistoryView = Boolean(conversation && !loading && !hasLiveTimelineItems);
   const isDone = thinkingComplete || statusItem?.status === "done";
-  const showPreview = !isDone && latest && latest.body.trim();
-  const showCurrentTurn = !isHistoryView && (question || timeline.length > 0 || finalBody || streamError);
-  const showWaitingState = loading && Boolean(question) && !finalBody && !streamError && (timeline.length === 0 || requestPhase !== null);
   const previewTitle = isDone
     ? statusItem?.title ?? thinkingElapsedLabel(locale, elapsed, true)
     : statusItem?.title ?? lastCompleteTitle ?? latest?.title ?? tr.thinking.active;
-  const previewBody = latest ? markdownBody(latest.body) : "";
+
+  function renderLiveAssistant() {
+    const showPreview = !isDone && latest && latest.body.trim();
+    const showWaitingState =
+      loading && !finalBody && !streamError && (timeline.length === 0 || requestPhase !== null);
+    const previewBody = latest ? markdownBody(latest.body) : "";
+    return (
+      <div className="assistant-row" key="assistant-live">
+        <div className="assistant-content">
+          {timeline.length > 0 ? (
+            <button
+              className={cn("thinking-block", !isDone && "thinking-block-active")}
+              onClick={onToggleThinking}
+              type="button"
+            >
+              <span className={cn("thinking-title", !isDone && "thinking-title-active")}>
+                {previewTitle}
+              </span>
+              <ChevronRight className="thinking-chevron" size={14} aria-hidden="true" />
+            </button>
+          ) : null}
+
+          {showWaitingState ? (
+            <div className="assistant-waiting" role="status" aria-live="polite">
+              <BrailleSpinner />
+              <span>{waitingStatusText(locale, requestPhase, delegationInfo)}</span>
+            </div>
+          ) : null}
+
+          {streamError ? (
+            <div className="assistant-error" role="status" aria-live="polite">
+              <span>{tr.ui.sendFailed}</span>
+              <span className="assistant-error-detail">{streamError}</span>
+            </div>
+          ) : null}
+
+          {showPreview && previewBody ? (
+            <div className="thinking-preview markdown-body">
+              <Markdown content={truncateWords(previewBody, 20)} />
+            </div>
+          ) : null}
+
+          {finalBody ? (
+            <>
+              <div className="answer-body markdown-body">
+                <Markdown content={finalBody} />
+              </div>
+              <MessageActions
+                body={finalBody}
+                locale={locale}
+                delegation={delegationInfo}
+                discussion={liveDiscussion}
+                openLabel={loading ? tr.room.watchLive : tr.room.review}
+                onOpenDiscussion={liveDiscussion.length > 0 ? onOpenLiveDiscussion : undefined}
+              />
+            </>
+          ) : null}
+        </div>
+      </div>
+    );
+  }
+
+  function renderStoredAssistant(node: MessageNode, user: MessageNode | null) {
+    if (node.node_id === liveNodeId) {
+      return renderLiveAssistant();
+    }
+    const body = markdownBody(node.content) || node.content;
+    const nodeTimeline = timelineFromStageSummaries(
+      node.stage_summaries,
+      locale,
+      elapsed,
+      node.status === "cancelled"
+    );
+    const discussion = node.discussion_messages ?? [];
+    const failed = node.status === "error";
+    return (
+      <div className="assistant-row" key={`assistant-${node.node_id}`}>
+        <div className="assistant-content">
+          {nodeTimeline.length > 0 ? (
+            <button className="thinking-block" onClick={() => onViewNodeThinking(node)} type="button">
+              <span className="thinking-title">
+                {nodeTimeline[nodeTimeline.length - 1]?.title ?? tr.thinking.complete}
+              </span>
+              <ChevronRight className="thinking-chevron" size={14} aria-hidden="true" />
+            </button>
+          ) : null}
+          {body ? (
+            <div className="answer-body markdown-body">
+              <Markdown content={body} />
+            </div>
+          ) : null}
+          {failed ? (
+            <div className="assistant-error" role="status" aria-live="polite">
+              <span>{copy.generationFailed}</span>
+              {node.error ? <span className="assistant-error-detail">{node.error}</span> : null}
+            </div>
+          ) : null}
+          {body || failed || node.status === "cancelled" ? (
+            <MessageActions
+              body={body}
+              locale={locale}
+              delegation={node.delegation ?? null}
+              discussion={discussion}
+              openLabel={tr.room.review}
+              onOpenDiscussion={
+                discussion.length > 0 ? () => onOpenNodeDiscussion(user?.content ?? "", node) : undefined
+              }
+              onRetry={
+                !loading && user ? () => onRetryMessage(user) : undefined
+              }
+              branch={
+                loading
+                  ? undefined
+                  : {
+                      ids: siblingIdsOf(nodes, node),
+                      activeId: node.node_id,
+                      onSelect: onSelectBranch,
+                    }
+              }
+            />
+          ) : null}
+        </div>
+      </div>
+    );
+  }
+
+  function renderWaitingAssistant(key: string) {
+    return (
+      <div className="assistant-row" key={key}>
+        <div className="assistant-content">
+          <div className="assistant-waiting" role="status" aria-live="polite">
+            <BrailleSpinner />
+            <span>{waitingStatusText(locale, requestPhase, delegationInfo)}</span>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const turns: Array<{ user: MessageNode | null; assistant: MessageNode | null }> = [];
+  for (const node of path) {
+    if (node.role === "user") {
+      turns.push({ user: node, assistant: null });
+    } else if (turns.length > 0 && turns[turns.length - 1].assistant === null) {
+      turns[turns.length - 1].assistant = node;
+    } else {
+      turns.push({ user: null, assistant: node });
+    }
+  }
 
   return (
     <div>
-      {messagePairs.map((pair, idx) => renderTurn(pair, idx))}
+      {turns.map((turn, idx) => {
+        const retrying = Boolean(turn.user && pendingRetryOf === turn.user.node_id);
+        return (
+          <div key={turn.user ? `turn-${turn.user.node_id}` : `turn-a-${idx}`} className="conversation-stack">
+            {turn.user ? renderUserMessage(turn.user) : null}
+            {retrying
+              ? renderWaitingAssistant(`waiting-retry-${idx}`)
+              : turn.assistant
+                ? renderStoredAssistant(turn.assistant, turn.user)
+                : null}
+          </div>
+        );
+      })}
 
-      {showCurrentTurn ? (
+      {question ? (
         <div className="conversation-stack">
-          {question ? <div className="user-message">{question}</div> : null}
+          <div className="user-message">{question}</div>
+          {renderLiveAssistant()}
+        </div>
+      ) : null}
 
+      {!question && streamError ? (
+        <div className="conversation-stack">
           <div className="assistant-row">
             <div className="assistant-content">
-              {timeline.length > 0 ? (
-                <button className={cn("thinking-block", !isDone && "thinking-block-active")} onClick={onToggleThinking} type="button">
-                  <span className={cn("thinking-title", !isDone && "thinking-title-active")}>
-                    {previewTitle}
-                  </span>
-                  <ChevronRight className="thinking-chevron" size={14} aria-hidden="true" />
-                </button>
-              ) : null}
-
-              {showWaitingState ? (
-                <div className="assistant-waiting" role="status" aria-live="polite">
-                  <BrailleSpinner />
-                  <span>{waitingStatusText(locale, requestPhase, delegationInfo)}</span>
-                </div>
-              ) : null}
-
-              {streamError ? (
-                <div className="assistant-error" role="status" aria-live="polite">
-                  <span>{tr.ui.sendFailed}</span>
-                  <span className="assistant-error-detail">{streamError}</span>
-                </div>
-              ) : null}
-
-              {showPreview && previewBody ? (
-                <div className="thinking-preview markdown-body">
-                  <Markdown content={truncateWords(previewBody, 20)} />
-                </div>
-              ) : null}
-
-              {finalBody ? (
-                <>
-                  <div className="answer-body markdown-body">
-                    <Markdown content={finalBody} />
-                  </div>
-                  <MessageActions
-                    body={finalBody}
-                    locale={locale}
-                    delegation={delegationInfo}
-                    discussion={liveDiscussion}
-                    onReview={liveDiscussion.length > 0 ? onOpenLiveDiscussion : undefined}
-                  />
-                </>
-              ) : null}
+              <div className="assistant-error" role="status" aria-live="polite">
+                <span>{tr.ui.sendFailed}</span>
+                <span className="assistant-error-detail">{streamError}</span>
+              </div>
             </div>
           </div>
         </div>
       ) : null}
     </div>
+  );
+}
+
+function BranchNav({
+  ids,
+  activeId,
+  locale,
+  onSelect,
+}: {
+  ids: string[];
+  activeId: string;
+  locale: Locale;
+  onSelect: (nodeId: string) => void;
+}) {
+  const copy = t(locale).ui;
+  const index = ids.indexOf(activeId);
+  if (ids.length < 2 || index < 0) return null;
+  return (
+    <span className="branch-nav">
+      <button
+        className="branch-nav-button"
+        type="button"
+        disabled={index <= 0}
+        title={copy.previousBranch}
+        aria-label={copy.previousBranch}
+        onClick={() => onSelect(ids[index - 1])}
+      >
+        <ChevronLeft size={13} aria-hidden="true" />
+      </button>
+      <span className="branch-nav-count">
+        {index + 1} / {ids.length}
+      </span>
+      <button
+        className="branch-nav-button"
+        type="button"
+        disabled={index >= ids.length - 1}
+        title={copy.nextBranch}
+        aria-label={copy.nextBranch}
+        onClick={() => onSelect(ids[index + 1])}
+      >
+        <ChevronRight size={13} aria-hidden="true" />
+      </button>
+    </span>
   );
 }
 
@@ -3087,13 +3444,19 @@ function MessageActions({
   locale,
   delegation,
   discussion,
-  onReview,
+  onOpenDiscussion,
+  openLabel,
+  onRetry,
+  branch,
 }: {
   body: string;
   locale: Locale;
   delegation?: DelegationInfo | null;
   discussion: DiscussionMessage[];
-  onReview?: () => void;
+  onOpenDiscussion?: () => void;
+  openLabel: string;
+  onRetry?: () => void;
+  branch?: { ids: string[]; activeId: string; onSelect: (nodeId: string) => void };
 }) {
   const [copied, setCopied] = useState(false);
   const copy = t(locale).ui;
@@ -3111,42 +3474,45 @@ function MessageActions({
   }
 
   return (
-    <>
-      <div className="message-actions" aria-label={copy.messageActions}>
+    <div className="message-actions" aria-label={copy.messageActions}>
+      <button
+        className="message-action-button"
+        onClick={() => void copyBody()}
+        type="button"
+        title={copy.copy}
+      >
+        <Copy size={15} aria-hidden="true" />
+        <span className="sr-only">{copy.copy}</span>
+      </button>
+      {onRetry ? (
         <button
           className="message-action-button"
-          onClick={() => void copyBody()}
+          onClick={onRetry}
           type="button"
-          title={copy.copy}
+          title={copy.retry}
         >
-          <Copy size={15} aria-hidden="true" />
-          <span className="sr-only">{copy.copy}</span>
+          <RotateCcw size={14} aria-hidden="true" />
+          <span className="sr-only">{copy.retry}</span>
         </button>
-        <AgentStrip
-          agents={delegation?.agents ?? []}
-          messages={discussion}
-          locale={locale}
-          tooltip={tooltip}
-        />
-        {copied ? <span className="message-action-status">{copy.copied}</span> : null}
-      </div>
-      {onReview ? (
-        <div className="discussion-review-row">
-          <button type="button" className="discussion-review-button" onClick={onReview}>
-            <UsersRound size={14} aria-hidden="true" />
-            <span>{t(locale).room.review}</span>
-          </button>
-        </div>
       ) : null}
-    </>
-  );
-}
-
-function Markdown({ content }: { content: string }) {
-  return (
-    <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>
-      {content}
-    </ReactMarkdown>
+      {branch && branch.ids.length > 1 ? (
+        <BranchNav
+          ids={branch.ids}
+          activeId={branch.activeId}
+          locale={locale}
+          onSelect={branch.onSelect}
+        />
+      ) : null}
+      <AgentStrip
+        agents={delegation?.agents ?? []}
+        messages={discussion}
+        locale={locale}
+        tooltip={tooltip}
+        onOpen={onOpenDiscussion}
+        openLabel={openLabel}
+      />
+      {copied ? <span className="message-action-status">{copy.copied}</span> : null}
+    </div>
   );
 }
 
@@ -3472,10 +3838,7 @@ function SettingsOverlay({
   agentsError,
   globalSkills,
   providers,
-  providerForms,
-  providerKeys,
-  providerSecretStatus,
-  providerStatus,
+  secretStatus,
   settingsTab,
   locale,
   developerMode,
@@ -3485,13 +3848,9 @@ function SettingsOverlay({
   setLocale,
   setDeveloperMode,
   setLogLevel,
-  setProviderForms,
-  setProviderKeys,
   setSettingsOpen,
   setSettingsTab,
-  saveProvider,
-  saveProviderSecret,
-  testProvider,
+  onModelsChanged,
   refreshDeveloperDiagnostics,
   onAddExpert,
   onEditExpert,
@@ -3501,10 +3860,7 @@ function SettingsOverlay({
   agentsError: string | null;
   globalSkills: string[];
   providers: ProviderProfile[];
-  providerForms: Record<string, ProviderProfile>;
-  providerKeys: Record<string, string>;
-  providerSecretStatus: Record<string, boolean>;
-  providerStatus: Record<string, string>;
+  secretStatus: Record<string, ProviderSecretStatus>;
   settingsTab: SettingsTab;
   locale: Locale;
   developerMode: boolean;
@@ -3514,13 +3870,9 @@ function SettingsOverlay({
   setLocale: Dispatch<SetStateAction<Locale>>;
   setDeveloperMode: Dispatch<SetStateAction<boolean>>;
   setLogLevel: Dispatch<SetStateAction<LogLevel>>;
-  setProviderForms: Dispatch<SetStateAction<Record<string, ProviderProfile>>>;
-  setProviderKeys: Dispatch<SetStateAction<Record<string, string>>>;
   setSettingsOpen: Dispatch<SetStateAction<boolean>>;
   setSettingsTab: Dispatch<SetStateAction<SettingsTab>>;
-  saveProvider: (providerId: string) => Promise<void>;
-  saveProviderSecret: (providerId: string) => Promise<void>;
-  testProvider: (providerId: string) => Promise<void>;
+  onModelsChanged: () => Promise<void>;
   refreshDeveloperDiagnostics: () => void;
   onAddExpert: () => void;
   onEditExpert: (agent: AgentView) => void;
@@ -3590,66 +3942,12 @@ function SettingsOverlay({
         </div>
 
         {settingsTab === "providers" ? (
-          <div className="grid gap-4">
-            {providers.map((provider) => {
-              const form = providerForms[provider.provider_id] ?? provider;
-              const keyConfigured = providerSecretStatus[provider.provider_id];
-              return (
-                <section key={provider.provider_id} className="settings-card">
-                  <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-                    <div>
-                      <div className="font-medium">{form.label}</div>
-                      <div className="mt-1 text-xs text-muted">
-                        {provider.provider_id} · {keyConfigured ? copy.apiKeyConfigured : copy.apiKeyMissing}
-                      </div>
-                    </div>
-                    <div className="flex flex-wrap gap-2">
-                      <button className="small-button small-button-icon" onClick={() => void testProvider(provider.provider_id)}>
-                        <FlaskConical size={14} aria-hidden="true" />
-                        <span>{copy.test}</span>
-                      </button>
-                      <button className="small-button small-button-icon" onClick={() => void saveProviderSecret(provider.provider_id)}>
-                        <KeyRound size={14} aria-hidden="true" />
-                        <span>{copy.saveKey}</span>
-                      </button>
-                      <button className="small-button-primary small-button-icon" onClick={() => void saveProvider(provider.provider_id)}>
-                        <Save size={14} aria-hidden="true" />
-                        <span>{copy.saveConfig}</span>
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="grid gap-3 md:grid-cols-2">
-                    <ProviderField provider={form} field="label" label={copy.providerField.label} setProviderForms={setProviderForms} />
-                    <ProviderField provider={form} field="default_model" label={copy.providerField.default_model} setProviderForms={setProviderForms} />
-                    <ProviderField provider={form} field="base_url" label={copy.providerField.base_url} setProviderForms={setProviderForms} />
-                    <ProviderField provider={form} field="api_style" label={copy.providerField.api_style} setProviderForms={setProviderForms} />
-                    <ProviderField provider={form} field="provider_type" label={copy.providerField.provider_type} setProviderForms={setProviderForms} />
-                    <ProviderField provider={form} field="env_key_name" label={copy.providerField.env_key_name} setProviderForms={setProviderForms} />
-                    <label className="grid gap-1 text-sm md:col-span-2">
-                      <span className="font-medium">API Key</span>
-                      <input
-                        type="password"
-                        value={providerKeys[provider.provider_id] ?? ""}
-                        onChange={(event) =>
-                          setProviderKeys((current) => ({
-                            ...current,
-                            [provider.provider_id]: event.target.value,
-                          }))
-                        }
-                        className="settings-input"
-                        placeholder={keyConfigured ? copy.apiKeyPlaceholderSaved : copy.apiKeyPlaceholderNew(form.env_key_name)}
-                      />
-                    </label>
-                  </div>
-
-                  <div className="mt-3 text-xs leading-5 text-muted">
-                    {providerStatus[provider.provider_id] ?? copy.apiKeyHint}
-                  </div>
-                </section>
-              );
-            })}
-          </div>
+          <ModelList
+            providers={providers}
+            secretStatus={secretStatus}
+            locale={locale}
+            onChanged={onModelsChanged}
+          />
         ) : null}
 
         {settingsTab === "experts" ? (
@@ -3713,7 +4011,9 @@ function SettingsOverlay({
           </>
         ) : null}
 
-        {settingsTab !== "providers" && settingsTab !== "experts" ? (
+        {settingsTab === "memory" ? <MemoryPanel agents={agents} locale={locale} /> : null}
+
+        {settingsTab !== "providers" && settingsTab !== "experts" && settingsTab !== "memory" ? (
           <section className="settings-section">
             {settingsTab === "general" ? (
               <div className="settings-list">
@@ -3852,6 +4152,7 @@ function SettingsOverlay({
 function settingsTitle(tab: SettingsTab, locale: Locale) {
   if (tab === "providers") return t(locale).ui.providers;
   if (tab === "experts") return t(locale).ui.experts;
+  if (tab === "memory") return t(locale).ui.memory;
   if (tab === "skills") return t(locale).ui.skills;
   if (tab === "data") return t(locale).ui.data;
   if (tab === "developer") return t(locale).ui.developer;
@@ -3862,41 +4163,11 @@ function settingsSubtitle(tab: SettingsTab, locale: Locale) {
   const copy = t(locale).ui;
   if (tab === "providers") return copy.settingsSubtitleProviders;
   if (tab === "experts") return copy.settingsSubtitleExperts;
+  if (tab === "memory") return copy.settingsSubtitleMemory;
   if (tab === "skills") return copy.settingsSubtitleSkills;
   if (tab === "data") return copy.settingsSubtitleData;
   if (tab === "developer") return copy.settingsSubtitleDeveloper;
   return copy.settingsSubtitleGeneral;
-}
-
-function ProviderField({
-  provider,
-  field,
-  label,
-  setProviderForms,
-}: {
-  provider: ProviderProfile;
-  field: ProviderTextField;
-  label: string;
-  setProviderForms: Dispatch<SetStateAction<Record<string, ProviderProfile>>>;
-}) {
-  return (
-    <label className="grid gap-1 text-sm">
-      <span className="font-medium">{label}</span>
-      <input
-        value={provider[field]}
-        onChange={(event) =>
-          setProviderForms((current) => ({
-            ...current,
-            [provider.provider_id]: {
-              ...current[provider.provider_id],
-              [field]: event.target.value,
-            },
-          }))
-        }
-        className="settings-input"
-      />
-    </label>
-  );
 }
 
 function SkillPicker({
@@ -3942,47 +4213,6 @@ function SkillPicker({
   );
 }
 
-type ProviderIconSpec =
-  | { kind: "brand"; icon: SimpleIcon }
-  | { kind: "letter"; label: string }
-  | { kind: "lucide"; Icon: LucideIcon };
-
-function providerIcon(provider: ProviderProfile | undefined): ProviderIconSpec {
-  const id = `${provider?.provider_id ?? ""} ${provider?.provider_type ?? ""}`.toLowerCase();
-  if (id.includes("anthropic")) return { kind: "brand", icon: siAnthropic };
-  if (id.includes("claude-code") || id.includes("claudecode")) return { kind: "brand", icon: siClaudecode };
-  if (id.includes("claude")) return { kind: "brand", icon: siClaude };
-  if (id.includes("deepseek")) return { kind: "brand", icon: siDeepseek };
-  if (id.includes("ollama") || id.includes("local")) return { kind: "brand", icon: siOllama };
-  if (id.includes("openrouter")) return { kind: "brand", icon: siOpenrouter };
-  if (id.includes("gemini") || id.includes("google")) return { kind: "brand", icon: siGooglegemini };
-  if (id.includes("mistral")) return { kind: "brand", icon: siMistralai };
-  if (id.includes("perplexity")) return { kind: "brand", icon: siPerplexity };
-  if (id.includes("moonshot") || id.includes("kimi")) return { kind: "brand", icon: siMoonshotai };
-  if (id.includes("qwen") || id.includes("alibaba")) return { kind: "brand", icon: siQwen };
-  if (id.includes("baidu") || id.includes("ernie")) return { kind: "brand", icon: siBaidu };
-  if (id.includes("minimax")) return { kind: "brand", icon: siMinimax };
-  if (id.includes("openai") || id.includes("chatgpt") || id.includes("gpt")) return { kind: "letter", label: "AI" };
-  return { kind: "lucide", Icon: Brain };
-}
-
-function ProviderIcon({ provider }: { provider: ProviderProfile | undefined }) {
-  const spec = providerIcon(provider);
-  return (
-    <span className="provider-select-icon" aria-hidden="true">
-      {spec.kind === "brand" ? (
-        <svg viewBox="0 0 24 24" width="16" height="16" role="img" focusable="false">
-          <path fill="currentColor" d={spec.icon.path} />
-        </svg>
-      ) : spec.kind === "letter" ? (
-        <span className="provider-select-letter">{spec.label}</span>
-      ) : (
-        <spec.Icon size={16} />
-      )}
-    </span>
-  );
-}
-
 function ProviderSelect({
   providers,
   value,
@@ -4024,7 +4254,11 @@ function ProviderSelect({
         disabled={disabled || enabledProviders.length === 0}
         onClick={() => setOpen((current) => !current)}
       >
-        <ProviderIcon provider={selectedProvider} />
+        {selectedProvider ? (
+          <ProfileIcon provider={selectedProvider} size={30} className="provider-select-icon" />
+        ) : (
+          <span className="provider-select-icon" aria-hidden="true" />
+        )}
         <span className="provider-select-current">
           <span className="provider-select-name">
             {selectedProvider?.label ?? copy.noProvider}
@@ -4058,7 +4292,7 @@ function ProviderSelect({
                 type="button"
                 onClick={() => chooseProvider(provider.provider_id)}
               >
-                <ProviderIcon provider={provider} />
+                <ProfileIcon provider={provider} size={30} className="provider-select-icon" />
                 <span className="provider-select-option-text">
                   <span className="provider-select-name">{provider.label}</span>
                   <span className="provider-select-id">{provider.provider_id}</span>
@@ -4123,10 +4357,14 @@ function ExpertModal({
     (agent?.name === "summarizer-main" || agent?.name === "synthesizer-main");
 
   const selectedProvider = providers.find((p) => p.provider_id === providerProfile);
+  const providerModels = selectedProvider ? modelsOf(selectedProvider).filter((entry) => entry.enabled) : [];
+  // Keep a saved-but-now-disabled model visible instead of silently rewriting the expert.
+  const modelOptions =
+    model && !providerModels.some((entry) => entry.id === model) ? [{ id: model, label: model }, ...providerModels] : providerModels;
 
   useEffect(() => {
     if (selectedProvider && !model) {
-      setModel(selectedProvider.default_model);
+      setModel(pickDefaultModel(modelsOf(selectedProvider), selectedProvider.default_model));
     }
   }, [providerProfile, selectedProvider, model]);
 
@@ -4135,7 +4373,7 @@ function ExpertModal({
     const currentDefault = selectedProvider?.default_model ?? "";
     setProviderProfile(nextProviderId);
     if (!model || model === currentDefault) {
-      setModel(nextProvider?.default_model ?? "");
+      setModel(nextProvider ? pickDefaultModel(modelsOf(nextProvider), nextProvider.default_model) : "");
     }
   }
 
@@ -4180,7 +4418,7 @@ function ExpertModal({
               className="settings-input"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              disabled={mode === "edit" || isSystem}
+              disabled={mode === "edit"}
               placeholder={copy.expertNamePlaceholder}
             />
             {name && !isValidName ? (
@@ -4197,7 +4435,6 @@ function ExpertModal({
               className="settings-input"
               value={nickname}
               onChange={(e) => setNickname(e.target.value)}
-              disabled={isSystem}
               placeholder={copy.displayName}
             />
           </label>
@@ -4208,7 +4445,6 @@ function ExpertModal({
             <ProviderSelect
               providers={providers}
               value={providerProfile}
-              disabled={isSystem}
               locale={locale}
               onChange={handleProviderChange}
             />
@@ -4217,13 +4453,26 @@ function ExpertModal({
           {/* model */}
           <label className="settings-field">
             <span className="settings-label">{copy.model}</span>
-            <input
-              className="settings-input"
-              value={model}
-              onChange={(e) => setModel(e.target.value)}
-              disabled={isSystem}
-              placeholder={selectedProvider?.default_model ?? "model id"}
-            />
+            {providerModels.length ? (
+              <select
+                className="settings-input"
+                value={model}
+                onChange={(e) => setModel(e.target.value)}
+              >
+                {modelOptions.map((entry) => (
+                  <option key={entry.id} value={entry.id}>
+                    {entry.label || entry.id}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <input
+                className="settings-input"
+                value={model}
+                onChange={(e) => setModel(e.target.value)}
+                placeholder={selectedProvider?.default_model ?? "model id"}
+              />
+            )}
           </label>
 
           {/* system_prompt */}
@@ -4233,7 +4482,6 @@ function ExpertModal({
               className="settings-input"
               value={systemPrompt}
               onChange={(e) => setSystemPrompt(e.target.value)}
-              disabled={isSystem}
               rows={4}
               placeholder={copy.systemPromptPlaceholder}
             />
@@ -4257,6 +4505,9 @@ function ExpertModal({
                 </button>
               ))}
             </div>
+            {isSystem ? (
+              <p className="mt-1 text-xs text-muted">{copy.systemRoleLocked}</p>
+            ) : null}
           </div>
 
           <div className="settings-field">
@@ -4264,7 +4515,6 @@ function ExpertModal({
             <SkillPicker
               skills={globalSkills}
               value={allowedSkills}
-              disabled={isSystem}
               emptyText={copy.noGlobalSkills}
               onChange={(next) => {
                 setAllowedSkills(next);
@@ -4278,7 +4528,6 @@ function ExpertModal({
             <SkillPicker
               skills={globalSkills}
               value={disabledSkills}
-              disabled={isSystem}
               emptyText={copy.noDisabledSkills}
               onChange={(next) => {
                 setDisabledSkills(next);
@@ -4296,7 +4545,6 @@ function ExpertModal({
               min={0}
               max={100}
               value={priority}
-              disabled={isSystem}
               onChange={(e) =>
                 setPriority(Math.max(0, Math.min(100, Number(e.target.value) || 0)))
               }

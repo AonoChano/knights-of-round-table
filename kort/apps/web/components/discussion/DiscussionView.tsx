@@ -27,14 +27,24 @@ interface Props {
 type StoredTheme = ThemeMode;
 
 const THEME_KEY = 'kort-room-theme';
+const SPEED_KEY = 'kort-room-speed';
+const SPEEDS = [0.75, 1, 1.5, 2];
+/** 鼠标停手这么久就收起底部控制条，把画面留给讨论本身 */
+const IDLE_MS = 2600;
 
 function loadTheme(): StoredTheme {
   if (typeof window === 'undefined') return 'night';
   return window.localStorage.getItem(THEME_KEY) === 'day' ? 'day' : 'night';
 }
 
+function loadSpeed(): number {
+  if (typeof window === 'undefined') return 1;
+  const stored = Number(window.localStorage.getItem(SPEED_KEY));
+  return SPEEDS.includes(stored) ? stored : 1;
+}
+
 function useStageScale(ref: { current: HTMLDivElement | null }) {
-  const [scale, setScale] = useState(0.42);
+  const [view, setView] = useState({ scale: 0.42, width: 0, height: 0 });
   useEffect(() => {
     const node = ref.current;
     if (!node) return;
@@ -42,21 +52,27 @@ function useStageScale(ref: { current: HTMLDivElement | null }) {
       const box = entries[0]?.contentRect;
       if (!box || box.width < 16 || box.height < 16) return;
       const cover = Math.max(box.width / STAGE_W, box.height / STAGE_H);
-      setScale(Math.min(1.22, Math.max(0.32, cover)));
+      setView({
+        scale: Math.min(1.22, Math.max(0.32, cover)),
+        width: box.width,
+        height: box.height,
+      });
     });
     observer.observe(node);
     return () => observer.disconnect();
   }, [ref]);
-  return scale;
+  return view;
 }
 
 export function DiscussionView({ question, messages, agents, streaming, locale, onBack }: Props) {
   const tr = t(locale).room;
   const stageRef = useRef<HTMLDivElement>(null);
   const [theme, setTheme] = useState<StoredTheme>(loadTheme);
-  const [playing, setPlaying] = useState(true);
   const [transcriptOpen, setTranscriptOpen] = useState(false);
-  const scale = useStageScale(stageRef);
+  const [speed, setSpeed] = useState(loadSpeed);
+  const [chromeVisible, setChromeVisible] = useState(true);
+  const idleTimer = useRef<number | null>(null);
+  const { scale, width: viewWidth, height: viewHeight } = useStageScale(stageRef);
 
   const cast = useMemo(() => buildCast(castSeeds(agents, messages)), [agents, messages]);
 
@@ -64,7 +80,7 @@ export function DiscussionView({ question, messages, agents, streaming, locale, 
   const lines = useMemo(() => toDialogueLines(messages, cast), [messages, cast]);
   const playback = useDiscussionPlayback(lines, {
     participants: cast,
-    speed: 1,
+    speed,
     live: streaming,
   });
 
@@ -93,6 +109,28 @@ export function DiscussionView({ question, messages, agents, streaming, locale, 
   }, [theme]);
 
   useEffect(() => {
+    window.localStorage.setItem(SPEED_KEY, String(speed));
+  }, [speed]);
+
+  useEffect(() => {
+    const reveal = () => {
+      setChromeVisible(true);
+      if (idleTimer.current) window.clearTimeout(idleTimer.current);
+      idleTimer.current = window.setTimeout(() => setChromeVisible(false), IDLE_MS);
+    };
+    reveal();
+    window.addEventListener('mousemove', reveal);
+    window.addEventListener('pointerdown', reveal);
+    window.addEventListener('keydown', reveal);
+    return () => {
+      window.removeEventListener('mousemove', reveal);
+      window.removeEventListener('pointerdown', reveal);
+      window.removeEventListener('keydown', reveal);
+      if (idleTimer.current) window.clearTimeout(idleTimer.current);
+    };
+  }, []);
+
+  useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
       if (target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return;
@@ -115,6 +153,8 @@ export function DiscussionView({ question, messages, agents, streaming, locale, 
   const chrome = night
     ? 'bg-stone-900/60 text-amber-50 ring-1 ring-amber-100/10 hover:bg-stone-800/80'
     : 'bg-white/75 text-stone-700 ring-1 ring-stone-900/5 hover:bg-white';
+  const controlsHidden = !chromeVisible;
+  const nextSpeed = SPEEDS[(SPEEDS.indexOf(speed) + 1) % SPEEDS.length] ?? 1;
 
   return (
     <div className="discussion-shell" data-theme={night ? 'night' : 'day'}>
@@ -244,6 +284,7 @@ export function DiscussionView({ question, messages, agents, streaming, locale, 
               x={speakerSeat.x}
               y={speakerSeat.y - (CHAR_SIZE * 1.32 + 6) * speakerSeat.scale}
               scale={scale}
+              view={{ width: viewWidth, height: viewHeight }}
               participant={speaker}
               text={playback.typedText}
               done={playback.phase === 'hold'}
@@ -258,7 +299,11 @@ export function DiscussionView({ question, messages, agents, streaming, locale, 
           </div>
         ) : null}
 
-        <div className="absolute bottom-4 left-1/2 z-[5600] -translate-x-1/2">
+        <div
+          className={`absolute bottom-4 left-1/2 z-[5600] -translate-x-1/2 transition-all duration-500 ${
+            controlsHidden ? 'pointer-events-none translate-y-6 opacity-0' : 'opacity-100'
+          }`}
+        >
           <div
             className={`flex items-center gap-1 rounded-full py-2 pl-2 pr-4 transition-colors duration-700 ${chrome}`}
             style={{ backdropFilter: 'blur(12px)' }}
@@ -296,6 +341,15 @@ export function DiscussionView({ question, messages, agents, streaming, locale, 
             >
               ›
             </button>
+            <button
+              type="button"
+              className="discussion-speed"
+              onClick={() => setSpeed(nextSpeed)}
+              title={tr.speed}
+              aria-label={tr.speed}
+            >
+              {speed}&times;
+            </button>
             <div className="mx-3 flex items-center gap-[3px]">
               {lines.map((line, index) => {
                 const seat = cast.find((participant) => participant.id === line.speaker);
@@ -319,7 +373,7 @@ export function DiscussionView({ question, messages, agents, streaming, locale, 
                 );
               })}
             </div>
-            <span className="hidden text-xs tabular-nums opacity-60 sm:inline">
+            <span className="discussion-controls-counter hidden text-xs tabular-nums opacity-60 sm:inline">
               {messages.length ? `${playback.index + 1}/${lines.length}` : '0/0'}
             </span>
           </div>
