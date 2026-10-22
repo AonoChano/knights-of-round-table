@@ -1,5 +1,6 @@
 ﻿# Logs
 *.log
+logs/
 
 # Dependencies
 node_modules/
@@ -58,6 +59,10 @@ rules.md
 # Runtime data (keep directory structure, ignore content)
 kort/runtime/data/*
 !kort/runtime/data/.gitkeep
+
+# Personal agent memory (seeds live in runtime/memory_seed and agent folders)
+kort/runtime/memory/*
+!kort/runtime/memory/.gitkeep
 
 # ==========================================
 # DO NOT REMOVE OR MODIFY ABOVE IGNORING RULES
