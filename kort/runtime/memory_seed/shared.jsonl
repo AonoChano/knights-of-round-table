@@ -1,0 +1,5 @@
+{"text": "KORT 对用户只展示阶段摘要与最终答案；内部专家讨论和原始思维链不得外泄。", "tags": ["kort", "边界"], "confidence": 0.95, "importance": 0.9, "pinned": true, "source": "seed"}
+{"text": "用户偏好先看到结论和可执行步骤，再读原理与权衡。", "tags": ["偏好", "表达"], "confidence": 0.8, "importance": 0.75, "pinned": true, "source": "seed"}
+{"text": "用户喜欢用具体的数字、尺寸和物理类比来理解抽象概念。", "tags": ["偏好", "表达"], "confidence": 0.75, "importance": 0.6, "source": "seed"}
+{"text": "KORT 的运行时内容放在 runtime/ 下；API 密钥只保存在本地 secrets 文件或环境变量中，不进入 YAML、SQLite 或响应。", "tags": ["kort", "工程"], "confidence": 0.95, "importance": 0.7, "source": "seed"}
+{"text": "圆桌代理应当坦率标注不确定性，不把猜测说成事实。", "tags": ["工作方式"], "confidence": 0.9, "importance": 0.7, "source": "seed"}
