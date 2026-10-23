@@ -10,12 +10,14 @@ interface Props {
   facing: Facing;
   theme: ThemeMode;
   seed: number;
+  dimmed?: boolean;
   onClick?: () => void;
+  elementRef?: (node: HTMLButtonElement | null) => void;
 }
 
 export const CHAR_SIZE = 124;
 
-export function Seat({ seat, participant, state, facing, theme, seed, onClick }: Props) {
+export function Seat({ seat, participant, state, facing, theme, seed, dimmed = false, onClick, elementRef }: Props) {
   const def = getCharacter(participant.kind);
   const Renderer = def?.renderer;
   const aspect = def?.aspect ?? 1;
@@ -34,7 +36,10 @@ export function Seat({ seat, participant, state, facing, theme, seed, onClick }:
         transform: `scale(${seat.scale})`,
         transformOrigin: '0 0',
         zIndex: Math.round(seat.y) + (seat.front ? 1000 : 0),
+        opacity: dimmed ? 0.32 : 1,
+        transition: 'opacity 320ms cubic-bezier(0.2, 0.8, 0.2, 1)',
       }}
+      data-dimmed={dimmed ? 'true' : undefined}
     >
       {/* 发言光圈 */}
       <div
@@ -55,6 +60,7 @@ export function Seat({ seat, participant, state, facing, theme, seed, onClick }:
       <Chair style={participant.chair ?? 'armchair'} color={participant.chairColor ?? '#9a3412'} theme={theme} tilt={tilt} />
       <button
         type="button"
+        ref={elementRef}
         onClick={onClick}
         className="absolute cursor-pointer outline-none seat-character"
         style={{ left: -CHAR_SIZE / 2, top: -bodyBottom - 4, width: CHAR_SIZE, height: h }}

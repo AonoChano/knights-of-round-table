@@ -11,7 +11,7 @@ import { Table } from './components/Table';
 import { Transcript } from './components/Transcript';
 import './characters/Clawd';
 import { useDiscussionPlayback } from './hooks/useDiscussionPlayback';
-import { computeSeats, STAGE_H, STAGE_W } from './layout';
+import { computeSeats, STAGE_H, STAGE_W, type SeatLayout } from './layout';
 import { toDialogueLines } from './lines';
 import type { DiscussionMessage, DiscussionParticipantSeed, Facing, ThemeMode } from './types';
 
@@ -78,6 +78,9 @@ export function DiscussionView({ question, messages, agents, streaming, locale, 
 
   const seats = useMemo(() => computeSeats(cast.length), [cast.length]);
   const lines = useMemo(() => toDialogueLines(messages, cast), [messages, cast]);
+  const seatEls = useRef(new Map<string, HTMLButtonElement>());
+  const [dimmedIds, setDimmedIds] = useState<string[]>([]);
+  const castKey = cast.map((participant) => participant.id).join('|');
   const playback = useDiscussionPlayback(lines, {
     participants: cast,
     speed,
@@ -103,6 +106,47 @@ export function DiscussionView({ question, messages, agents, streaming, locale, 
   const speakerSeat = playback.speakerId ? seatOf(playback.speakerId) : null;
   const waiting = messages.length === 0;
   const currentRound = messages[messages.length - 1]?.round ?? 0;
+
+  /** 座位层级：靠前的座位压在靠后的座位上 */
+  const seatZ = (seat: SeatLayout) => Math.round(seat.y) + (seat.front ? 1000 : 0);
+
+  // 发言者被前方座位挡住时，把挡住他的专家临时淡出，保证视线落在说话的人身上
+  useEffect(() => {
+    const activeId = playback.speakerId;
+    const clear = () => setDimmedIds((current) => (current.length ? [] : current));
+    if (!activeId) {
+      clear();
+      return;
+    }
+    const activeIndex = cast.findIndex((participant) => participant.id === activeId);
+    const activeSeat = activeIndex >= 0 ? seats[activeIndex] : undefined;
+    const activeEl = seatEls.current.get(activeId);
+    if (!activeSeat || !activeEl) {
+      clear();
+      return;
+    }
+    const base = activeEl.getBoundingClientRect();
+    const baseArea = base.width * base.height;
+    if (baseArea <= 0) return;
+    const baseZ = seatZ(activeSeat);
+    const next: string[] = [];
+    cast.forEach((participant, index) => {
+      if (participant.id === activeId) return;
+      const seat = seats[index];
+      const node = seatEls.current.get(participant.id);
+      if (!seat || !node || seatZ(seat) <= baseZ) return;
+      const rect = node.getBoundingClientRect();
+      const overlapWidth = Math.min(base.right, rect.right) - Math.max(base.left, rect.left);
+      const overlapHeight = Math.min(base.bottom, rect.bottom) - Math.max(base.top, rect.top);
+      if (overlapWidth <= 8 || overlapHeight <= 8) return;
+      const overlap = overlapWidth * overlapHeight;
+      if (overlap < Math.min(baseArea, rect.width * rect.height) * 0.14) return;
+      next.push(participant.id);
+    });
+    setDimmedIds((current) =>
+      current.length === next.length && current.every((id, index) => id === next[index]) ? current : next
+    );
+  }, [playback.speakerId, seats, castKey]);
 
   useEffect(() => {
     window.localStorage.setItem(THEME_KEY, theme);
@@ -214,7 +258,12 @@ export function DiscussionView({ question, messages, agents, streaming, locale, 
                 facing={facingFor(index)}
                 theme={theme}
                 seed={((index * 0.37) % 1) + 0.05}
+                dimmed={dimmedIds.includes(participant.id)}
                 onClick={() => setTranscriptOpen(true)}
+                elementRef={(node) => {
+                  if (node) seatEls.current.set(participant.id, node);
+                  else seatEls.current.delete(participant.id);
+                }}
               />
             ) : null
           )}
@@ -239,7 +288,12 @@ export function DiscussionView({ question, messages, agents, streaming, locale, 
                 facing={facingFor(index)}
                 theme={theme}
                 seed={((index * 0.37) % 1) + 0.05}
+                dimmed={dimmedIds.includes(participant.id)}
                 onClick={() => setTranscriptOpen(true)}
+                elementRef={(node) => {
+                  if (node) seatEls.current.set(participant.id, node);
+                  else seatEls.current.delete(participant.id);
+                }}
               />
             ) : null
           )}

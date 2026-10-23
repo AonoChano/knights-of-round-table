@@ -153,8 +153,40 @@
   transform: translateX(16px);
 }
 
+.model-switch-pending {
+  cursor: progress;
+  opacity: 0.55;
+}
+
 .model-row-menu {
   position: relative;
+}
+
+.model-row-delete {
+  color: var(--ink-muted);
+  opacity: 0;
+  transform: translateX(2px);
+  transition:
+    color 140ms var(--ease-productive),
+    opacity 140ms var(--ease-productive),
+    transform 140ms var(--ease-productive);
+}
+
+.model-row:hover .model-row-delete,
+.model-row:focus-within .model-row-delete {
+  opacity: 1;
+  transform: none;
+}
+
+.model-row-delete:hover {
+  color: #a4382c;
+}
+
+@media (hover: none) {
+  .model-row-delete {
+    opacity: 0.55;
+    transform: none;
+  }
 }
 
 .model-menu {
@@ -253,16 +285,56 @@
 }
 
 .model-step {
+  display: flex;
+  flex: none;
+}
+
+.model-step-button {
   align-items: center;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 999px;
   color: var(--ink-muted);
+  cursor: pointer;
   display: inline-flex;
   font-size: 12px;
   gap: 6px;
+  padding: 3px 8px 3px 4px;
+  transition:
+    background 160ms var(--ease-productive),
+    border-color 160ms var(--ease-productive),
+    color 160ms var(--ease-productive),
+    opacity 160ms var(--ease-productive);
 }
 
-.model-step-active {
+.model-step-button:hover {
+  background: var(--surface-soft);
+  color: var(--ink-strong);
+}
+
+.model-step-button:focus-visible {
+  border-color: var(--hairline-strong);
+  outline: none;
+}
+
+.model-step-button:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.model-step-active .model-step-button {
+  background: var(--surface-soft);
+  border-color: var(--hairline);
   color: var(--ink-strong);
   font-weight: 600;
+}
+
+.model-step-future .model-step-button {
+  opacity: 0.62;
+}
+
+.model-step-future .model-step-button:hover {
+  opacity: 1;
 }
 
 .model-step-dot {
@@ -296,9 +368,16 @@
 }
 
 .model-step-pane {
-  animation: model-step-in 220ms var(--ease-productive) both;
   display: grid;
   gap: 14px;
+}
+
+.model-step-pane-forward {
+  animation: model-step-in 220ms var(--ease-productive) both;
+}
+
+.model-step-pane-back {
+  animation: model-step-in-back 200ms var(--ease-productive) both;
 }
 
 @keyframes model-step-in {
@@ -309,6 +388,27 @@
   to {
     opacity: 1;
     transform: none;
+  }
+}
+
+@keyframes model-step-in-back {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.model-spin {
+  animation: model-spin 900ms linear infinite;
+}
+
+@keyframes model-spin {
+  to {
+    transform: rotate(360deg);
   }
 }
 
@@ -731,7 +831,6 @@
   background: var(--surface);
   border: 1px solid var(--hairline);
   border-radius: 16px;
-  overflow: hidden;
 }
 
 .model-group-head {
@@ -812,10 +911,6 @@
   }
 
   .model-row {
-    grid-template-columns: auto minmax(0, 1fr) auto;
-  }
-
-  .model-row-menu {
-    grid-column: 3;
+    grid-template-columns: minmax(0, 1fr) auto auto;
   }
 }

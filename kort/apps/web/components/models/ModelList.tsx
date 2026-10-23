@@ -1,5 +1,5 @@
 import { ChevronDown, MoreHorizontal, Pencil, Plus, Trash2 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
 import type { Locale } from "../../app/locale";
@@ -26,11 +26,13 @@ type PendingDelete = { kind: "config"; group: ModelGroup } | { kind: "model"; ro
 
 export function ModelList({
   providers,
+  loading,
   secretStatus,
   locale,
   onChanged,
 }: {
   providers: ProviderProfile[];
+  loading: boolean;
   secretStatus: Record<string, ProviderSecretStatus>;
   locale: Locale;
   onChanged: () => Promise<void>;
@@ -40,6 +42,8 @@ export function ModelList({
   const [openMenu, setOpenMenu] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   const [pendingDelete, setPendingDelete] = useState<PendingDelete | null>(null);
+  const [pendingRows, setPendingRows] = useState<Record<string, boolean>>({});
+  const pendingRef = useRef(new Set<string>());
   const [status, setStatus] = useState<string | null>(null);
 
   const groups = modelGroups(providers);
@@ -71,17 +75,29 @@ export function ModelList({
     }
   }
 
-  function toggleRow(row: ModelRow) {
+  async function toggleRow(row: ModelRow) {
+    if (pendingRef.current.has(row.key)) return;
+    pendingRef.current.add(row.key);
+    setPendingRows((current) => ({ ...current, [row.key]: true }));
     const next = !row.model.enabled;
-    return run(
-      async () => {
-        await modelsApi.update(
-          row.provider.provider_id,
-          withModelEnabled(row.provider, row.model.id, next)
-        );
-      },
-      copy.updatedToast
-    );
+    try {
+      await run(
+        async () => {
+          await modelsApi.update(
+            row.provider.provider_id,
+            withModelEnabled(row.provider, row.model.id, next)
+          );
+        },
+        copy.updatedToast
+      );
+    } finally {
+      pendingRef.current.delete(row.key);
+      setPendingRows((current) => {
+        const nextState = { ...current };
+        delete nextState[row.key];
+        return nextState;
+      });
+    }
   }
 
   function toggleGroup(providerId: string) {
@@ -113,7 +129,11 @@ export function ModelList({
   return (
     <div className="model-panel">
       <div className="model-panel-toolbar">
-        <span className="model-panel-count">{copy.count(modelCount)}</span>
+        {loading && modelCount === 0 ? (
+          <span className="skeleton skeleton-line" style={{ width: 56, height: 11 }} aria-hidden="true" />
+        ) : (
+          <span className="model-panel-count">{copy.count(modelCount)}</span>
+        )}
         <button
           type="button"
           className="small-button-primary small-button-icon"
@@ -127,7 +147,9 @@ export function ModelList({
         </button>
       </div>
 
-      {modelCount === 0 ? (
+      {loading && modelCount === 0 ? (
+        <ModelListSkeleton />
+      ) : modelCount === 0 ? (
         <div className="model-empty">{copy.empty}</div>
       ) : (
         <div className="model-groups">
@@ -139,6 +161,7 @@ export function ModelList({
               locale={locale}
               collapsed={Boolean(collapsed[group.provider.provider_id])}
               keyBadge={keyBadge(secretStatus[group.provider.provider_id], group.provider.env_key_name, copy)}
+              pendingRows={pendingRows}
               openMenu={openMenu}
               onMenu={(key) => setOpenMenu(openMenu === key ? null : key)}
               onToggleCollapsed={() => toggleGroup(group.provider.provider_id)}
@@ -201,6 +224,7 @@ function ConfigGroup({
   locale,
   collapsed,
   keyBadge,
+  pendingRows,
   openMenu,
   onMenu,
   onToggleCollapsed,
@@ -214,6 +238,7 @@ function ConfigGroup({
   locale: Locale;
   collapsed: boolean;
   keyBadge: ReactNode;
+  pendingRows: Record<string, boolean>;
   openMenu: string | null;
   onMenu: (key: string) => void;
   onToggleCollapsed: () => void;
@@ -288,46 +313,55 @@ function ConfigGroup({
                 role="switch"
                 aria-checked={row.model.enabled}
                 aria-label={row.model.enabled ? copy.disable : copy.enable}
-                className={`model-switch${row.model.enabled ? " model-switch-on" : ""}`}
+                aria-busy={Boolean(pendingRows[row.key])}
+                className={`model-switch${row.model.enabled ? " model-switch-on" : ""}${
+                  pendingRows[row.key] ? " model-switch-pending" : ""
+                }`}
+                disabled={Boolean(pendingRows[row.key])}
                 onClick={() => onToggleModel(row)}
               >
                 <span className="model-switch-knob" />
               </button>
-              <div className="model-row-menu">
-                <button
-                  type="button"
-                  className="icon-button model-menu-trigger"
-                  aria-haspopup="menu"
-                  aria-expanded={openMenu === row.key}
-                  aria-label={copy.menu}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    onMenu(row.key);
-                  }}
-                >
-                  <MoreHorizontal size={16} aria-hidden="true" />
-                </button>
-                {openMenu === row.key ? (
-                  <div className="model-menu" role="menu" onClick={(event) => event.stopPropagation()}>
-                    <MenuItem
-                      icon={<Pencil size={14} aria-hidden="true" />}
-                      label={copy.edit}
-                      onClick={onEdit}
-                    />
-                    <MenuItem
-                      icon={<Trash2 size={14} aria-hidden="true" />}
-                      label={copy.delete}
-                      danger
-                      onClick={() => onDeleteModel(row)}
-                    />
-                  </div>
-                ) : null}
-              </div>
+              <button
+                type="button"
+                className="icon-button model-row-delete"
+                aria-label={copy.removeModel}
+                title={copy.removeModel}
+                onClick={() => onDeleteModel(row)}
+              >
+                <Trash2 size={15} aria-hidden="true" />
+              </button>
             </li>
           ))}
         </ul>
       )}
     </section>
+  );
+}
+
+function ModelListSkeleton() {
+  return (
+    <div className="model-groups" aria-busy="true">
+      {[0, 1].map((group) => (
+        <section className="model-group" key={group}>
+          <div className="model-group-head model-group-head-skeleton">
+            <div className="skeleton skeleton-line" style={{ width: group === 0 ? 150 : 110, height: 12 }} />
+            <div className="skeleton skeleton-line skeleton-line-faint" style={{ width: 34, height: 10 }} />
+          </div>
+          <ul className="model-list">
+            {[0, 1].map((row) => (
+              <li className="model-row model-row-skeleton" key={row}>
+                <div className="model-row-main">
+                  <div className="skeleton skeleton-line" style={{ width: `${46 - row * 9}%`, height: 12 }} />
+                  <div className="skeleton skeleton-line skeleton-line-faint" style={{ width: "28%", height: 9 }} />
+                </div>
+                <div className="skeleton skeleton-toggle" />
+              </li>
+            ))}
+          </ul>
+        </section>
+      ))}
+    </div>
   );
 }
 

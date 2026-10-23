@@ -1,4 +1,4 @@
-import { Check, Eye, EyeOff, Plus, Search, Trash2, X } from "lucide-react";
+import { Check, Eye, EyeOff, Loader2, Plus, Search, Trash2, X } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import type { Locale } from "../../app/locale";
@@ -97,6 +97,7 @@ export function AddModelDialog({
   const steps: StepId[] = stepModels.length ? ["provider", "type", "models", "key"] : ["provider", "type", "key", "models"];
 
   const [stepIndex, setStepIndex] = useState(() => (editing ? steps.indexOf("models") : 0));
+  const [stepDir, setStepDir] = useState<"forward" | "back">("forward");
   const step = steps[Math.min(stepIndex, steps.length - 1)];
   const isLastStep = stepIndex >= steps.length - 1;
 
@@ -157,18 +158,38 @@ export function AddModelDialog({
     touch();
   }
 
-  function currentStepError(): string | null {
-    if (step === "provider" && !catalog) return copy.noProviderMatch;
-    if (step === "type") {
+  function stepErrorAt(id: StepId): string | null {
+    if (id === "provider" && !catalog) return copy.noProviderMatch;
+    if (id === "type") {
       if (!baseUrl.trim()) return copy.needBaseUrl;
       if (!isCustom && !plan) return copy.selectType;
       return null;
     }
-    if (step === "models" && !modelIds.length) return copy.needModels;
-    if (step === "key" && keySource === "none" && !apiKey.trim() && catalog?.providerType !== "ollama") {
+    if (id === "models" && !modelIds.length) return copy.needModels;
+    if (id === "key" && keySource === "none" && !apiKey.trim() && catalog?.providerType !== "ollama") {
       return copy.needKey;
     }
     return null;
+  }
+
+  function currentStepError(): string | null {
+    return stepErrorAt(step);
+  }
+
+  function goToStep(target: number) {
+    if (busy || target === stepIndex) return;
+    if (target < 0 || target >= steps.length) return;
+    // 往后跳必须把中间的步骤逐一校验过，往回跳不设门槛。
+    for (let index = stepIndex; index < target; index += 1) {
+      const error = stepErrorAt(steps[index]);
+      if (error) {
+        setStatus(error);
+        return;
+      }
+    }
+    setStepDir(target < stepIndex ? "back" : "forward");
+    setStepIndex(target);
+    setStatus(null);
   }
 
   function nextStep() {
@@ -177,8 +198,11 @@ export function AddModelDialog({
       setStatus(error);
       return;
     }
-    setStepIndex((current) => Math.min(current + 1, steps.length - 1));
-    setStatus(null);
+    goToStep(stepIndex + 1);
+  }
+
+  function previousStep() {
+    goToStep(stepIndex - 1);
   }
 
   async function fetchModelList() {
@@ -271,19 +295,26 @@ export function AddModelDialog({
         <header className="model-dialog-head">
           <div className="model-dialog-title">{editing ? copy.editTitle : copy.addTitle}</div>
           <ol className="model-steps">
-            {steps.map((item, index) => (
-              <li
-                key={item}
-                className={`model-step${index === stepIndex ? " model-step-active" : ""}${
-                  index < stepIndex ? " model-step-done" : ""
-                }`}
-              >
-                <span className="model-step-dot" aria-hidden="true">
-                  {index < stepIndex ? <Check size={11} /> : index + 1}
-                </span>
-                <span>{copy[STEP_LABEL_KEY[item]]}</span>
-              </li>
-            ))}
+            {steps.map((item, index) => {
+              const state = index === stepIndex ? "active" : index < stepIndex ? "done" : "future";
+              return (
+                <li key={item} className={`model-step model-step-${state}`}>
+                  <button
+                    type="button"
+                    className="model-step-button"
+                    aria-current={state === "active" ? "step" : undefined}
+                    title={state === "future" ? copy.stepJump : undefined}
+                    disabled={busy}
+                    onClick={() => goToStep(index)}
+                  >
+                    <span className="model-step-dot" aria-hidden="true">
+                      {state === "done" ? <Check size={11} /> : index + 1}
+                    </span>
+                    <span>{copy[STEP_LABEL_KEY[item]]}</span>
+                  </button>
+                </li>
+              );
+            })}
           </ol>
           <button type="button" className="icon-button model-dialog-close" aria-label={copy.close} onClick={requestClose}>
             <X size={18} aria-hidden="true" />
@@ -293,7 +324,7 @@ export function AddModelDialog({
         <div className="model-dialog-body">
           {editing ? <p className="model-dialog-note">{copy.lockedNote}</p> : null}
 
-          <div className="model-step-pane" key={step}>
+          <div className={`model-step-pane model-step-pane-${stepDir}`} key={step}>
             {step === "provider" ? (
               <ProviderPicker
                 copy={copy}
@@ -405,17 +436,18 @@ export function AddModelDialog({
                 type="button"
                 className="small-button"
                 disabled={busy}
-                onClick={() => {
-                  setStepIndex((current) => Math.max(current - 1, 0));
-                  setStatus(null);
-                }}
+                onClick={previousStep}
               >
                 {copy.back}
               </button>
             ) : null}
             {isLastStep ? (
               <button type="button" className="small-button-primary small-button-icon" onClick={() => void submit()} disabled={busy}>
-                <Check size={14} aria-hidden="true" />
+                {busy ? (
+                  <Loader2 size={14} className="model-spin" aria-hidden="true" />
+                ) : (
+                  <Check size={14} aria-hidden="true" />
+                )}
                 <span>{busy ? copy.validating : editing ? copy.validateAndSave : copy.validateAndAdd}</span>
               </button>
             ) : (
@@ -733,7 +765,11 @@ function ModelsStep({
         {discovered.length ? <p className="model-field-hint">{copy.fetchedCount(discovered.length)}</p> : null}
         <div className="model-fetch-row">
           <button type="button" className="small-button small-button-icon" onClick={onFetch} disabled={busy}>
-            <Search size={14} aria-hidden="true" />
+            {busy ? (
+              <Loader2 size={14} className="model-spin" aria-hidden="true" />
+            ) : (
+              <Search size={14} aria-hidden="true" />
+            )}
             <span>{copy.fetchList}</span>
           </button>
           <span className="model-fetch-hint">{copy.fetchListHint}</span>
