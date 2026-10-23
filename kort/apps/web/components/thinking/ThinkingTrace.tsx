@@ -25,6 +25,8 @@ export type TraceTool = {
   id: string;
   tool: "search" | "fetch";
   status: "running" | "complete" | "error";
+  call_id?: string;
+  order?: number;
   query?: string;
   url?: string;
   title?: string;
@@ -35,11 +37,25 @@ export type TraceTool = {
   source_count?: number;
 };
 
+export type TraceCall = {
+  callId: string;
+  name: string;
+  state: "running" | "complete" | "failed" | "skipped";
+  query?: string;
+  url?: string;
+  result?: string;
+  error?: string;
+  reason?: string;
+  trace?: TraceTool;
+};
+
 export type TraceStage = {
   id: string;
   title: string;
   body: string;
   status: "streaming" | "complete" | "active" | "done" | "talking" | "cancelled";
+  order?: number;
+  call?: TraceCall;
 };
 
 const DOT_TONES = ["trace-dot-a", "trace-dot-b", "trace-dot-c"];
@@ -72,39 +88,37 @@ function formatToolDuration(ms?: number) {
   return `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)}s`;
 }
 
-function uniqueSources(traces: TraceTool[]) {
+function uniqueSources(stages: TraceStage[]) {
   const seen = new Set<string>();
-  for (const trace of traces) {
-    for (const source of trace.sources ?? []) {
+  for (const stage of stages) {
+    for (const source of stage.call?.trace?.sources ?? []) {
       if (source.url) seen.add(source.url);
     }
   }
   return seen.size;
 }
 
+function isFetch(name: string) {
+  return name === "web_fetch";
+}
+
 export function ThinkingTrace({
-  traces,
   timeline,
   active,
-  researchActive,
   elapsed,
   locale,
   onOpenDetails,
 }: {
-  traces: TraceTool[];
   timeline: TraceStage[];
   active: boolean;
-  researchActive: boolean;
   elapsed: number;
   locale: Locale;
   onOpenDetails?: () => void;
 }) {
   const copy = t(locale);
   const [manualExpanded, setManualExpanded] = useState<boolean | null>(null);
-  const [showAllSources, setShowAllSources] = useState<Record<string, boolean>>({});
+  const [openItems, setOpenCalls] = useState<Record<string, boolean>>({});
   const [showAllStages, setShowAllStages] = useState(false);
-  const [openFetches, setOpenFetches] = useState<Record<string, boolean>>({});
-  const [openStages, setOpenStages] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
     if (active) {
@@ -117,20 +131,19 @@ export function ThinkingTrace({
     () => timeline.filter((item) => item.status !== "done" && item.status !== "talking"),
     [timeline]
   );
-  const runningTrace = traces.find((trace) => trace.status === "running");
-  const hasBody = traces.length > 0 || stages.length > 0 || researchActive;
+  const runningCall = stages.find((item) => item.call?.state === "running")?.call;
+  const hasBody = stages.length > 0;
   const expanded = manualExpanded ?? active;
-  const sourceCount = uniqueSources(traces);
-  const visibleStages = showAllStages ? stages : stages.slice(-4);
+  const sourceCount = uniqueSources(stages);
+  const visibleStages = showAllStages ? stages : stages.slice(-6);
   const hiddenStages = stages.length - visibleStages.length;
   const lastStageTitle = stages[stages.length - 1]?.title;
 
   if (!hasBody && !active) return null;
 
   let header = lastStageTitle || copy.thinking.active;
-  if (active) {
-    if (runningTrace?.tool === "fetch") header = copy.thinking.reading;
-    else if (runningTrace?.tool === "search" || researchActive) header = copy.thinking.searching;
+  if (runningCall) {
+    header = isFetch(runningCall.name) ? copy.thinking.reading : copy.thinking.searching;
   }
 
   const doneHeader =
@@ -145,7 +158,7 @@ export function ThinkingTrace({
         onClick={() => setManualExpanded((current) => !(current ?? active))}
       >
         <span className="thinking-trace-glyph" aria-hidden="true">
-          {researchActive || runningTrace ? <Search size={15} /> : <Sparkles size={15} />}
+          {runningCall ? <Search size={15} /> : <Sparkles size={15} />}
         </span>
         {active ? (
           <span className="thinking-trace-title thinking-trace-shimmer" role="status">
@@ -179,160 +192,135 @@ export function ThinkingTrace({
       >
         <div className="thinking-trace-clip">
           <div className="thinking-trace-rail">
-            {researchActive && traces.length === 0 ? (
-              <div className="trace-row trace-row-wait" role="status">
-                <span className="trace-spinner" aria-hidden="true" />
-                <span className="trace-text trace-shimmer">{copy.thinking.searching}</span>
-              </div>
-            ) : null}
-
-            {traces.map((trace, traceIndex) => {
-              if (trace.tool === "search") {
-                const sources = trace.sources ?? [];
-                const showingAll = Boolean(showAllSources[trace.id]);
-                const visible = showingAll ? sources : sources.slice(0, 3);
-                const hidden = sources.length - visible.length;
-                return (
-                  <div className="trace-group" key={trace.id}>
-                    <div
-                      className="trace-row trace-row-query"
-                      style={{ animationDelay: `${Math.min(traceIndex, 4) * 60}ms` }}
-                    >
-                      <span className="trace-icon" aria-hidden="true">
-                        <Search size={13} />
-                      </span>
-                      <span className="trace-text">{trace.query || copy.thinking.searching}</span>
-                      <span className="trace-meta">
-                        {trace.status === "running" ? (
-                          <span className="trace-spinner" aria-hidden="true" />
-                        ) : trace.status === "error" ? (
-                          <span className="trace-meta-error" title={trace.error ?? undefined}>
-                            {copy.thinking.traceFailed}
-                          </span>
-                        ) : (
-                          copy.thinking.sourceCount.replace("{count}", String(sources.length))
-                        )}
-                      </span>
-                    </div>
-                    {visible.map((source, sourceIndex) => {
-                      const domain = source.domain || domainOf(source.url);
-                      return (
-                        <a
-                          key={`${trace.id}-${source.url}`}
-                          className="trace-row trace-row-source"
-                          href={source.url}
-                          target="_blank"
-                          rel="noreferrer noopener"
-                          title={source.snippet || source.title}
-                          style={{ animationDelay: `${Math.min(sourceIndex, 4) * 55 + 70}ms` }}
-                        >
-                          <span className={`trace-dot ${toneFor(domain)}`} aria-hidden="true">
-                            <span>{domain.slice(0, 1).toUpperCase()}</span>
-                          </span>
-                          <span className="trace-text trace-text-source">{source.title}</span>
-                          <span className="trace-meta trace-domain">{domain}</span>
-                        </a>
-                      );
-                    })}
-                    {hidden > 0 ? (
-                      <button
-                        type="button"
-                        className="trace-more"
-                        onClick={() =>
-                          setShowAllSources((current) => ({ ...current, [trace.id]: !showingAll }))
-                        }
-                      >
-                        {showingAll
-                          ? copy.thinking.showLess
-                          : copy.thinking.moreSources.replace("{count}", String(hidden))}
-                      </button>
-                    ) : null}
-                  </div>
-                );
-              }
-
-              const fetchDomain = trace.url ? domainOf(trace.url) : "";
-              const fetchTitle = trace.title || fetchDomain || trace.url || copy.thinking.reading;
-              const open = Boolean(openFetches[trace.id]);
-              return (
-                <div className="trace-group" key={trace.id}>
-                  <div className="trace-row trace-row-fetch" style={{ animationDelay: `${Math.min(traceIndex, 4) * 60}ms` }}>
-                    <span className="trace-icon" aria-hidden="true">
-                      <FileText size={13} />
-                    </span>
-                    <button
-                      type="button"
-                      className="trace-text trace-fetch-toggle"
-                      onClick={() =>
-                        trace.excerpt
-                          ? setOpenFetches((current) => ({ ...current, [trace.id]: !open }))
-                          : undefined
-                      }
-                      disabled={!trace.excerpt}
-                    >
-                      {trace.status === "running" ? copy.thinking.reading : fetchTitle}
-                    </button>
-                    <span className="trace-meta">
-                      {trace.status === "running" ? (
-                        <span className="trace-spinner" aria-hidden="true" />
-                      ) : trace.status === "error" ? (
-                        <span className="trace-meta-error" title={trace.error ?? undefined}>
-                          {copy.thinking.traceFailed}
-                        </span>
-                      ) : (
-                        <>
-                          {fetchDomain}
-                          {trace.duration_ms ? ` · ${formatToolDuration(trace.duration_ms)}` : ""}
-                        </>
-                      )}
-                    </span>
-                    {trace.url && trace.status === "complete" ? (
-                      <a
-                        className="trace-open"
-                        href={trace.url}
-                        target="_blank"
-                        rel="noreferrer noopener"
-                        aria-label={copy.ui.openInNewTab}
-                        title={copy.ui.openInNewTab}
-                      >
-                        <ExternalLink size={12} aria-hidden="true" />
-                      </a>
-                    ) : null}
-                  </div>
-                  {open && trace.excerpt ? (
-                    <div className="trace-excerpt">{trace.excerpt}</div>
-                  ) : null}
-                </div>
-              );
-            })}
-
             {hiddenStages > 0 ? (
               <button type="button" className="trace-more" onClick={() => setShowAllStages(true)}>
                 {copy.thinking.earlierStages.replace("{count}", String(hiddenStages))}
               </button>
             ) : null}
 
-            {visibleStages.map((stage) => {
-              const open = Boolean(openStages[stage.id]);
+            {visibleStages.map((stage, index) => {
+              const delay = `${Math.min(index, 6) * 55}ms`;
+              if (stage.call) {
+                const call = stage.call;
+                const trace = call.trace;
+                const fetching = isFetch(call.name);
+                const sources = trace?.sources ?? [];
+                const detail = fetching ? trace?.excerpt : undefined;
+                const open = Boolean(openItems[stage.id]);
+                const domain = trace?.url ? domainOf(trace.url) : call.url ? domainOf(call.url) : "";
+                const canExpand = sources.length > 0 || Boolean(detail) || Boolean(call.error);
+                const label =
+                  call.state === "running"
+                    ? fetching
+                      ? copy.thinking.reading
+                      : copy.thinking.searching
+                    : fetching
+                      ? trace?.title || domain || call.url || copy.thinking.reading
+                      : call.query || copy.thinking.searching;
+
+                return (
+                  <div className="trace-group" key={stage.id}>
+                    <div
+                      className={`trace-row ${fetching ? "trace-row-fetch" : "trace-row-query"} trace-row-call trace-row-${call.state}`}
+                      style={{ animationDelay: delay }}
+                    >
+                      <span className="trace-icon" aria-hidden="true">
+                        {fetching ? <FileText size={13} /> : <Search size={13} />}
+                      </span>
+                      <button
+                        type="button"
+                        className="trace-text trace-fetch-toggle"
+                        aria-expanded={open}
+                        disabled={!canExpand}
+                        onClick={() =>
+                          canExpand
+                            ? setOpenCalls((current) => ({ ...current, [stage.id]: !open }))
+                            : undefined
+                        }
+                      >
+                        {label}
+                      </button>
+                      <span className="trace-meta">
+                        {call.state === "running" ? (
+                          <span className="trace-spinner" aria-hidden="true" />
+                        ) : call.state === "skipped" ? (
+                          <span className="trace-meta-muted">{copy.thinking.callSkipped}</span>
+                        ) : call.state === "failed" ? (
+                          <span className="trace-meta-error" title={call.error ?? undefined}>
+                            {copy.thinking.traceFailed}
+                          </span>
+                        ) : fetching ? (
+                          <>
+                            {domain}
+                            {trace?.duration_ms ? ` · ${formatToolDuration(trace.duration_ms)}` : ""}
+                          </>
+                        ) : (
+                          copy.thinking.sourceCount.replace("{count}", String(sources.length))
+                        )}
+                      </span>
+                      {fetching && trace?.url && call.state === "complete" ? (
+                        <a
+                          className="trace-open"
+                          href={trace.url}
+                          target="_blank"
+                          rel="noreferrer noopener"
+                          aria-label={copy.ui.openInNewTab}
+                          title={copy.ui.openInNewTab}
+                        >
+                          <ExternalLink size={12} aria-hidden="true" />
+                        </a>
+                      ) : null}
+                    </div>
+
+                    {open && sources.length > 0 ? (
+                      sources.map((source, sourceIndex) => {
+                        const host = source.domain || domainOf(source.url);
+                        return (
+                          <a
+                            key={`${stage.id}-${source.url}`}
+                            className="trace-row trace-row-source"
+                            href={source.url}
+                            target="_blank"
+                            rel="noreferrer noopener"
+                            title={source.snippet || source.title}
+                            style={{ animationDelay: `${Math.min(sourceIndex, 4) * 50}ms` }}
+                          >
+                            <span className={`trace-dot ${toneFor(host)}`} aria-hidden="true">
+                              <span>{host.slice(0, 1).toUpperCase()}</span>
+                            </span>
+                            <span className="trace-text trace-text-source">{source.title}</span>
+                            <span className="trace-meta trace-domain">{host}</span>
+                          </a>
+                        );
+                      })
+                    ) : null}
+
+                    {open && detail ? <div className="trace-excerpt">{detail}</div> : null}
+                    {open && call.error ? <div className="trace-call-error">{call.error}</div> : null}
+                    {open && call.reason ? (
+                      <div className="trace-call-muted">{copy.thinking.callSkippedDetail}</div>
+                    ) : null}
+                    {call.state === "complete" && call.result && !open ? (
+                      <div className="trace-call-summary">{call.result}</div>
+                    ) : null}
+                  </div>
+                );
+              }
+
+              const open = Boolean(openItems[stage.id]);
               const streaming = stage.status === "streaming" || stage.status === "active";
               return (
                 <div className="trace-group" key={stage.id}>
-                  <div className="trace-row trace-row-stage">
+                  <div className="trace-row trace-row-stage" style={{ animationDelay: delay }}>
                     <span className="trace-stage-icon" aria-hidden="true">
-                      {streaming ? (
-                        <span className="trace-spinner" />
-                      ) : (
-                        <Check size={13} />
-                      )}
+                      {streaming ? <span className="trace-spinner" /> : <Check size={13} />}
                     </span>
                     {stage.body ? (
                       <button
                         type="button"
                         className="trace-text trace-stage-toggle"
                         aria-expanded={open}
-                        onClick={() =>
-                          setOpenStages((current) => ({ ...current, [stage.id]: !open }))
-                        }
+                        onClick={() => setOpenCalls((current) => ({ ...current, [stage.id]: !open }))}
                       >
                         {stage.title}
                       </button>
@@ -348,9 +336,7 @@ export function ThinkingTrace({
                       />
                     ) : null}
                   </div>
-                  {open && stage.body ? (
-                    <div className="trace-stage-detail">{stage.body}</div>
-                  ) : null}
+                  {open && stage.body ? <div className="trace-stage-detail">{stage.body}</div> : null}
                 </div>
               );
             })}
@@ -362,7 +348,7 @@ export function ThinkingTrace({
               </button>
             ) : null}
 
-            {traces.some((trace) => trace.status === "error") ? (
+            {stages.some((stage) => stage.call?.state === "failed") ? (
               <div className="trace-row trace-row-error">
                 <AlertCircle size={13} aria-hidden="true" />
                 <span className="trace-text">{copy.thinking.tracePartial}</span>

@@ -50,6 +50,12 @@ export function discussionLevels(locale: Locale): DiscussionLevelOption[] {
 export const t = (locale: Locale) => {
   const copy = COPY[locale];
   return {
+    composer: {
+      ...copy.composer,
+      attachmentChars: (count: number) => formatTemplate(copy.composer.attachmentChars, { count }),
+      commandLevel: (level: string) => formatTemplate(copy.composer.commandLevel, { level }),
+      slashEmpty: (query: string) => formatTemplate(copy.composer.slashEmpty, { query }),
+    },
     thinking: {
       ...copy.thinking,
       active: initialThinkingLabel(locale),
@@ -71,6 +77,11 @@ export const t = (locale: Locale) => {
       keyFromEnv: (envKey: string) => formatTemplate(copy.models.keyFromEnv, { envKey }),
       keyKeepEnv: (envKey: string) => formatTemplate(copy.models.keyKeepEnv, { envKey }),
       probeMissingModels: (models: string) => formatTemplate(copy.models.probeMissingModels, { models }),
+    },
+    search: {
+      ...copy.search,
+      matchCount: (count: number) => formatTemplate(copy.search.matchCount, { count }),
+      failed: (error: string) => formatTemplate(copy.search.failed, { error }),
     },
     room: {
       ...copy.room,
