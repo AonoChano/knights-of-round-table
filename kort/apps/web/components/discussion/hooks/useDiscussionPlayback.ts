@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CharacterState, DialogueLine, Participant } from '../types';
 
-export type Phase = 'idle' | 'typing' | 'hold' | 'end';
+export type Phase = 'idle' | 'typing' | 'hold' | 'await' | 'end';
 
 interface Options {
   participants: Participant[];
@@ -52,7 +52,10 @@ export function useDiscussionPlayback(lines: DialogueLine[], { participants, spe
           setIndex((value) => value + 1);
           setTyped(0);
           setPhase('typing');
-        } else if (!live) {
+        } else if (live) {
+          // 发言已说完、下一条还没到：让所有人进入“推演中”，而不是僵在聆听态
+          setPhase('await');
+        } else {
           setPhase('end');
         }
       }, (line.absent ? 120 : holdMs(line.text.length)) / speed);
@@ -65,8 +68,8 @@ export function useDiscussionPlayback(lines: DialogueLine[], { participants, spe
 
   const states = useMemo(() => {
     const map: Record<string, CharacterState> = {};
-    if (!line) {
-      const waiting: CharacterState = live ? 'thinking' : 'idle';
+    if (!line || phase === 'await') {
+      const waiting: CharacterState = live && playing ? 'thinking' : 'idle';
       for (const participant of participants) map[participant.id] = waiting;
       return map;
     }
@@ -88,7 +91,7 @@ export function useDiscussionPlayback(lines: DialogueLine[], { participants, spe
       for (const participant of participants) map[participant.id] = 'reacting';
     }
     return map;
-  }, [participants, line, phase, typed, live]);
+  }, [participants, line, phase, typed, live, playing]);
 
   const goTo = useCallback(
     (next: number) => {

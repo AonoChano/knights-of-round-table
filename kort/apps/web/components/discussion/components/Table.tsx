@@ -127,13 +127,23 @@ export function Table({ theme, seats, participants, speakerId, showNameplates }:
       {/* 夜间火光映照 */}
       <ellipse cx={cx} cy={cy} rx={rx} ry={ry} fill="url(#tableGlow)" className="theme-fade glow-pulse" opacity={night ? 1 : 0} />
 
-      {/* 每位的茶杯与名牌 */}
+      {/* 中心摆件：白天茶具 / 夜晚炭火盆。画在席位之前，后排名牌才不会被热气穿过 */}
+      <g transform={`translate(${cx} ${cy - 6})`}>
+        <g className="theme-fade" opacity={night ? 0 : 1}>
+          <TeaSet />
+        </g>
+        <g className="theme-fade" opacity={night ? 1 : 0}>
+          <Brazier />
+        </g>
+      </g>
+
+      {/* 每位的茶杯与名牌：后排名牌只往前挪一点点，保持在两侧名牌之上，6–8 人时不会压到邻座 */}
       {seats.map((s, i) => {
         const p = participants[i];
         if (!p) return null;
         const t = s.front ? 0.34 : 0.42;
         const mx = s.x + (cx - s.x) * t;
-        const my = s.y + (cy - s.y) * (s.front ? 0.2 : 0.62) + (s.front ? 0 : 6);
+        const my = s.y + (cy - s.y) * (s.front ? 0.2 : 0.28);
         const active = speakerId === p.id;
         return (
           <g key={p.id} transform={`translate(${mx} ${my})`}>
@@ -162,16 +172,6 @@ export function Table({ theme, seats, participants, speakerId, showNameplates }:
           </g>
         );
       })}
-
-      {/* 中心摆件：白天茶具 / 夜晚炭火盆 */}
-      <g transform={`translate(${cx} ${cy - 6})`}>
-        <g className="theme-fade" opacity={night ? 0 : 1}>
-          <TeaSet />
-        </g>
-        <g className="theme-fade" opacity={night ? 1 : 0}>
-          <Brazier />
-        </g>
-      </g>
     </svg>
   );
 }

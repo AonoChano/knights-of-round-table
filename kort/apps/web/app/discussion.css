@@ -264,6 +264,42 @@
   text-transform: uppercase;
 }
 
+.discussion-kicker-sep {
+  opacity: 0.42;
+}
+
+.discussion-speaker {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 190px;
+  overflow: hidden;
+  padding: 2px 9px 2px 7px;
+  border-radius: 999px;
+  background: rgba(217, 119, 87, 0.1);
+  color: #9a4b32;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.015em;
+  text-overflow: ellipsis;
+  text-transform: none;
+  white-space: nowrap;
+  animation: rt-speakerIn 280ms var(--ease-productive, cubic-bezier(0.2, 0.8, 0.2, 1)) both;
+}
+
+.discussion-speaker-dot {
+  width: 6px;
+  height: 6px;
+  flex-shrink: 0;
+  border-radius: 999px;
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.55);
+}
+
+@keyframes rt-speakerIn {
+  from { opacity: 0; transform: translateY(2px) scale(0.96); }
+  to { opacity: 1; transform: none; }
+}
+
 .discussion-question {
   margin: 3px 0 0;
   overflow: hidden;
@@ -334,6 +370,47 @@
   letter-spacing: 0.02em;
   backdrop-filter: blur(10px);
   box-shadow: 0 18px 44px rgba(0, 0, 0, 0.28);
+}
+
+/* 轮次切换提示：只在轮数变化时闪现一次，告诉观众讨论推进到了哪一轮 */
+.discussion-round-flash {
+  position: absolute;
+  top: 16px;
+  left: 50%;
+  z-index: 5600;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 5px 14px;
+  border-radius: 999px;
+  background: rgba(24, 16, 12, 0.52);
+  color: #fbead6;
+  font-family: "Songti SC", "STSong", "Noto Serif SC", Georgia, serif;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.18em;
+  white-space: nowrap;
+  backdrop-filter: blur(10px);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.22);
+  animation: rt-roundFlash 1800ms var(--ease-productive, cubic-bezier(0.2, 0.8, 0.2, 1)) both;
+}
+
+.discussion-round-flash::before,
+.discussion-round-flash::after {
+  width: 20px;
+  height: 1px;
+  background: linear-gradient(90deg, rgba(251, 234, 214, 0), rgba(251, 234, 214, 0.55));
+  content: "";
+}
+
+.discussion-round-flash::after {
+  background: linear-gradient(90deg, rgba(251, 234, 214, 0.55), rgba(251, 234, 214, 0));
+}
+
+@keyframes rt-roundFlash {
+  0% { opacity: 0; transform: translate(-50%, -7px) scale(0.95); }
+  16%, 68% { opacity: 1; transform: translate(-50%, 0) scale(1); }
+  100% { opacity: 0; transform: translate(-50%, -5px) scale(0.98); }
 }
 
 /* 输入框上方的入口 */
@@ -474,12 +551,26 @@
   padding: 10px;
 }
 
+/* 气泡与记录里的代码块更窄，收紧一档尺寸 */
+.discussion-shell .code-block {
+  margin: 8px 0;
+}
+
+.discussion-shell .code-block-head {
+  height: 32px;
+}
+
+.discussion-shell .code-block-body {
+  font-size: 12px;
+}
+
 .discussion-shell .markdown-body .katex-display {
   overflow-x: auto;
   padding: 2px 0;
 }
 
-.discussion-shell[data-theme='night'] .markdown-body code {
+/* 只给行内代码加亮底，代码块内的 <code> 由 .code-block 自己接管 */
+.discussion-shell[data-theme='night'] .markdown-body code:not(.code-text) {
   background: rgba(255, 255, 255, 0.12);
 }
 
@@ -515,5 +606,27 @@
   }
   .discussion-question {
     font-size: 16px;
+  }
+}
+
+/* 降低动效偏好：只保留发言推进，去掉跳动、尘埃与闪烁这类装饰性运动 */
+@media (prefers-reduced-motion: reduce) {
+  .kort-room .char-wrap--reacting,
+  .kort-room .think-dot,
+  .kort-room .fire-flicker,
+  .kort-room .ember,
+  .kort-room .mote-ember,
+  .kort-room .mote-dust,
+  .discussion-dot-live,
+  .discussion-speaker,
+  .discussion-round-flash {
+    animation: none;
+  }
+  .discussion-shell {
+    animation: none;
+  }
+  .discussion-round-flash {
+    opacity: 1;
+    transform: translate(-50%, 0);
   }
 }

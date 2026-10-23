@@ -106,6 +106,31 @@ export function DiscussionView({ question, messages, agents, streaming, locale, 
   const speakerSeat = playback.speakerId ? seatOf(playback.speakerId) : null;
   const waiting = messages.length === 0;
   const currentRound = messages[messages.length - 1]?.round ?? 0;
+  const replaying = !streaming && playback.phase !== 'end';
+  const stageState = waiting
+    ? tr.ongoing
+    : streaming
+      ? playback.phase === 'await'
+        ? tr.deliberating
+        : tr.ongoing
+      : playback.phase === 'end'
+        ? tr.adjourned
+        : tr.replaying;
+  const [roundFlash, setRoundFlash] = useState<{ round: number; token: number } | null>(null);
+  const lastRoundRef = useRef(0);
+
+  useEffect(() => {
+    const round = playback.currentRound;
+    if (!round || round === lastRoundRef.current) return;
+    lastRoundRef.current = round;
+    const token = Date.now();
+    setRoundFlash({ round, token });
+    const timer = window.setTimeout(
+      () => setRoundFlash((current) => (current?.token === token ? null : current)),
+      1800
+    );
+    return () => window.clearTimeout(timer);
+  }, [playback.currentRound]);
 
   /** 座位层级：靠前的座位压在靠后的座位上 */
   const seatZ = (seat: SeatLayout) => Math.round(seat.y) + (seat.front ? 1000 : 0);
@@ -209,9 +234,20 @@ export function DiscussionView({ question, messages, agents, streaming, locale, 
         </button>
         <div className="discussion-topic">
           <div className="discussion-kicker">
-            <span className={waiting ? 'discussion-dot' : 'discussion-dot discussion-dot-live'} />
-            {streaming ? tr.ongoing : tr.adjourned}
-            {currentRound > 0 ? ` · ${tr.round(currentRound)}` : ''}
+            <span className={waiting || !(streaming || replaying) ? 'discussion-dot' : 'discussion-dot discussion-dot-live'} />
+            <span>{stageState}</span>
+            {currentRound > 0 ? (
+              <>
+                <span className="discussion-kicker-sep">·</span>
+                <span>{tr.round(currentRound)}</span>
+              </>
+            ) : null}
+            {speaker ? (
+              <span className="discussion-speaker" key={`${playback.index}-${speaker.id}`}>
+                <span className="discussion-speaker-dot" style={{ background: speaker.color }} />
+                {tr.speaking(speaker.name)}
+              </span>
+            ) : null}
           </div>
           <h2 className="discussion-question">{question}</h2>
         </div>
@@ -343,9 +379,16 @@ export function DiscussionView({ question, messages, agents, streaming, locale, 
               text={playback.typedText}
               done={playback.phase === 'hold'}
               theme={theme}
+              locale={locale}
             />
           ) : null}
         </div>
+
+        {roundFlash ? (
+          <div className="discussion-round-flash" key={roundFlash.token} role="status">
+            {tr.round(roundFlash.round)}
+          </div>
+        ) : null}
 
         {waiting ? (
           <div className="pointer-events-none absolute left-1/2 top-1/2 z-[5500] -translate-x-1/2 -translate-y-1/2">
@@ -443,6 +486,7 @@ export function DiscussionView({ question, messages, agents, streaming, locale, 
           title={tr.transcript}
           roundLabel={tr.round}
           absentLabel={tr.absent}
+          locale={locale}
           onClose={() => setTranscriptOpen(false)}
           onJump={playback.goTo}
         />
