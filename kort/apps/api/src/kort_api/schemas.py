@@ -284,6 +284,7 @@ class MessageNode(BaseModel):
     content: str = ""
     status: Literal["streaming", "complete", "error", "cancelled"] = "complete"
     error: str | None = None
+    elapsed_ms: int = Field(default=0, ge=0)
     created_at: datetime = Field(default_factory=utc_now)
     stage_summaries: list[StageSummary] = Field(default_factory=list)
     delegation: DelegationMetadata | None = None

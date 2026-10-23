@@ -337,6 +337,7 @@ def test_cancel_keeps_partial_assistant_node() -> None:
         expert_count=1,
     )
     job.partial_body = "partial answer"
+    job.thinking_elapsed_ms = 4321
     job.partial_summaries = [
         StageSummary(
             id="summary-a",
@@ -366,6 +367,7 @@ def test_cancel_keeps_partial_assistant_node() -> None:
     assert assistant_node["status"] == "cancelled"
     assert assistant_node["delegation"]["route_kind"] == "direct"
     assert assistant_node["stage_summaries"][0]["id"] == "summary-a"
+    assert assistant_node["elapsed_ms"] == 4321
     assert detail["active_path"] == [user.node_id, assistant.node_id]
 
 

@@ -68,6 +68,8 @@ class ConversationJob:
         self.partial_summaries: list[StageSummary] = []
         self.partial_messages: list[DiscussionMessage] = []
         self.delegation: DelegationMetadata | None = None
+        self.started_at = time.monotonic()
+        self.thinking_elapsed_ms = 0
         self.condition = threading.Condition()
 
     def append(self, event: str) -> None:
@@ -694,6 +696,7 @@ class VisibleConversationService:
         node.discussion_messages = job.partial_messages
         node.delegation = job.delegation
         node.error = error
+        node.elapsed_ms = max(node.elapsed_ms, self._job_elapsed_ms(job))
         record.updated_at = utc_now()
         self.store.append(record)
         return node
@@ -864,7 +867,17 @@ class VisibleConversationService:
             raise
 
     def _track_event(self, job: ConversationJob, sse_event: str) -> None:
-        if sse_event.startswith("event: final_delta"):
+        if sse_event.startswith("event: thinking_complete"):
+            elapsed_ms = 0
+            try:
+                elapsed_ms = int(json.loads(sse_event.split("data: ", 1)[1]).get("elapsed_ms") or 0)
+            except (json.JSONDecodeError, ValueError, AttributeError):
+                elapsed_ms = 0
+            # Discussion/direct routes omit elapsed_ms; fall back to the job clock
+            if elapsed_ms <= 0:
+                elapsed_ms = int((time.monotonic() - job.started_at) * 1000)
+            job.thinking_elapsed_ms = max(job.thinking_elapsed_ms, elapsed_ms)
+        elif sse_event.startswith("event: final_delta"):
             try:
                 job.partial_body += json.loads(sse_event.split("data: ", 1)[1])["delta"]
             except (json.JSONDecodeError, KeyError, IndexError):
@@ -901,9 +914,14 @@ class VisibleConversationService:
         node.discussion_messages = job.partial_messages
         node.delegation = delegation
         node.error = None
+        node.elapsed_ms = max(node.elapsed_ms, self._job_elapsed_ms(job))
         record.updated_at = utc_now()
         self.store.append(record)
         return node
+
+    @staticmethod
+    def _job_elapsed_ms(job: ConversationJob) -> int:
+        return job.thinking_elapsed_ms or max(1, int((time.monotonic() - job.started_at) * 1000))
 
     def _remember_round(
         self,
