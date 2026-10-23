@@ -35,8 +35,10 @@ from .schemas import (
     MessageNodeView,
     ProviderProfile,
     StageSummary,
+    ToolTrace,
     utc_now,
 )
+from .web_research import ResearchOutcome, run_web_research
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +69,7 @@ class ConversationJob:
         self.partial_body = ""
         self.partial_summaries: list[StageSummary] = []
         self.partial_messages: list[DiscussionMessage] = []
+        self.partial_traces: dict[str, ToolTrace] = {}
         self.delegation: DelegationMetadata | None = None
         self.started_at = time.monotonic()
         self.thinking_elapsed_ms = 0
@@ -694,6 +697,7 @@ class VisibleConversationService:
         node.content = job.partial_body
         node.stage_summaries = _merge_streamed_summaries(job.partial_summaries)
         node.discussion_messages = job.partial_messages
+        node.tool_traces = list(job.partial_traces.values())
         node.delegation = job.delegation
         node.error = error
         node.elapsed_ms = max(node.elapsed_ms, self._job_elapsed_ms(job))
@@ -782,6 +786,20 @@ class VisibleConversationService:
             if _cancelled():
                 return
 
+            research: ResearchOutcome | None = None
+            if payload.web_search:
+                research = yield from self._stream_research(
+                    job=job,
+                    question=question,
+                    agents=agents,
+                    providers=providers,
+                    secrets=secrets,
+                )
+                if _cancelled():
+                    return
+                if research.digest:
+                    question_to_ask = f"{question_to_ask}\n\n{research.digest}"
+
             if route_decision.kind == "solo_thinking":
                 for sse_event in _async_gen_to_sync(
                     run_solo_thinking_stream,
@@ -866,6 +884,77 @@ class VisibleConversationService:
             )
             raise
 
+    def _stream_research(
+        self,
+        *,
+        job: ConversationJob,
+        question: str,
+        agents: list[AgentDefinition],
+        providers: list[ProviderProfile],
+        secrets: dict[str, str],
+    ) -> Iterator[str]:
+        """Run the research pre-pass on a worker thread and stream its tool traces."""
+        events: queue.Queue[tuple[str, object]] = queue.Queue()
+        holder: dict[str, ResearchOutcome] = {}
+
+        def emit(trace: ToolTrace) -> None:
+            events.put(("trace", trace))
+
+        def worker() -> None:
+            try:
+                holder["outcome"] = run_web_research(
+                    question=question,
+                    agents=agents,
+                    providers=providers,
+                    secrets=secrets,
+                    emit=emit,
+                    should_cancel=lambda: job.cancel_requested,
+                )
+            except Exception as exc:
+                logger.exception("conversation_job.research_failed conversation_id=%s", job.conversation_id)
+                outcome = ResearchOutcome()
+                outcome.error = str(exc)[:220]
+                holder["outcome"] = outcome
+            finally:
+                events.put(("done", None))
+
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
+        yield self._sse("research_started", {"conversation_id": job.conversation_id})
+
+        while True:
+            try:
+                kind, value = events.get(timeout=600)
+            except queue.Empty:
+                raise RuntimeError("Web research timed out") from None
+            if kind == "done":
+                break
+            if kind != "trace":
+                continue
+            trace = value
+            assert isinstance(trace, ToolTrace)
+            job.partial_traces[trace.id] = trace
+            yield self._sse("tool_trace", trace.model_dump(mode="json"))
+
+        outcome = holder.get("outcome") or ResearchOutcome()
+        if outcome.error:
+            logger.warning(
+                "conversation_job.research_error conversation_id=%s error=%s",
+                job.conversation_id,
+                outcome.error,
+            )
+        yield self._sse(
+            "research_complete",
+            {
+                "conversation_id": job.conversation_id,
+                "source_count": outcome.source_count,
+                "elapsed_ms": outcome.elapsed_ms,
+                "traces": len(outcome.traces),
+                "error": outcome.error,
+            },
+        )
+        return outcome
+
     def _track_event(self, job: ConversationJob, sse_event: str) -> None:
         if sse_event.startswith("event: thinking_complete"):
             elapsed_ms = 0
@@ -896,6 +985,12 @@ class VisibleConversationService:
                 )
             except (json.JSONDecodeError, KeyError, IndexError, ValueError):
                 pass
+        elif sse_event.startswith("event: tool_trace"):
+            try:
+                trace = ToolTrace.model_validate(json.loads(sse_event.split("data: ", 1)[1]))
+                job.partial_traces[trace.id] = trace
+            except (json.JSONDecodeError, KeyError, IndexError, ValueError):
+                pass
 
     def _store_completed_node(
         self,
@@ -912,6 +1007,7 @@ class VisibleConversationService:
         node.content = job.partial_body
         node.stage_summaries = _merge_streamed_summaries(job.partial_summaries)
         node.discussion_messages = job.partial_messages
+        node.tool_traces = list(job.partial_traces.values())
         node.delegation = delegation
         node.error = None
         node.elapsed_ms = max(node.elapsed_ms, self._job_elapsed_ms(job))

@@ -236,6 +236,31 @@ class DiscussionMessage(BaseModel):
     text: str
 
 
+class ToolSource(BaseModel):
+    """One page a web tool surfaced: search hit or fetched document."""
+
+    title: str
+    url: str
+    domain: str = ""
+    snippet: str = ""
+
+
+class ToolTrace(BaseModel):
+    """A single visible tool call, streamed while it runs and persisted with the node."""
+
+    id: str
+    tool: Literal["search", "fetch"]
+    status: Literal["running", "complete", "error"] = "running"
+    query: str = ""
+    url: str = ""
+    title: str = ""
+    error: str | None = None
+    duration_ms: int = Field(default=0, ge=0)
+    sources: list[ToolSource] = Field(default_factory=list)
+    excerpt: str = ""
+    source_count: int = Field(default=0, ge=0)
+
+
 class ConversationRequest(BaseModel):
     """Routing inputs for one generation; built server-side from the branch being answered."""
 
@@ -257,6 +282,7 @@ class BranchRequest(BaseModel):
     level: str = Field(default="auto", pattern=r"^(off|auto|low|medium|high)$")
     deep_think: bool = False
     custom_max_rounds: int | None = Field(default=None, ge=1, le=12)
+    web_search: bool = False
 
     @model_validator(mode="after")
     def content_matches_role(self) -> "BranchRequest":
@@ -289,6 +315,7 @@ class MessageNode(BaseModel):
     stage_summaries: list[StageSummary] = Field(default_factory=list)
     delegation: DelegationMetadata | None = None
     discussion_messages: list[DiscussionMessage] = Field(default_factory=list)
+    tool_traces: list[ToolTrace] = Field(default_factory=list)
     active_child_id: str | None = None
 
 

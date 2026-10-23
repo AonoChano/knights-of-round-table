@@ -4,6 +4,8 @@ import json
 import os
 import re
 from collections.abc import AsyncIterator, Iterator
+from dataclasses import dataclass, field
+from typing import Any
 
 import httpx
 
@@ -12,6 +14,38 @@ from .schemas import ProviderProfile
 
 class ModelCallError(RuntimeError):
     pass
+
+
+@dataclass
+class ToolCall:
+    id: str
+    name: str
+    arguments: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ToolTurn:
+    text: str
+    tool_calls: list[ToolCall] = field(default_factory=list)
+
+
+@dataclass
+class ToolResult:
+    call_id: str
+    content: str
+    is_error: bool = False
+
+
+def _parse_arguments(raw: Any) -> dict[str, Any]:
+    if isinstance(raw, dict):
+        return raw
+    if not isinstance(raw, str) or not raw.strip():
+        return {}
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        return {}
+    return value if isinstance(value, dict) else {}
 
 
 STYLE_CHAT = "openai"
@@ -328,6 +362,197 @@ class OpenAICompatibleClient:
                             yield {"type": "answer", "text": answer}
             except httpx.HTTPError as exc:
                 raise ModelCallError(f"Model stream failed: {exc}") from exc
+
+
+class ToolSession:
+    """Provider-neutral function-calling turn, translated per wire protocol.
+
+    The caller supplies JSON-Schema tools, runs the loop (execute calls, feed
+    results back), and stops when a turn comes back without tool calls.
+    """
+
+    def __init__(
+        self,
+        client: "OpenAICompatibleClient",
+        provider: ProviderProfile,
+        *,
+        prompt: str,
+        system_prompt: str,
+        tools: list[dict[str, Any]],
+    ) -> None:
+        self.client = client
+        self.provider = provider
+        self.style = normalize_style(provider.api_style)
+        self.tools = tools
+        self.url, self.headers, self.payload = client._prepare(
+            provider, prompt, system_prompt, stream=False, disable_thinking=False
+        )
+        self._apply_tools()
+        if self.style == STYLE_RESPONSES:
+            self.input_items: list[dict[str, Any]] = list(self.payload["input"])
+        else:
+            self.messages: list[dict[str, Any]] = list(self.payload["messages"])
+
+    def _apply_tools(self) -> None:
+        if self.style == STYLE_ANTHROPIC:
+            self.payload["tools"] = [
+                {
+                    "name": tool["name"],
+                    "description": tool.get("description", ""),
+                    "input_schema": tool.get("parameters") or {"type": "object", "properties": {}},
+                }
+                for tool in self.tools
+            ]
+        elif self.style == STYLE_RESPONSES:
+            self.payload["tools"] = [
+                {
+                    "type": "function",
+                    "name": tool["name"],
+                    "description": tool.get("description", ""),
+                    "parameters": tool.get("parameters") or {"type": "object", "properties": {}},
+                }
+                for tool in self.tools
+            ]
+        else:
+            self.payload["tools"] = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": tool["name"],
+                        "description": tool.get("description", ""),
+                        "parameters": tool.get("parameters") or {"type": "object", "properties": {}},
+                    },
+                }
+                for tool in self.tools
+            ]
+        self.payload["tool_choice"] = "auto"
+
+    def run(self) -> ToolTurn:
+        if self.style == STYLE_CHAT:
+            self.payload["messages"] = self.messages
+        elif self.style == STYLE_RESPONSES:
+            self.payload["input"] = self.input_items
+        try:
+            response = httpx.post(self.url, headers=self.headers, json=self.payload, timeout=120)
+            response.raise_for_status()
+            data = response.json()
+        except httpx.HTTPStatusError as exc:
+            detail = sanitize_error_text(exc.response.text)
+            raise ModelCallError(
+                f"Model tool call failed with HTTP {exc.response.status_code}: {detail}"
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise ModelCallError(f"Model tool call failed: {exc}") from exc
+        if self.style == STYLE_ANTHROPIC:
+            return self._read_anthropic(data)
+        if self.style == STYLE_RESPONSES:
+            return self._read_responses(data)
+        return self._read_chat(data)
+
+    def submit_tool_results(self, results: list[ToolResult]) -> None:
+        if self.style == STYLE_ANTHROPIC:
+            self.messages.append(
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": result.call_id,
+                            "content": result.content,
+                            **({"is_error": True} if result.is_error else {}),
+                        }
+                        for result in results
+                    ],
+                }
+            )
+            self.payload["messages"] = self.messages
+        elif self.style == STYLE_RESPONSES:
+            self.input_items.extend(
+                {
+                    "type": "function_call_output",
+                    "call_id": result.call_id,
+                    "output": result.content,
+                }
+                for result in results
+            )
+        else:
+            self.messages.extend(
+                {
+                    "role": "tool",
+                    "tool_call_id": result.call_id,
+                    "content": result.content,
+                }
+                for result in results
+            )
+
+    def _read_chat(self, data: dict) -> ToolTurn:
+        try:
+            message = data["choices"][0]["message"]
+        except (KeyError, IndexError, TypeError):
+            raise ModelCallError("Model tool response did not contain a message.") from None
+        text = message.get("content") if isinstance(message.get("content"), str) else ""
+        raw_calls = message.get("tool_calls") or []
+        calls = [
+            ToolCall(
+                id=str(item.get("id") or f"call-{index}"),
+                name=str((item.get("function") or {}).get("name") or ""),
+                arguments=_parse_arguments((item.get("function") or {}).get("arguments")),
+            )
+            for index, item in enumerate(raw_calls)
+            if isinstance(item, dict)
+        ]
+        self.messages.append(
+            {
+                "role": "assistant",
+                "content": text or None,
+                **({"tool_calls": raw_calls} if raw_calls else {}),
+            }
+        )
+        return ToolTurn(text=text.strip(), tool_calls=[call for call in calls if call.name])
+
+    def _read_responses(self, data: dict) -> ToolTurn:
+        calls: list[ToolCall] = []
+        texts: list[str] = []
+        for item in data.get("output") or []:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "function_call":
+                calls.append(
+                    ToolCall(
+                        id=str(item.get("call_id") or item.get("id") or ""),
+                        name=str(item.get("name") or ""),
+                        arguments=_parse_arguments(item.get("arguments")),
+                    )
+                )
+                self.input_items.append(item)
+            elif item.get("type") == "message":
+                for part in item.get("content") or []:
+                    if isinstance(part, dict) and part.get("type") in {"output_text", "text"}:
+                        texts.append(str(part.get("text") or ""))
+                self.input_items.append(item)
+        if isinstance(data.get("output_text"), str) and data["output_text"].strip():
+            texts.append(data["output_text"])
+        return ToolTurn(text="".join(texts).strip(), tool_calls=[call for call in calls if call.id and call.name])
+
+    def _read_anthropic(self, data: dict) -> ToolTurn:
+        blocks = data.get("content") or []
+        calls: list[ToolCall] = []
+        texts: list[str] = []
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_use":
+                calls.append(
+                    ToolCall(
+                        id=str(block.get("id") or ""),
+                        name=str(block.get("name") or ""),
+                        arguments=_parse_arguments(block.get("input")),
+                    )
+                )
+            elif block.get("type") == "text":
+                texts.append(str(block.get("text") or ""))
+        self.messages.append({"role": "assistant", "content": blocks})
+        return ToolTurn(text="".join(texts).strip(), tool_calls=[call for call in calls if call.id and call.name])
 
 
 def _thinking_style(provider: ProviderProfile) -> str:
