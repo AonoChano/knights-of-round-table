@@ -1,3 +1,4 @@
+import copy
 import json
 from pathlib import Path
 from uuid import uuid4
@@ -230,6 +231,357 @@ def test_explicit_low_level_keeps_panel_route(monkeypatch) -> None:
     assert seen["max_rounds"] == 2
     assert "talking_active" in events
     assert "thinking_complete" in events
+
+
+def test_attached_files_reach_model_and_stored_node(monkeypatch) -> None:
+    seen: dict[str, str] = {}
+
+    def fake_direct_stream(**kwargs):
+        seen["question"] = kwargs["question"]
+        yield 'event: final_delta\ndata: {"delta": "read it"}\n\n'
+
+    monkeypatch.setattr("kort_api.conversations.run_direct_answer_stream", fake_direct_stream)
+
+    response, cid = _post_user_branch(
+        "这个配置对不对？",
+        level="off",
+        attachments=[{"name": "app.yaml", "mime": "text/yaml", "text": "temp: -16C"}],
+    )
+    assert response.status_code == 200
+
+    assert "File app.yaml (text/yaml):\n```\ntemp: -16C\n```" in seen["question"]
+    payload = client.get(f"/api/conversations/{cid}").json()
+    user_node = next(node for node in payload["nodes"] if node["role"] == "user")
+    assert [item["name"] for item in user_node["attachments"]] == ["app.yaml"]
+    assert user_node["content"] == "这个配置对不对？"
+
+
+def test_oversized_attachment_is_rejected() -> None:
+    response, _ = _post_user_branch(
+        "读一下",
+        level="off",
+        attachments=[{"name": "big.txt", "mime": "text/plain", "text": "x" * 20_001}],
+    )
+    assert response.status_code == 422
+
+
+class _FakeProviderStream:
+    """One canned SSE body per model request, served through ToolSession.stream_turn."""
+
+    def __init__(self, rounds: list[list[str]], captured: dict) -> None:
+        self.rounds = rounds
+        self.captured = captured
+
+    async def aread(self) -> bytes:
+        return b""
+
+    async def aiter_lines(self):
+        index = self.captured.setdefault("round", 0)
+        self.captured["round"] = index + 1
+        for line in self.rounds[index]:
+            yield line
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    @property
+    def status_code(self) -> int:
+        return 200
+
+    @property
+    def text(self) -> str:
+        return ""
+
+
+def _install_provider_stream(monkeypatch, rounds: list[list[str]]) -> dict:
+    captured: dict = {"payloads": []}
+
+    class _Client:
+        def __init__(self, **_kwargs) -> None:
+            return None
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        def stream(self, method, url, headers=None, json=None):
+            body = json if isinstance(json, dict) else {}
+            # Deep copy: the loop keeps appending to the same message list it handed us.
+            captured["payloads"].append(copy.deepcopy(body))
+            return _FakeProviderStream(rounds, captured)
+
+    import kort_api.model_client as model_client
+
+    monkeypatch.setattr(model_client.httpx, "AsyncClient", lambda **kwargs: _Client())
+    return captured
+
+
+def _search_round(query: str) -> list[str]:
+    call = {
+        "choices": [
+            {
+                "delta": {
+                    "tool_calls": [
+                        {
+                            "index": 0,
+                            "id": "call-1",
+                            "function": {
+                                "name": "web_search",
+                                "arguments": json.dumps({"query": query}, ensure_ascii=False),
+                            },
+                        }
+                    ]
+                }
+            }
+        ]
+    }
+    return [
+        'data: {"choices": [{"delta": {"reasoning_content": "要先查一下。"}}]}',
+        "data: " + json.dumps(call, ensure_ascii=False),
+        'data: {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}',
+        "data: [DONE]",
+    ]
+
+
+def _two_call_round(query: str, url: str) -> list[str]:
+    def fragment(index: int, call_id: str, name: str, arguments: dict) -> str:
+        payload = {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": index,
+                                "id": call_id,
+                                "function": {
+                                    "name": name,
+                                    "arguments": json.dumps(arguments, ensure_ascii=False),
+                                },
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+        return "data: " + json.dumps(payload, ensure_ascii=False)
+
+    return [
+        fragment(0, "call-1", "web_search", {"query": query}),
+        fragment(1, "call-2", "web_fetch", {"url": url}),
+        'data: {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}',
+        "data: [DONE]",
+    ]
+
+
+def test_the_model_searches_inside_the_answer_turn_and_events_keep_their_order(monkeypatch) -> None:
+    from kort_api import web_research
+    from kort_api.schemas import ToolSource
+
+    client.put("/api/providers/deepseek/secret", json={"api_key": "secret-test-key"})
+    _create(_make_agent_name("loop-agent"))
+    source = ToolSource(title="ACM announcement", url="https://acm.org/a", domain="acm.org", snippet="fact")
+    monkeypatch.setattr(web_research, "search_web", lambda query, max_results: [source])
+    monkeypatch.setattr(web_research, "fetch_page", lambda url: (source, "ACM named the 2026 laureates today."))
+    captured = _install_provider_stream(
+        monkeypatch,
+        [
+            _two_call_round("2026 turing award", "https://acm.org/a"),
+            [
+                'data: {"choices": [{"delta": {"content": "得主是 **someone** [1]。"}}]}',
+                'data: {"choices": [{"delta": {"content": " 来源见 ACM 公告。"}}]}',
+                "data: [DONE]",
+            ],
+        ],
+    )
+
+    response, cid = _post_user_branch("2026 图灵奖给了谁？", level="off")
+    events = _event_names(response.text)
+
+    assert response.status_code == 200
+    assert events.index("tool_call_started") < events.index("tool_trace") < events.index("tool_call_completed")
+    assert events.index("tool_call_completed") < events.index("thinking_complete")
+    assert events.index("thinking_complete") < events.index("final_delta")
+    assert "research_started" not in events
+    started = [
+        json.loads(block.split("data: ", 1)[1])
+        for block in response.text.split("\n\n")
+        if block.startswith("event: tool_call_started")
+    ]
+    assert [item["name"] for item in started] == ["web_search", "web_fetch"]
+
+    first, second = captured["payloads"]
+    assert first["stream"] is True
+    assert first["tool_choice"] == "auto"
+    assert first["tools"][0]["function"]["name"] == "web_search"
+    assert "You have access to web search" in first["messages"][0]["content"]
+
+    history = second["messages"]
+    assistant = next(message for message in history if message["role"] == "assistant" and message.get("tool_calls"))
+    assert [call["id"] for call in assistant["tool_calls"]] == ["call-1", "call-2"]
+    assert assistant["content"] is None
+    tool_results = [message for message in history if message["role"] == "tool"]
+    assert [message["tool_call_id"] for message in tool_results] == ["call-1", "call-2"]
+    assert '"index": 1' in tool_results[0]["content"]
+
+    payload = client.get(f"/api/conversations/{cid}").json()
+    node = next(item for item in payload["nodes"] if item["role"] == "assistant")
+    assert "[1]" in node["content"]
+    assert [trace["tool"] for trace in node["tool_traces"]] == ["search", "fetch"]
+    assert [trace["call_id"] for trace in node["tool_traces"]] == ["call-1", "call-2"]
+    assert [trace["order"] for trace in node["tool_traces"]] == [1, 2]
+    assert node["tool_traces"][0]["sources"][0]["url"] == "https://acm.org/a"
+
+
+def test_deep_think_replays_reasoning_content_alongside_the_tool_call(monkeypatch) -> None:
+    from kort_api import web_research
+    from kort_api.schemas import ToolSource
+
+    client.put("/api/providers/deepseek/secret", json={"api_key": "secret-test-key"})
+    _create(_make_agent_name("thinking-loop-agent"))
+    monkeypatch.setattr(
+        web_research,
+        "search_web",
+        lambda query, max_results: [
+            ToolSource(title="ACM", url="https://acm.org/a", domain="acm.org", snippet="fact")
+        ],
+    )
+    captured = _install_provider_stream(
+        monkeypatch,
+        [
+            _search_round("deep seek thinking"),
+            [
+                'data: {"choices": [{"delta": {"content": " thinking mode answer [1]."}}]}',
+                "data: [DONE]",
+            ],
+        ],
+    )
+
+    response, _ = _post_user_branch("想一想再查", level="off", deep_think=True)
+
+    assert response.status_code == 200
+    assert captured["payloads"][0]["thinking"] == {"type": "enabled"}
+    assistant = next(
+        message
+        for message in captured["payloads"][1]["messages"]
+        if message["role"] == "assistant" and message.get("tool_calls")
+    )
+    assert assistant["reasoning_content"] == "要先查一下。"
+    assert assistant["tool_calls"][0]["id"] == "call-1"
+
+
+def test_a_turn_with_no_tool_calls_produces_no_tool_events(monkeypatch) -> None:
+    client.put("/api/providers/deepseek/secret", json={"api_key": "secret-test-key"})
+    _create(_make_agent_name("quiet-agent"))
+    _install_provider_stream(
+        monkeypatch,
+        [
+            [
+                'data: {"choices": [{"delta": {"content": "你好，我在。"}}]}',
+                "data: [DONE]",
+            ]
+        ],
+    )
+
+    response, _ = _post_user_branch("你好呀", level="off")
+    events = _event_names(response.text)
+
+    assert not [name for name in events if name.startswith("tool_")]
+    assert events.count("final_delta") >= 1
+    assert "task_completed" in events
+
+
+def test_a_failing_tool_is_reported_and_the_model_still_answers(monkeypatch) -> None:
+    from kort_api import web_research
+
+    client.put("/api/providers/deepseek/secret", json={"api_key": "secret-test-key"})
+    _create(_make_agent_name("broken-tool-agent"))
+
+    def boom(query, max_results):
+        raise RuntimeError("search engine unreachable")
+
+    monkeypatch.setattr(web_research, "search_web", boom)
+    _install_provider_stream(
+        monkeypatch,
+        [
+            _search_round("anything"),
+            [
+                'data: {"choices": [{"delta": {"content": "检索失败了，所以我无法确认这个事实。"}}]}',
+                "data: [DONE]",
+            ],
+        ],
+    )
+
+    response, cid = _post_user_branch("查一下不存在的东西", level="off")
+    events = _event_names(response.text)
+
+    assert "tool_call_failed" in events
+    assert "tool_call_completed" not in events
+    payload = client.get(f"/api/conversations/{cid}").json()
+    node = next(item for item in payload["nodes"] if item["role"] == "assistant")
+    assert node["tool_traces"][0]["status"] == "error"
+    assert "search engine unreachable" in node["content"] or "无法确认" in node["content"]
+
+
+def test_a_second_node_keeps_its_own_tool_history(monkeypatch) -> None:
+    from kort_api import web_research
+    from kort_api.schemas import ToolSource
+
+    client.put("/api/providers/deepseek/secret", json={"api_key": "secret-test-key"})
+    _create(_make_agent_name("isolation-agent"))
+    monkeypatch.setattr(
+        web_research,
+        "search_web",
+        lambda query, max_results: [
+            ToolSource(title="Page", url=f"https://site.example/{query}", domain="site.example", snippet="s")
+        ],
+    )
+    rounds = [
+        _search_round("first topic"),
+        [
+            'data: {"choices": [{"delta": {"content": "第一个回答 [1]。"}}]}',
+            "data: [DONE]",
+        ],
+        _search_round("second topic"),
+        [
+            'data: {"choices": [{"delta": {"content": "第二个回答 [1]。"}}]}',
+            "data: [DONE]",
+        ],
+    ]
+    captured = _install_provider_stream(monkeypatch, rounds)
+
+    first, cid = _post_user_branch("第一个问题", level="off")
+    assert first.status_code == 200
+    _, assistant_first = _node_ids(cid)
+
+    second = client.post(
+        f"/api/conversations/{cid}/branches",
+        json={"parent_id": assistant_first, "role": "user", "content": "第二个问题", "level": "off"},
+    )
+    assert second.status_code == 200
+
+    nodes = client.get(f"/api/conversations/{cid}").json()["nodes"]
+    by_id = {node["node_id"]: node for node in nodes}
+    assistant_second = next(
+        node for node in nodes if node["role"] == "assistant" and node["node_id"] != assistant_first
+    )
+    assert by_id[assistant_first]["content"].startswith("第一个回答")
+    assert assistant_second["content"].startswith("第二个回答")
+    assert by_id[assistant_first]["tool_traces"][0]["query"] == "first topic"
+    assert assistant_second["tool_traces"][0]["query"] == "second topic"
+
+    node_two_open = captured["payloads"][2]["messages"]
+    assert [message["role"] for message in node_two_open] == ["system", "user"]
+    assert not any(message["role"] == "tool" for message in node_two_open)
+    assert "first topic" not in json.dumps(captured["payloads"][2], ensure_ascii=False)
+
+    node_two_result = captured["payloads"][3]["messages"][-1]
+    assert node_two_result["role"] == "tool"
+    assert "second topic" in node_two_result["content"]
 
 
 def test_deep_think_off_level_uses_solo_route(monkeypatch) -> None:
@@ -1028,6 +1380,49 @@ def test_custom_max_rounds_validation() -> None:
         assert False, "Should have raised validation error for 13"
     except ValueError:
         pass
+
+
+def test_the_panel_answer_step_also_runs_the_tool_loop(monkeypatch) -> None:
+    from kort_api import web_research
+    from kort_api.schemas import ToolSource
+
+    client.put("/api/providers/deepseek/secret", json={"api_key": "secret-test-key"})
+    _create(_make_agent_name("panel-loop-agent"))
+    monkeypatch.setattr(
+        orchestration, "_experts_think", lambda state: {"expert_outputs": {"e": "note"}, "discussion_transcript": ["note"]}
+    )
+    monkeypatch.setattr(orchestration, "_critics_review", lambda state: {"critic_reviews": {}})
+    monkeypatch.setattr(orchestration, "_decide_continue", lambda state: {"should_continue": False})
+    monkeypatch.setattr(orchestration, "_pick_summarizer", lambda *args: (None, None))
+    monkeypatch.setattr(
+        web_research,
+        "search_web",
+        lambda query, max_results: [
+            ToolSource(title="ACM", url="https://acm.org/a", domain="acm.org", snippet="fact")
+        ],
+    )
+    _install_provider_stream(
+        monkeypatch,
+        [
+            _search_round("panel evidence"),
+            [
+                'data: {"choices": [{"delta": {"content": "圆桌结论 [1]。"}}]}',
+                "data: [DONE]",
+            ],
+        ],
+    )
+
+    response, cid = _post_user_branch("panel 里也要能查资料", level="low")
+    events = _event_names(response.text)
+
+    assert response.status_code == 200
+    assert "discussion_message" in events
+    assert events.index("discussion_message") < events.index("tool_call_started")
+    assert "tool_call_completed" in events
+    payload = client.get(f"/api/conversations/{cid}").json()
+    node = next(item for item in payload["nodes"] if item["role"] == "assistant")
+    assert node["content"] == "圆桌结论 [1]。"
+    assert node["tool_traces"][0]["query"] == "panel evidence"
 
 
 def test_agent_model_overrides_provider_default(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -14,6 +14,9 @@ def utc_now() -> datetime:
 
 CANCELLED_ROUND_LIMITATION = "Conversation was paused by the user."
 
+MAX_ATTACHMENTS = 4
+MAX_ATTACHMENT_CHARS = 20_000
+
 
 class ProviderType(str, Enum):
     openai = "openai"
@@ -194,6 +197,7 @@ class StageSummary(BaseModel):
     snippet: str
     details: str
     confidence: float = Field(ge=0.0, le=1.0)
+    order: int = Field(default=0, ge=0)
     tree_nodes: list[ThinkingTreeNode] = Field(default_factory=list)
 
 
@@ -251,6 +255,8 @@ class ToolTrace(BaseModel):
     id: str
     tool: Literal["search", "fetch"]
     status: Literal["running", "complete", "error"] = "running"
+    call_id: str = ""
+    order: int = Field(default=0, ge=0)
     query: str = ""
     url: str = ""
     title: str = ""
@@ -271,6 +277,14 @@ class ConversationRequest(BaseModel):
     custom_max_rounds: int | None = Field(default=None, ge=1, le=12)
 
 
+class MessageAttachment(BaseModel):
+    """A text file handed over in the composer; its body goes to the model with the question."""
+
+    name: str = Field(min_length=1, max_length=120)
+    mime: str = Field(default="", max_length=120)
+    text: str = Field(max_length=MAX_ATTACHMENT_CHARS)
+
+
 class BranchRequest(BaseModel):
     """One createBranch(parentNode, message) call: send, edit, or retry."""
 
@@ -282,7 +296,8 @@ class BranchRequest(BaseModel):
     level: str = Field(default="auto", pattern=r"^(off|auto|low|medium|high)$")
     deep_think: bool = False
     custom_max_rounds: int | None = Field(default=None, ge=1, le=12)
-    web_search: bool = False
+    web_search: bool = True
+    attachments: list[MessageAttachment] = Field(default_factory=list, max_length=MAX_ATTACHMENTS)
 
     @model_validator(mode="after")
     def content_matches_role(self) -> "BranchRequest":
@@ -316,6 +331,7 @@ class MessageNode(BaseModel):
     delegation: DelegationMetadata | None = None
     discussion_messages: list[DiscussionMessage] = Field(default_factory=list)
     tool_traces: list[ToolTrace] = Field(default_factory=list)
+    attachments: list[MessageAttachment] = Field(default_factory=list)
     active_child_id: str | None = None
 
 
@@ -342,6 +358,30 @@ class ConversationListItem(BaseModel):
     created_at: datetime
     updated_at: datetime
     expert_count: int
+
+
+class ConversationSearchHit(BaseModel):
+    """One matched row. `matches` carries [start, length] pairs into `snippet` so the browser can
+    highlight with React text nodes instead of trusting markup from the server."""
+
+    conversation_id: str
+    conversation_title: str
+    node_id: str | None = None
+    match_type: Literal["title", "message"]
+    role: Literal["user", "assistant"] | None = None
+    snippet: str
+    matches: list[list[int]] = Field(default_factory=list)
+    matched_at: datetime
+    score: float
+
+
+class ConversationSearchResponse(BaseModel):
+    query: str
+    scope: Literal["all", "title", "message"]
+    results: list[ConversationSearchHit] = Field(default_factory=list)
+    next_cursor: str | None = None
+    total: int
+    took_ms: int
 
 
 class DeveloperRuntimeResponse(BaseModel):

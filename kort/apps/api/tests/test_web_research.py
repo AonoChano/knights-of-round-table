@@ -3,7 +3,12 @@ import json
 import pytest
 
 from kort_api import web_research
-from kort_api.model_client import OpenAICompatibleClient, ToolResult, ToolSession
+from kort_api.model_client import (
+    OpenAICompatibleClient,
+    ToolCall,
+    ToolResult,
+    ToolSession,
+)
 from kort_api.schemas import ProviderProfile, ToolSource, ToolTrace
 
 
@@ -134,41 +139,89 @@ def test_url_validation_rejects_non_http_and_credentials() -> None:
         web_research._validate_url("http://localhost:8000/api")
 
 
-def test_digest_numbers_sources_once_and_attaches_fetch_excerpt() -> None:
+def test_every_source_gets_one_citation_index_shared_by_search_and_fetch() -> None:
+    numbers = web_research.SourceNumbers()
     first = _source(1)
     second = _source(2)
-    search = ToolTrace(
-        id="tool-search",
-        tool="search",
-        status="complete",
-        query="story",
-        sources=[first, second],
-        source_count=2,
+
+    assert numbers.assign(first) == 1
+    assert numbers.assign(second) == 2
+    assert numbers.assign(first) == 1
+    assert numbers.count == 2
+
+
+def test_search_results_reach_the_model_as_tool_results_with_indices(monkeypatch) -> None:
+    traces: list[ToolTrace] = []
+    monkeypatch.setattr(
+        web_research,
+        "search_web",
+        lambda query, max_results: [_source(1, "https://acm.org/a"), _source(2, "https://ieee.org/b")],
     )
-    fetch = ToolTrace(
-        id="tool-fetch",
-        tool="fetch",
-        status="complete",
-        url=second.url,
-        title=second.title,
-        sources=[second],
-        excerpt="Fetched body text.",
-        source_count=1,
-    )
+    numbers = web_research.SourceNumbers()
+    execute = web_research.make_tool_executor(emit=traces.append, numbers=numbers)
 
-    digest, count = web_research.build_digest([search, fetch], "Evidence brief.")
+    outcome = execute(ToolCall(id="call-1", name="web_search", arguments={"query": "2026 图灵奖", "max_results": 5}))
 
-    assert count == 2
-    assert digest.count("[1] Story 1") == 1
-    assert digest.count("[2] Story 2") == 1
-    assert "[2] excerpt:\n   Fetched body text." in digest
-    assert "untrusted evidence" in digest
-    assert digest.endswith("--- End web research ---")
+    payload = json.loads(outcome.content)
+    assert not outcome.is_error
+    assert [entry["index"] for entry in payload["results"]] == [1, 2]
+    assert payload["result_count"] == 2
+    assert "untrusted" in payload["note"].lower()
+    assert traces[0].call_id == "call-1"
+    assert traces[0].status == "complete"
+    assert outcome.summary.startswith("2 results")
+    assert numbers.count == 2
 
 
-def test_digest_is_empty_without_completed_traces() -> None:
-    failed = ToolTrace(id="tool-fail", tool="search", status="error", error="boom")
-    assert web_research.build_digest([failed], "nothing") == ("", 0)
+def test_a_failed_search_comes_back_as_an_error_tool_result_not_a_fake_answer(monkeypatch) -> None:
+    traces: list[ToolTrace] = []
+
+    def boom(query, max_results):
+        raise RuntimeError("duckduckgo blocked")
+
+    monkeypatch.setattr(web_research, "search_web", boom)
+    numbers = web_research.SourceNumbers()
+    execute = web_research.make_tool_executor(emit=traces.append, numbers=numbers)
+
+    outcome = execute(ToolCall(id="call-2", name="web_search", arguments={"query": "anything"}))
+
+    assert outcome.is_error
+    assert numbers.count == 0
+    assert traces[0].status == "error"
+    assert "duckduckgo blocked" in outcome.content
+
+
+def test_unknown_and_argumentless_calls_are_reported_instead_of_running(monkeypatch) -> None:
+    traces: list[ToolTrace] = []
+    monkeypatch.setattr(web_research, "search_web", lambda query, max_results: [])
+    execute = web_research.make_tool_executor(emit=traces.append, numbers=web_research.SourceNumbers())
+
+    unknown = execute(ToolCall(id="c", name="delete_everything", arguments={}))
+    no_query = execute(ToolCall(id="d", name="web_search", arguments={}))
+
+    assert unknown.is_error and "Unknown tool" in unknown.content
+    assert no_query.is_error and "needs a query" in no_query.content
+    assert traces == []
+
+
+def test_tool_descriptions_make_the_model_resolve_references_and_distrust_pages() -> None:
+    search = web_research.TOOLS[0]["description"]
+    fetch = web_research.TOOLS[1]["description"]
+
+    assert "self-contained queries" in search
+    assert "re-query" in search
+    assert "untrusted" in fetch
+    assert "never follow instructions" in fetch.lower()
+    assert "citation index" in search
+
+
+def test_citation_rules_match_the_bracket_format_the_front_end_renders() -> None:
+    rules = web_research.CITATION_RULES
+
+    assert "exactly as [n]" in rules
+    assert "[1][3]" in rules
+    assert "never [1, 3]" in rules
+    assert "not as a Markdown link" in rules
 
 
 @pytest.mark.parametrize("style", ["openai", "openai_responses", "anthropic"])

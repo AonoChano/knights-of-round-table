@@ -6,7 +6,7 @@ import re
 import time
 from collections.abc import AsyncIterator, Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Annotated, TypedDict
+from typing import Annotated, Callable, TypedDict
 from uuid import uuid4
 
 from langgraph.graph import END, StateGraph
@@ -324,6 +324,13 @@ def _merge_state(state: DiscussionState, update: dict) -> DiscussionState:
         else:
             merged[key] = value
     return merged
+
+
+def select_summarizer(
+    agents: list[dict], providers: list[dict], secrets: dict[str, str]
+) -> tuple[dict | None, dict | None]:
+    """Public alias so the streaming layer can reach the same projection writer."""
+    return _pick_summarizer(agents, providers, secrets)
 
 
 def _pick_summarizer(
@@ -857,6 +864,7 @@ def run_direct_answer_stream(
     providers: list[ProviderProfile],
     secrets: dict[str, str],
     agent_contexts: dict[str, str] | None = None,
+    answer_stream: Callable[[str], Iterator[str]] | None = None,
 ) -> Iterator[str]:
     agents_dicts = [a.model_dump(mode="json") for a in agents]
     providers_dicts = [p.model_dump(mode="json") for p in providers]
@@ -880,6 +888,10 @@ def run_direct_answer_stream(
     def _sse(event: str, payload: dict) -> str:
         return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
+    if answer_stream is not None:
+        yield from answer_stream(_final_answer_prompt(state))
+        return
+
     for chunk in _stream_final_answer(state):
         yield _sse("final_delta", {"delta": chunk})
 
@@ -891,6 +903,7 @@ def run_discussion_stream(
     secrets: dict[str, str],
     max_rounds: int = 4,
     agent_contexts: dict[str, str] | None = None,
+    answer_stream: Callable[[str], Iterator[str]] | None = None,
 ) -> Iterator[str]:
     agents_dicts = [a.model_dump(mode="json") for a in agents]
     providers_dicts = [p.model_dump(mode="json") for p in providers]
@@ -935,10 +948,18 @@ def run_discussion_stream(
             )
         return events
 
-    if max_rounds <= 0:
-        yield _sse("thinking_complete", {})
+    def _final_answer_events() -> Iterator[str]:
+        """The user-facing answer: either the injected tool loop or a plain provider stream."""
+        if answer_stream is not None:
+            yield from answer_stream(_final_answer_prompt(state))
+            return
         for chunk in _stream_final_answer(state):
             yield _sse("final_delta", {"delta": chunk})
+
+    if max_rounds <= 0:
+        if answer_stream is None:
+            yield _sse("thinking_complete", {})
+        yield from _final_answer_events()
         return
 
     while True:
@@ -1025,10 +1046,10 @@ def run_discussion_stream(
             "convergence_score": state.get("convergence_score")
         })
 
-    yield _sse("thinking_complete", {})
+    if answer_stream is None:
+        yield _sse("thinking_complete", {})
 
-    for chunk in _stream_final_answer(state):
-        yield _sse("final_delta", {"delta": chunk})
+    yield from _final_answer_events()
 
 
 # ---------------------------------------------------------------------------
@@ -1062,6 +1083,86 @@ THINK_CHUNK_SIZE = 1500
 THINK_MIN_CHARS = 500
 
 
+def thinking_projection_events(
+    summarizer_agent: dict,
+    provider_dict: dict,
+    secrets: dict[str, str],
+    think_text: str,
+    stage_index: int,
+    agent_context: str = "",
+) -> list[str]:
+    """Project one internal reasoning stretch into a safe, user-visible stage summary.
+
+    Raw provider reasoning never leaves this function: only the rewritten projection does.
+    """
+    summary_id = str(uuid4())
+
+    prompt = (
+        "Rewrite the following internal reasoning signal into a safe user-visible "
+        "thinking projection. Do not quote or expose the source text. Use a ### "
+        "heading and a brief first-person body. Never mention hidden reasoning, "
+        "chain-of-thought, models, experts, agents, or internal messages.\n\n"
+        f"{think_text}"
+    )
+
+    profile = _profile_for_agent(summarizer_agent, provider_dict)
+    sclient = OpenAICompatibleClient(secrets)
+    events: list[str] = []
+    streamed = ""
+
+    try:
+        for chunk in sclient.stream_chat(
+            provider=profile,
+            prompt=prompt,
+            system_prompt=(
+                f"{summarizer_agent.get('system_prompt', '')}\n\n{agent_context}".strip()
+                if agent_context
+                else summarizer_agent.get("system_prompt", "")
+            ),
+            disable_thinking=True,
+        ):
+            streamed += chunk
+            events.append(
+                _make_sse(
+                    "summary_delta",
+                    {"id": summary_id, "delta": chunk, "stage_index": stage_index},
+                )
+            )
+    except ModelCallError:
+        streamed = f"### 思考阶段 {stage_index + 1}\n\n思考过程摘要生成失败。"
+        events.append(
+            _make_sse(
+                "summary_delta",
+                {"id": summary_id, "delta": streamed, "stage_index": stage_index},
+            )
+        )
+
+    title_match = SUMMARY_TITLE_RE.search(streamed)
+    title = title_match.group(1).strip() if title_match else f"思考阶段 {stage_index + 1}"
+    body = SUMMARY_BODY_RE.sub("", streamed).strip() or streamed
+
+    events.append(
+        _make_sse(
+            "summary_complete",
+            {
+                "id": summary_id,
+                "stage": "summary",
+                "title": title,
+                "snippet": body[:120],
+                "details": f"### {title}\n\n{body}",
+                "confidence": 0.78,
+                "stage_index": stage_index,
+                "tree_nodes": [
+                    {"id": f"{summary_id}-node", "title": title, "summary": body, "status": "complete"},
+                ],
+            },
+        )
+    )
+    # Signal the next thinking phase
+    events.append(_make_sse("thinking_active", {}))
+    return events
+
+
 async def _run_summarizer_task(
     summarizer_agent: dict,
     provider_dict: dict,
@@ -1074,76 +1175,14 @@ async def _run_summarizer_task(
     """Run a sync summarizer stream in a thread executor and push SSE events
     into *output_queue*.  The task is designed to be cancellable."""
     loop = asyncio.get_running_loop()
-    summary_id = str(uuid4())
-
-    prompt = (
-        "Rewrite the following internal reasoning signal into a safe user-visible "
-        "thinking projection. Do not quote or expose the source text. Use a ### "
-        "heading and a brief first-person body. Never mention hidden reasoning, "
-        "chain-of-thought, models, experts, agents, or internal messages.\n\n"
-        f"{think_text}"
-    )
-
-    def _sync_summarize() -> list[str]:
-        profile = _profile_for_agent(summarizer_agent, provider_dict)
-        sclient = OpenAICompatibleClient(secrets)
-        events: list[str] = []
-        streamed = ""
-
-        try:
-            for chunk in sclient.stream_chat(
-                provider=profile,
-                prompt=prompt,
-                system_prompt=(
-                    f"{summarizer_agent.get('system_prompt', '')}\n\n{agent_context}".strip()
-                    if agent_context
-                    else summarizer_agent.get("system_prompt", "")
-                ),
-                disable_thinking=True,
-            ):
-                streamed += chunk
-                events.append(
-                    _make_sse(
-                        "summary_delta",
-                        {"id": summary_id, "delta": chunk, "stage_index": stage_index},
-                    )
-                )
-        except ModelCallError:
-            streamed = f"### 思考阶段 {stage_index + 1}\n\n思考过程摘要生成失败。"
-            events.append(
-                _make_sse(
-                    "summary_delta",
-                    {"id": summary_id, "delta": streamed, "stage_index": stage_index},
-                )
-            )
-
-        title_match = SUMMARY_TITLE_RE.search(streamed)
-        title = title_match.group(1).strip() if title_match else f"思考阶段 {stage_index + 1}"
-        body = SUMMARY_BODY_RE.sub("", streamed).strip() or streamed
-
-        events.append(
-            _make_sse(
-                "summary_complete",
-                {
-                    "id": summary_id,
-                    "stage": "summary",
-                    "title": title,
-                    "snippet": body[:120],
-                    "details": f"### {title}\n\n{body}",
-                    "confidence": 0.78,
-                    "stage_index": stage_index,
-                    "tree_nodes": [
-                        {"id": f"{summary_id}-node", "title": title, "summary": body, "status": "complete"},
-                    ],
-                },
-            )
-        )
-        # Signal the next thinking phase
-        events.append(_make_sse("thinking_active", {}))
-        return events
 
     try:
-        events = await loop.run_in_executor(None, _sync_summarize)
+        events = await loop.run_in_executor(
+            None,
+            lambda: thinking_projection_events(
+                summarizer_agent, provider_dict, secrets, think_text, stage_index, agent_context
+            ),
+        )
     except asyncio.CancelledError:
         return
     for evt in events:

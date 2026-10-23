@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import time
 
-from fastapi import FastAPI, HTTPException, Request, Response, status
+from fastapi import FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
@@ -24,6 +24,7 @@ from .schemas import (
     ConversationListItem,
     ConversationRenameRequest,
     ConversationResponse,
+    ConversationSearchResponse,
     DeveloperRuntimeResponse,
     HealthResponse,
     LogLevelResponse,
@@ -348,6 +349,16 @@ def dream_for_agent(agent_name: str, payload: MemoryDreamRequest) -> MemoryDream
 @app.get("/api/conversations", response_model=list[ConversationListItem])
 def list_conversations() -> list[ConversationListItem]:
     return conversation_service.list_conversations()
+
+
+@app.get("/api/conversations/search", response_model=ConversationSearchResponse)
+def search_conversations(
+    query: str = Query(..., min_length=1, max_length=200),
+    scope: str = Query("all", max_length=12),
+    limit: int = Query(20, ge=1, le=50),
+    cursor: str | None = Query(None, max_length=400),
+) -> ConversationSearchResponse:
+    return conversation_service.search_conversations(query, scope=scope, limit=limit, cursor=cursor)
 
 
 @app.get("/api/conversations/{conversation_id}/stream")

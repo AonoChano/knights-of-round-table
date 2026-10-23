@@ -32,6 +32,15 @@ class Settings(BaseSettings):
     memory_auto_dream: bool = True
     memory_dream_min_episodes: int = 6
     memory_dream_min_hours: int = 24
+    agent_max_rounds: int = 6
+    agent_max_tool_calls: int = 8
+    agent_max_searches: int = 5
+    agent_max_fetches: int = 4
+    agent_max_seconds: int = 180
+    agent_tool_timeout_seconds: int = 30
+    agent_max_result_chars: int = 6000
+    web_search_max_results: int = 8
+    web_fetch_max_chars: int = 4000
     cors_origins: list[str] = Field(
         default_factory=lambda: [
             "http://localhost:3000",
