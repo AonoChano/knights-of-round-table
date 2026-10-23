@@ -354,10 +354,22 @@ export function MemoryPanel({ agents, locale }: { agents: MemoryAgent[]; locale:
       {notice ? <div className="memory-notice memory-feedback">{notice}</div> : null}
 
       {!detail && loading ? (
-        <section className="settings-card memory-loading">
-          <Loader2 size={16} className="memory-spin" aria-hidden="true" />
-          <span>{copy.memoryLoading}</span>
-        </section>
+        <div className="memory-skeleton" role="status" aria-label={copy.memoryLoading}>
+          <div className="memory-stats">
+            {[0, 1, 2, 3, 4, 5].map((index) => (
+              <div className="memory-stat memory-stat-skeleton" key={index}>
+                <div className="skeleton skeleton-line" style={{ width: "56%", height: 10 }} />
+                <div className="skeleton skeleton-line" style={{ width: "34%", height: 18 }} />
+              </div>
+            ))}
+          </div>
+          <section className="settings-card settings-card-skeleton">
+            <div className="skeleton skeleton-line" style={{ width: "34%" }} />
+            <div className="skeleton skeleton-line skeleton-line-faint" style={{ width: "76%" }} />
+            <div className="skeleton skeleton-block" />
+            <div className="skeleton skeleton-line skeleton-line-faint" style={{ width: "52%" }} />
+          </section>
+        </div>
       ) : null}
 
       {detail && status ? (

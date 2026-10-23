@@ -98,6 +98,7 @@ type MessageNode = {
   content: string;
   status: "streaming" | "complete" | "error" | "cancelled";
   error?: string | null;
+  elapsed_ms?: number;
   created_at?: string;
   stage_summaries?: StageSummary[];
   delegation?: DelegationInfo | null;
@@ -206,6 +207,8 @@ type StreamSlot = {
   abortController: AbortController | null;
   loading: boolean;
   elapsed: number;
+  /** 本轮开始生成的墙钟时间，用来在事件到达时精确结算耗时 */
+  startedAt: number | null;
   thinkingComplete: boolean;
   finalBody: string;
   timeline: TimelineItem[];
@@ -329,6 +332,7 @@ function createEmptySlot(): StreamSlot {
     abortController: null,
     loading: false,
     elapsed: 0,
+    startedAt: null,
     thinkingComplete: false,
     finalBody: "",
     timeline: [],
@@ -555,6 +559,16 @@ function thinkingElapsedLabel(locale: Locale, elapsed: number, complete: boolean
   return complete ? copy.thinkingElapsedComplete(duration) : copy.thinkingElapsedActive(duration);
 }
 
+/** Backend reports ms; anything ≤0 means "not recorded" rather than a real 0s thought. */
+function elapsedMsToSeconds(value: number | null | undefined): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return null;
+  return Math.max(1, Math.round(value / 1000));
+}
+
+function nodeElapsedSeconds(node: MessageNode): number | undefined {
+  return elapsedMsToSeconds(node.elapsed_ms) ?? undefined;
+}
+
 function randomNewChatPrompt(locale: Locale) {
   const prompts = t(locale).ui.newChatPrompts;
   return prompts[Math.floor(Math.random() * prompts.length)] ?? prompts[0] ?? "";
@@ -670,6 +684,7 @@ function parseMessageNode(value: unknown): MessageNode | null {
     content: typeof raw.content === "string" ? raw.content : "",
     status,
     error: typeof raw.error === "string" ? raw.error : null,
+    elapsed_ms: typeof raw.elapsed_ms === "number" ? raw.elapsed_ms : 0,
     created_at: typeof raw.created_at === "string" ? raw.created_at : undefined,
     stage_summaries: Array.isArray(raw.stage_summaries) ? (raw.stage_summaries as StageSummary[]) : [],
     delegation: (raw.delegation as DelegationInfo | null) ?? null,
@@ -761,6 +776,9 @@ function HomeExperience() {
   const [conversations, setConversations] = useState<ConversationListItem[]>([]);
   const [conversationsError, setConversationsError] = useState<string | null>(null);
   const [conversationsLoading, setConversationsLoading] = useState(true);
+  const [conversationLoading, setConversationLoading] = useState(false);
+  const [providersLoading, setProvidersLoading] = useState(true);
+  const [agentsLoading, setAgentsLoading] = useState(true);
   const [nodes, setNodes] = useState<MessageNode[]>([]);
   const [activeRootId, setActiveRootId] = useState<string | null>(null);
   const [streamingNodeId, setStreamingNodeId] = useState<string | null>(null);
@@ -799,6 +817,10 @@ function HomeExperience() {
   const sentenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activeSummaryRef = useRef<string>("");
   const timerElapsedRef = useRef(false);
+  // 流式回调在启动时就闭包了当时的 UI 状态，抽屉的开合要用 ref 才能读到最新值
+  const drawerOpenRef = useRef(false);
+  // 连续点选会话时，用序号丢弃迟到的响应，防止旧会话覆盖新会话
+  const conversationLoadRef = useRef(0);
   const rawBodyBySummary = useRef<Record<string, string>>({});
   const timelineRef = useRef<TimelineItem[]>([]);
   const finalBodyRef = useRef("");
@@ -908,6 +930,7 @@ function HomeExperience() {
     const ac = new AbortController();
     slot.abortController = ac;
     slot.loading = true;
+    slot.startedAt = Date.now();
     if (seed) {
       slot.nodes = seed.nodes;
       slot.activeRootId = seed.activeRootId;
@@ -1106,13 +1129,19 @@ function HomeExperience() {
   }, [nodes]);
 
   useEffect(() => {
-    if (!loading || thinkingComplete) return;
+    drawerOpenRef.current = drawerOpen;
+  }, [drawerOpen]);
 
-    const timer = window.setInterval(() => {
-      setElapsed((current) => current + 1);
-    }, 1000);
+  useEffect(() => {
+    if (!loading || thinkingComplete) return;
+    const slot = activeSlotId ? slotMapRef.current.get(activeSlotId) : null;
+    // 以本轮开始的墙钟时间为准，避免首帧或事件批处理导致计时停在 0
+    const startedAt = slot?.startedAt ?? Date.now() - elapsed * 1000;
+    const tick = () => setElapsed(Math.max(0, Math.floor((Date.now() - startedAt) / 1000)));
+    tick();
+    const timer = window.setInterval(tick, 500);
     return () => window.clearInterval(timer);
-  }, [loading, thinkingComplete]);
+  }, [loading, thinkingComplete, activeSlotId]);
 
   useEffect(() => {
     if (!preferencesReadyRef.current) return;
@@ -1155,6 +1184,8 @@ function HomeExperience() {
         error: clientErrorMessage(error, t(locale).ui.backendUnavailable),
       });
       setProviders([]);
+    } finally {
+      setProvidersLoading(false);
     }
   }
 
@@ -1182,6 +1213,8 @@ function HomeExperience() {
     } catch (error) {
       setAgents([]);
       setAgentsError(error instanceof Error ? error.message : t(locale).ui.loadAgentsFailed);
+    } finally {
+      setAgentsLoading(false);
     }
   }
 
@@ -1314,6 +1347,9 @@ function HomeExperience() {
   }
 
   async function loadConversation(conversationId: string) {
+    const requestId = conversationLoadRef.current + 1;
+    conversationLoadRef.current = requestId;
+    const isCurrentRequest = () => conversationLoadRef.current === requestId;
     clientLog("info", "conversation detail load started", { conversationId });
     setUnreadConversationIds((current) => {
       if (!current.has(conversationId)) return current;
@@ -1327,6 +1363,7 @@ function HomeExperience() {
 
     if (hasActiveStream) {
       activateSlot(conversationId);
+      setConversationLoading(false);
       setCurrentConversationId(conversationId);
       currentCidRef.current = conversationId;
       router.replace(`/?c=${conversationId}`, { scroll: false });
@@ -1335,16 +1372,21 @@ function HomeExperience() {
     }
 
     resetConversation();
+    setNodesSynced([]);
     setActiveSlotId(conversationId);
     setSlotVersion((v) => v + 1);
     setCurrentConversationId(conversationId);
     currentCidRef.current = conversationId;
     router.replace(`/?c=${conversationId}`, { scroll: false });
+    setConversationLoading(true);
     try {
       const response = await fetchWithTimeout(`${API_BASE}/api/conversations/${conversationId}`, {}, 6000);
+      if (!isCurrentRequest()) return;
       if (!response.ok) {
         if (response.status === 404) {
+          setConversationLoading(false);
           const resumed = await resumeConversationStream(conversationId);
+          if (!isCurrentRequest()) return;
           if (resumed) return;
           router.replace("/", { scroll: false });
           setCurrentConversationId(null);
@@ -1353,6 +1395,7 @@ function HomeExperience() {
         throw new Error(`HTTP ${response.status}`);
       }
       const payload = (await response.json()) as ConversationResponse;
+      if (!isCurrentRequest()) return;
       if (!hasActiveStream) {
         setConversation(payload);
       } else {
@@ -1371,6 +1414,7 @@ function HomeExperience() {
       discussionMessagesRef.current = restoredMessages;
       setDiscussionMessages(restoredMessages);
       setDiscussionView(null);
+      setConversationLoading(false);
       clientLog("info", "conversation detail load completed", {
         conversationId,
         nodes: restoredNodes.length,
@@ -1383,11 +1427,14 @@ function HomeExperience() {
         return;
       }
     } catch (error) {
+      if (!isCurrentRequest()) return;
       const message =
         error instanceof RequestTimeoutError
           ? t(locale).ui.requestTimedOut(Math.round(error.timeoutMs / 1000))
           : clientErrorMessage(error, t(locale).ui.backendUnavailable);
       clientLog("error", "conversation detail load failed", { conversationId, error: message });
+    } finally {
+      if (isCurrentRequest()) setConversationLoading(false);
     }
   }
 
@@ -1903,6 +1950,12 @@ function HomeExperience() {
     }
   }
 
+  function elapsedForSlot(slot: StreamSlot | null | undefined): number {
+    if (slot?.startedAt) return Math.max(1, Math.round((Date.now() - slot.startedAt) / 1000));
+    if (slot && slot.elapsed > 0) return slot.elapsed;
+    return Math.max(1, elapsed);
+  }
+
   function applyEventToSlot(slot: StreamSlot, message: StreamEvent) {
     if (message.event === "branch_started") {
       const startedNodes = Array.isArray(message.data.nodes)
@@ -1994,6 +2047,10 @@ function HomeExperience() {
     if (message.event === "thinking_complete") {
       slot.thinkingComplete = true;
       slot.talkingActive = false;
+      slot.elapsed =
+        elapsedMsToSeconds(typeof message.data.elapsed_ms === "number" ? message.data.elapsed_ms : undefined) ??
+        elapsedForSlot(slot);
+      slot.startedAt = null;
       slot.timeline = appendThinkingDoneNode(withoutTransientTimelineItems(slot.timeline), locale, slot.elapsed);
       return;
     }
@@ -2017,6 +2074,8 @@ function HomeExperience() {
       if (typeof message.data.active_root_id === "string") {
         slot.activeRootId = message.data.active_root_id;
       }
+      slot.elapsed = Math.max(slot.elapsed, elapsedMsToSeconds(completed?.elapsed_ms) ?? 0, elapsedForSlot(slot));
+      slot.startedAt = null;
       slot.finalBody = "";
       slot.loading = false;
       slot.requestPhase = null;
@@ -2247,8 +2306,13 @@ function HomeExperience() {
     }
 
     if (message.event === "thinking_complete") {
+      const finalElapsed =
+        elapsedMsToSeconds(typeof message.data.elapsed_ms === "number" ? message.data.elapsed_ms : undefined) ??
+        streamContext?.slot.elapsed ??
+        elapsedForSlot(null);
       setThinkingComplete(true);
       setTalkingActive(false);
+      setElapsed(finalElapsed);
       if (sentenceTimerRef.current) {
         clearTimeout(sentenceTimerRef.current);
         sentenceTimerRef.current = null;
@@ -2258,7 +2322,7 @@ function HomeExperience() {
         thinkingLabelRef.current = null;
       }
       setTimeline((current) =>
-        appendThinkingDoneNode(withoutTransientTimelineItems(current), locale, elapsed)
+        appendThinkingDoneNode(withoutTransientTimelineItems(current), locale, finalElapsed)
       );
       return;
     }
@@ -2313,14 +2377,18 @@ function HomeExperience() {
       setThinkingComplete(false);
       setTalkingActive(false);
       setFinalBody("");
+      const finalElapsed =
+        elapsedMsToSeconds(completed?.elapsed_ms) ?? streamContext?.slot.elapsed ?? Math.max(1, elapsed);
+      setElapsed(finalElapsed);
       if (completed && completed.role === "assistant") {
         const timelineItems = timelineFromStageSummaries(
           completed.stage_summaries,
           locale,
-          elapsed,
+          finalElapsed,
           completed.status === "cancelled"
         );
-        if (drawerOpen && drawerTimeline === null) {
+        // 抽屉当时开着，就用落盘的思考详情替换实时时间线，而不是把它清空
+        if (timelineItems.length > 0 && drawerOpenRef.current) {
           setDrawerTimeline(timelineItems);
         }
       }
@@ -2489,8 +2557,10 @@ function HomeExperience() {
         ) : (
           <>
             <div className="conversation-scroll">
-              <div className={cn("conversation-inner", !hasRun && "conversation-empty")}>
-                {hasRun ? (
+              <div className={cn("conversation-inner", !hasRun && !conversationLoading && "conversation-empty")}>
+                {conversationLoading ? (
+                  <ConversationSkeleton />
+                ) : hasRun ? (
                   <ConversationView
                     nodes={nodes}
                     activeRootId={activeRootId}
@@ -2522,7 +2592,7 @@ function HomeExperience() {
                         timelineFromStageSummaries(
                           node.stage_summaries,
                           locale,
-                          elapsed,
+                          nodeElapsedSeconds(node),
                           node.status === "cancelled"
                         )
                       );
@@ -2547,7 +2617,7 @@ function HomeExperience() {
               </div>
             </div>
 
-            {hasRun ? (
+            {hasRun && !conversationLoading ? (
               <div className="composer-dock">
                 {hasDiscussion && loading ? (
                   <div className="discussion-cta-row">
@@ -2596,8 +2666,10 @@ function HomeExperience() {
         <SettingsOverlay
           agents={agents}
           agentsError={agentsError}
+          agentsLoading={agentsLoading}
           globalSkills={globalSkills}
           providers={providers}
+          providersLoading={providersLoading}
           secretStatus={providerSecretStatus}
           settingsTab={settingsTab}
           locale={locale}
@@ -2937,14 +3009,24 @@ function Sidebar({
               })}
             </div>
           ))}
-          {conversations.length === 0 ? (
+          {conversations.length === 0 && conversationsLoading ? (
+            <div className="sidebar-history-skeleton" aria-busy="true">
+              <div className="skeleton skeleton-caption" />
+              {[0, 1, 2, 3].map((index) => (
+                <div className="sidebar-skeleton-row" key={index}>
+                  <div
+                    className="skeleton skeleton-line"
+                    style={{ width: `${68 - index * 9}%`, height: 11 }}
+                  />
+                </div>
+              ))}
+            </div>
+          ) : conversations.length === 0 ? (
             <div className="sidebar-history-empty">
               <div>
-                {conversationsLoading
-                  ? tr.ui.conversationHistoryLoading
-                  : conversationsError
-                    ? tr.ui.conversationHistoryUnavailable
-                    : tr.ui.noConversationHistory}
+                {conversationsError
+                  ? tr.ui.conversationHistoryUnavailable
+                  : tr.ui.noConversationHistory}
               </div>
               {conversationsError ? <div className="sidebar-history-empty-detail">{conversationsError}</div> : null}
             </div>
@@ -3009,6 +3091,26 @@ function waitingStatusText(
   }
   if (requestPhase === "delegated") return copy.delegationSucceeded;
   return copy.requestReceived;
+}
+
+function ConversationSkeleton() {
+  return (
+    <div className="conversation-skeleton" aria-busy="true">
+      <div className="skeleton skeleton-message-user" />
+      <div className="skeleton-thread">
+        <div className="skeleton skeleton-chip" />
+        <div className="skeleton skeleton-line" style={{ width: "92%" }} />
+        <div className="skeleton skeleton-line" style={{ width: "78%" }} />
+        <div className="skeleton skeleton-line skeleton-line-short" style={{ width: "46%" }} />
+      </div>
+      <div className="skeleton skeleton-message-user skeleton-message-user-short" />
+      <div className="skeleton-thread">
+        <div className="skeleton skeleton-line" style={{ width: "86%" }} />
+        <div className="skeleton skeleton-line" style={{ width: "94%" }} />
+        <div className="skeleton skeleton-line" style={{ width: "64%" }} />
+      </div>
+    </div>
+  );
 }
 
 function ConversationView({
@@ -3240,7 +3342,7 @@ function ConversationView({
     const nodeTimeline = timelineFromStageSummaries(
       node.stage_summaries,
       locale,
-      elapsed,
+      nodeElapsedSeconds(node),
       node.status === "cancelled"
     );
     const discussion = node.discussion_messages ?? [];
@@ -3620,9 +3722,10 @@ function DiscussionModePicker({
       ) : null}
       {discussionLevel !== "off" ? (
         <div className="discussion-mode-control" style={{ marginLeft: "8px" }}>
-          <label style={{ display: "flex", alignItems: "center", gap: "6px", fontSize: "13px" }}>
-            <span>Max rounds:</span>
+          <label className="discussion-rounds-field">
+            <span>{t(locale).ui.maxRounds}</span>
             <input
+              className="discussion-rounds-input"
               type="number"
               min="1"
               max="12"
@@ -3638,15 +3741,9 @@ function DiscussionModePicker({
                   }
                 }
               }}
-              placeholder="Auto"
-              style={{
-                width: "60px",
-                padding: "4px 6px",
-                border: "1px solid #e0e0e0",
-                borderRadius: "4px",
-                fontSize: "13px",
-              }}
-              title="Custom max rounds (1-12, leave empty for auto)"
+              placeholder={t(locale).ui.auto}
+              aria-label={t(locale).ui.maxRounds}
+              title={t(locale).ui.maxRoundsHint}
             />
           </label>
         </div>
@@ -3836,8 +3933,10 @@ function ThinkingDrawer({
 function SettingsOverlay({
   agents,
   agentsError,
+  agentsLoading,
   globalSkills,
   providers,
+  providersLoading,
   secretStatus,
   settingsTab,
   locale,
@@ -3858,8 +3957,10 @@ function SettingsOverlay({
 }: {
   agents: AgentView[];
   agentsError: string | null;
+  agentsLoading: boolean;
   globalSkills: string[];
   providers: ProviderProfile[];
+  providersLoading: boolean;
   secretStatus: Record<string, ProviderSecretStatus>;
   settingsTab: SettingsTab;
   locale: Locale;
@@ -3944,6 +4045,7 @@ function SettingsOverlay({
         {settingsTab === "providers" ? (
           <ModelList
             providers={providers}
+            loading={providersLoading}
             secretStatus={secretStatus}
             locale={locale}
             onChanged={onModelsChanged}
@@ -3962,7 +4064,18 @@ function SettingsOverlay({
                 <span>{copy.addExpert}</span>
               </button>
             </div>
-            {agents.length ? (
+            {agentsLoading && agents.length === 0 ? (
+              <div className="grid gap-4 md:grid-cols-2" aria-busy="true">
+                {[0, 1, 2, 3].map((index) => (
+                  <section className="settings-card settings-card-skeleton" key={index}>
+                    <div className="skeleton skeleton-line" style={{ width: "42%" }} />
+                    <div className="skeleton skeleton-line skeleton-line-faint" style={{ width: "26%" }} />
+                    <div className="skeleton skeleton-line skeleton-line-faint" style={{ width: "72%" }} />
+                    <div className="skeleton skeleton-line skeleton-line-faint" style={{ width: "58%" }} />
+                  </section>
+                ))}
+              </div>
+            ) : agents.length ? (
               <div className="grid gap-4 md:grid-cols-2">
                 {agents.map((agent) => {
                   const isSystem =
