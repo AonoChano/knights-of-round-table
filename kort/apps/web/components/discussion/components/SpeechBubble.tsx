@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { Markdown } from '../../Markdown';
+import type { Locale } from '../../../app/locale';
 import type { Participant, ThemeMode } from '../types';
 import { STAGE_H, STAGE_W } from '../layout';
 
@@ -14,11 +15,12 @@ interface Props {
   text: string;
   done: boolean;
   theme: ThemeMode;
+  locale: Locale;
 }
 
 const W = 380;
 
-export function SpeechBubble({ x, y, scale, view, participant, text, done, theme }: Props) {
+export function SpeechBubble({ x, y, scale, view, participant, text, done, theme, locale }: Props) {
   const halfVisual = W / 2 / scale;
   const visibleW = view.width > 0 ? Math.min(STAGE_W, view.width / scale) : STAGE_W;
   const visibleTop = view.height > 0 ? (STAGE_H - Math.min(STAGE_H, view.height / scale)) / 2 : 0;
@@ -69,7 +71,7 @@ export function SpeechBubble({ x, y, scale, view, participant, text, done, theme
               className="discussion-bubble-text markdown-body"
               style={{ maxHeight: bodyMaxHeight }}
             >
-              <Markdown content={text} />
+              <Markdown content={text} locale={locale} />
             </div>
             {!done && <span className="caret">▍</span>}
             <div

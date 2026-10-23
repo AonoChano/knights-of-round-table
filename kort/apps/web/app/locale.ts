@@ -51,6 +51,7 @@ export const t = (locale: Locale) => {
   const copy = COPY[locale];
   return {
     thinking: {
+      ...copy.thinking,
       active: initialThinkingLabel(locale),
       talking: copy.thinking.talking,
       done: copy.thinking.done,
@@ -76,6 +77,7 @@ export const t = (locale: Locale) => {
       round: (round: number) => formatTemplate(copy.room.round, { round }),
       seats: (seats: number, messages: number) =>
         formatTemplate(copy.room.seats, { seats, messages }),
+      speaking: (name: string) => formatTemplate(copy.room.speaking, { name }),
     },
     ui: {
       ...copy.ui,

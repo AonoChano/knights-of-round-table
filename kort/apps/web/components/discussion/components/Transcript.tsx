@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { Markdown } from '../../Markdown';
+import type { Locale } from '../../../app/locale';
 import { isAbsentUtterance } from '../lines';
 import type { DiscussionMessage, Participant } from '../types';
 
@@ -13,6 +14,7 @@ interface Props {
   title: string;
   roundLabel: (round: number) => string;
   absentLabel: string;
+  locale: Locale;
   onClose: () => void;
   onJump: (index: number) => void;
 }
@@ -27,6 +29,7 @@ export function Transcript({
   title,
   roundLabel,
   absentLabel,
+  locale,
   onClose,
   onJump,
 }: Props) {
@@ -114,7 +117,7 @@ export function Transcript({
                   <p className="text-[13px] italic leading-relaxed opacity-45">{absentLabel}</p>
                 ) : (
                   <div className="discussion-transcript-text markdown-body">
-                    <Markdown content={text} />
+                    <Markdown content={text} locale={locale} />
                   </div>
                 )}
               </div>

@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
@@ -15,6 +15,7 @@ import {
   Database,
   ExternalLink,
   FlaskConical,
+  Globe,
   KeyRound,
   MoreHorizontal,
   PanelLeftClose,
@@ -46,6 +47,10 @@ import type { DiscussionLevel, Locale } from "./locale";
 import { AgentStrip } from "../components/discussion/AgentStrip";
 import { DiscussionView } from "../components/discussion/DiscussionView";
 import { MemoryPanel } from "../components/memory/MemoryPanel";
+import { ThinkingTrace } from "../components/thinking/ThinkingTrace";
+import type { TraceTool } from "../components/thinking/ThinkingTrace";
+
+type ToolTrace = TraceTool;
 
 type TimerHandle = ReturnType<typeof setTimeout>;
 
@@ -103,6 +108,7 @@ type MessageNode = {
   stage_summaries?: StageSummary[];
   delegation?: DelegationInfo | null;
   discussion_messages?: DiscussionMessage[];
+  tool_traces?: ToolTrace[];
   active_child_id?: string | null;
   children: string[];
 };
@@ -228,11 +234,15 @@ type StreamSlot = {
   conversation: ConversationResponse | null;
   streamError: string | null;
   discussionMessages: DiscussionMessage[];
+  toolTraces: ToolTrace[];
+  researchActive: boolean;
+  webSearch: boolean;
 };
 
 const TRANSIENT_TIMELINE_IDS = new Set(["thinking-active", "talking-active"]);
 const DISCUSSION_LEVEL_KEY = "kort-discussion-level";
 const DEEP_THINK_KEY = "kort-deep-think";
+const WEB_SEARCH_KEY = "kort-web-search";
 const DEVELOPER_MODE_KEY = "kort-developer-mode";
 const LOG_LEVEL_KEY = "kort-log-level";
 const DEFAULT_DISCUSSION_LEVEL: DiscussionLevel = "auto";
@@ -270,6 +280,11 @@ function loadDeepThink(): boolean {
 
 function saveDeepThink(enabled: boolean): void {
   localStorage.setItem(DEEP_THINK_KEY, String(enabled));
+}
+
+function loadWebSearch(): boolean {
+  if (typeof window === "undefined") return false;
+  return localStorage.getItem(WEB_SEARCH_KEY) === "true";
 }
 
 function loadDeveloperMode(): boolean {
@@ -352,6 +367,9 @@ function createEmptySlot(): StreamSlot {
     conversation: null,
     streamError: null,
     discussionMessages: [],
+    toolTraces: [],
+    researchActive: false,
+    webSearch: loadWebSearch(),
   };
 }
 
@@ -526,6 +544,55 @@ function appendDiscussionMessage(
   return [...current, message];
 }
 
+function parseToolTrace(value: unknown): ToolTrace | null {
+  if (!value || typeof value !== "object") return null;
+  const item = value as Record<string, unknown>;
+  if (typeof item.id !== "string") return null;
+  if (item.tool !== "search" && item.tool !== "fetch") return null;
+  const status =
+    item.status === "running" || item.status === "error" ? item.status : "complete";
+  const sources = Array.isArray(item.sources)
+    ? item.sources.flatMap((source) => {
+        if (!source || typeof source !== "object") return [];
+        const raw = source as Record<string, unknown>;
+        if (typeof raw.url !== "string" || !raw.url) return [];
+        return [
+          {
+            title: typeof raw.title === "string" ? raw.title : raw.url,
+            url: raw.url,
+            domain: typeof raw.domain === "string" ? raw.domain : undefined,
+            snippet: typeof raw.snippet === "string" ? raw.snippet : undefined,
+          },
+        ];
+      })
+    : [];
+  return {
+    id: item.id,
+    tool: item.tool,
+    status,
+    query: typeof item.query === "string" ? item.query : "",
+    url: typeof item.url === "string" ? item.url : "",
+    title: typeof item.title === "string" ? item.title : "",
+    error: typeof item.error === "string" ? item.error : null,
+    duration_ms: typeof item.duration_ms === "number" ? item.duration_ms : 0,
+    sources,
+    excerpt: typeof item.excerpt === "string" ? item.excerpt : "",
+    source_count: typeof item.source_count === "number" ? item.source_count : sources.length,
+  };
+}
+
+function parseToolTraces(value: unknown): ToolTrace[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map(parseToolTrace)
+    .filter((item): item is ToolTrace => Boolean(item));
+}
+
+function upsertToolTrace(current: ToolTrace[], trace: ToolTrace): ToolTrace[] {
+  const exists = current.some((item) => item.id === trace.id);
+  return exists ? current.map((item) => (item.id === trace.id ? trace : item)) : [...current, trace];
+}
+
 function markdownTitle(markdown: string, fallback: string) {
   const firstHeading = markdown.match(/^###\s+(.+)$/m);
   return firstHeading?.[1]?.trim() || fallback;
@@ -691,6 +758,7 @@ function parseMessageNode(value: unknown): MessageNode | null {
     discussion_messages: Array.isArray(raw.discussion_messages)
       ? (raw.discussion_messages as DiscussionMessage[])
       : [],
+    tool_traces: parseToolTraces(raw.tool_traces),
     active_child_id: typeof raw.active_child_id === "string" ? raw.active_child_id : null,
     children: Array.isArray(raw.children) ? raw.children.filter((item): item is string => typeof item === "string") : [],
   };
@@ -805,6 +873,9 @@ function HomeExperience() {
   const [delegationInfo, setDelegationInfo] = useState<DelegationInfo | null>(null);
   const [discussionMessages, setDiscussionMessages] = useState<DiscussionMessage[]>([]);
   const [discussionView, setDiscussionView] = useState<DiscussionViewTarget | null>(null);
+  const [toolTraces, setToolTraces] = useState<ToolTrace[]>([]);
+  const [researchActive, setResearchActive] = useState(false);
+  const [webSearch, setWebSearch] = useState(false);
 
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -862,6 +933,8 @@ function HomeExperience() {
     setRequestPhase(slot.requestPhase);
     setDelegationInfo(slot.delegationInfo);
     setDiscussionMessages(slot.discussionMessages);
+    setToolTraces(slot.toolTraces);
+    setResearchActive(slot.researchActive);
     setDiscussionView(null);
   }
 
@@ -886,6 +959,9 @@ function HomeExperience() {
     slot.requestPhase = requestPhase;
     slot.delegationInfo = delegationInfo;
     slot.discussionMessages = discussionMessagesRef.current;
+    slot.toolTraces = toolTraces;
+    slot.researchActive = researchActive;
+    slot.webSearch = webSearch;
   }
 
   function saveCurrentSlot() {
@@ -1026,6 +1102,8 @@ function HomeExperience() {
     setRequestPhase(null);
     setDelegationInfo(null);
     setDiscussionMessages([]);
+    setToolTraces([]);
+    setResearchActive(false);
     setDiscussionView(null);
     setNodesSynced([]);
     setActiveRootId(null);
@@ -1065,6 +1143,7 @@ function HomeExperience() {
     const loadedLocale = loadLocale();
     setDiscussionLevel(loadDiscussionLevel());
     setDeepThink(loadDeepThink());
+    setWebSearch(loadWebSearch());
     setDeveloperMode(loadDeveloperMode());
     setLogLevel(loadLogLevel());
     setLocale(loadedLocale);
@@ -1152,6 +1231,11 @@ function HomeExperience() {
     if (!preferencesReadyRef.current) return;
     saveDeepThink(deepThink);
   }, [deepThink]);
+
+  useEffect(() => {
+    if (!preferencesReadyRef.current) return;
+    localStorage.setItem(WEB_SEARCH_KEY, String(webSearch));
+  }, [webSearch]);
 
   useEffect(() => {
     if (!preferencesReadyRef.current) return;
@@ -1462,6 +1546,8 @@ function HomeExperience() {
     setSubmittedQuestion(null);
     setFinalBody("");
     setTimeline([]);
+    setToolTraces([]);
+    setResearchActive(false);
     setThinkingComplete(false);
     setLoading(true);
     setRequestPhase("sent");
@@ -1723,6 +1809,11 @@ function HomeExperience() {
     slot.lastBranch = attempt;
     slot.streamingNodeId = null;
     slot.pendingRetryOf = attempt.role === "assistant" ? attempt.parentId : null;
+    slot.toolTraces = [];
+    slot.researchActive = false;
+    slot.webSearch = webSearch;
+    setToolTraces([]);
+    setResearchActive(false);
     setStreamingNodeId(null);
     setPendingRetryOf(slot.pendingRetryOf);
     setCurrentConversationId(convId);
@@ -1767,12 +1858,14 @@ function HomeExperience() {
         role: attempt.role,
         discussionLevel,
         deepThink: discussionLevel === "off" ? deepThink : false,
+        webSearch,
       });
       const body: Record<string, string | boolean | number | null> = {
         parent_id: attempt.parentId,
         role: attempt.role,
         content: attempt.role === "user" ? attempt.content : "",
         level: discussionLevel,
+        web_search: webSearch,
       };
       if (discussionLevel === "off") {
         body.deep_think = deepThink;
@@ -1971,12 +2064,31 @@ function HomeExperience() {
       slot.pendingRetryOf = null;
       slot.submittedQuestion = null;
       slot.requestPhase = "sent";
+      slot.toolTraces = [];
+      slot.researchActive = false;
       return;
     }
     if (message.event === "delegation_complete") {
       const info = parseDelegationInfo(message.data);
       slot.delegationInfo = info;
       slot.requestPhase = "delegating";
+      return;
+    }
+    if (message.event === "research_started") {
+      slot.researchActive = true;
+      slot.requestPhase = null;
+      return;
+    }
+    if (message.event === "tool_trace") {
+      const trace = parseToolTrace(message.data);
+      if (trace) {
+        slot.toolTraces = upsertToolTrace(slot.toolTraces, trace);
+        slot.researchActive = true;
+      }
+      return;
+    }
+    if (message.event === "research_complete") {
+      slot.researchActive = false;
       return;
     }
     if (message.event === "discussion_message") {
@@ -2084,6 +2196,7 @@ function HomeExperience() {
       slot.pendingRetryOf = null;
       slot.submittedQuestion = null;
       slot.thinkingComplete = false;
+      slot.researchActive = false;
       const visibleTimeline = withoutTransientTimelineItems(slot.timeline);
       slot.timeline =
         visibleTimeline.length > 0 ? appendThinkingDoneNode(visibleTimeline, locale, slot.elapsed) : [];
@@ -2102,6 +2215,7 @@ function HomeExperience() {
       );
       slot.loading = false;
       slot.requestPhase = null;
+      slot.researchActive = false;
       if (!markStreamingNodeFailed(slot, errorMessage)) {
         slot.streamError = errorMessage;
       }
@@ -2125,6 +2239,8 @@ function HomeExperience() {
       const streamingAssistant = started.find((node) => node.role === "assistant");
       setStreamingNodeId(streamingAssistant?.node_id ?? null);
       setPendingRetryOf(null);
+      setToolTraces([]);
+      setResearchActive(false);
       submittedQuestionRef.current = null;
       setSubmittedQuestion(null);
       setRequestPhase("sent");
@@ -2163,6 +2279,26 @@ function HomeExperience() {
           delegationPhaseTimerRef.current = null;
         }, 450);
       }, 1200);
+      return;
+    }
+
+    if (message.event === "research_started") {
+      setRequestPhase(null);
+      setResearchActive(true);
+      return;
+    }
+
+    if (message.event === "tool_trace") {
+      const trace = parseToolTrace(message.data);
+      if (trace) {
+        setResearchActive(true);
+        setToolTraces((current) => upsertToolTrace(current, trace));
+      }
+      return;
+    }
+
+    if (message.event === "research_complete") {
+      setResearchActive(false);
       return;
     }
 
@@ -2376,6 +2512,7 @@ function HomeExperience() {
       setPendingRetryOf(null);
       setThinkingComplete(false);
       setTalkingActive(false);
+      setResearchActive(false);
       setFinalBody("");
       const finalElapsed =
         elapsedMsToSeconds(completed?.elapsed_ms) ?? streamContext?.slot.elapsed ?? Math.max(1, elapsed);
@@ -2407,6 +2544,7 @@ function HomeExperience() {
       );
       setLoading(false);
       setRequestPhase(null);
+      setResearchActive(false);
       const failedId = streamContext?.streamingNodeId ?? streamingNodeId;
       const failedNode = failedId
         ? streamContext?.slot.nodes.find((node) => node.node_id === failedId) ?? null
@@ -2571,6 +2709,8 @@ function HomeExperience() {
                     elapsed={elapsed}
                     question={submittedQuestion}
                     timeline={visibleTimeline}
+                    toolTraces={toolTraces}
+                    researchActive={researchActive}
                     finalBody={finalBody}
                     streamError={streamError}
                     requestPhase={requestPhase}
@@ -2609,6 +2749,8 @@ function HomeExperience() {
                       pauseFlash={pauseFlash}
                       locale={locale}
                       setInput={setInput}
+                      webSearch={webSearch}
+                      setWebSearch={setWebSearch}
                       onSubmit={() => void sendQuestion()}
                       onPause={pauseConversation}
                     />
@@ -2639,6 +2781,8 @@ function HomeExperience() {
                   pauseFlash={pauseFlash}
                   locale={locale}
                   setInput={setInput}
+                  webSearch={webSearch}
+                  setWebSearch={setWebSearch}
                   onSubmit={() => void sendQuestion()}
                   onPause={pauseConversation}
                 />
@@ -3123,6 +3267,8 @@ function ConversationView({
   elapsed,
   question,
   timeline,
+  toolTraces,
+  researchActive,
   finalBody,
   streamError,
   requestPhase,
@@ -3146,6 +3292,8 @@ function ConversationView({
   elapsed: number;
   question: string | null;
   timeline: TimelineItem[];
+  toolTraces: ToolTrace[];
+  researchActive: boolean;
   finalBody: string;
   streamError: string | null;
   requestPhase: StreamSlot["requestPhase"];
@@ -3265,33 +3413,26 @@ function ConversationView({
   const statusItem = [...timeline].reverse().find(
     (item) => item.status === "active" || item.status === "talking" || item.status === "done"
   );
-  const lastCompleteTitle = [...timeline].reverse().find(
-    (item) => item.status === "complete"
-  )?.title;
   const isDone = thinkingComplete || statusItem?.status === "done";
-  const previewTitle = isDone
-    ? statusItem?.title ?? thinkingElapsedLabel(locale, elapsed, true)
-    : statusItem?.title ?? lastCompleteTitle ?? latest?.title ?? tr.thinking.active;
 
   function renderLiveAssistant() {
     const showPreview = !isDone && latest && latest.body.trim();
     const showWaitingState =
-      loading && !finalBody && !streamError && (timeline.length === 0 || requestPhase !== null);
+      loading && !finalBody && !streamError && !researchActive && (timeline.length === 0 || requestPhase !== null);
     const previewBody = latest ? markdownBody(latest.body) : "";
     return (
       <div className="assistant-row" key="assistant-live">
         <div className="assistant-content">
-          {timeline.length > 0 ? (
-            <button
-              className={cn("thinking-block", !isDone && "thinking-block-active")}
-              onClick={onToggleThinking}
-              type="button"
-            >
-              <span className={cn("thinking-title", !isDone && "thinking-title-active")}>
-                {previewTitle}
-              </span>
-              <ChevronRight className="thinking-chevron" size={14} aria-hidden="true" />
-            </button>
+          {timeline.length > 0 || toolTraces.length > 0 || researchActive ? (
+            <ThinkingTrace
+              traces={toolTraces}
+              timeline={timeline}
+              active={!isDone && loading}
+              researchActive={researchActive}
+              elapsed={elapsed}
+              locale={locale}
+              onOpenDetails={onToggleThinking}
+            />
           ) : null}
 
           {showWaitingState ? (
@@ -3310,14 +3451,14 @@ function ConversationView({
 
           {showPreview && previewBody ? (
             <div className="thinking-preview markdown-body">
-              <Markdown content={truncateWords(previewBody, 20)} />
+              <Markdown content={truncateWords(previewBody, 20)} locale={locale} />
             </div>
           ) : null}
 
           {finalBody ? (
             <>
               <div className="answer-body markdown-body">
-                <Markdown content={finalBody} />
+                <Markdown content={finalBody} locale={locale} />
               </div>
               <MessageActions
                 body={finalBody}
@@ -3350,17 +3491,20 @@ function ConversationView({
     return (
       <div className="assistant-row" key={`assistant-${node.node_id}`}>
         <div className="assistant-content">
-          {nodeTimeline.length > 0 ? (
-            <button className="thinking-block" onClick={() => onViewNodeThinking(node)} type="button">
-              <span className="thinking-title">
-                {nodeTimeline[nodeTimeline.length - 1]?.title ?? tr.thinking.complete}
-              </span>
-              <ChevronRight className="thinking-chevron" size={14} aria-hidden="true" />
-            </button>
+          {nodeTimeline.length > 0 || (node.tool_traces?.length ?? 0) > 0 ? (
+            <ThinkingTrace
+              traces={node.tool_traces ?? []}
+              timeline={nodeTimeline}
+              active={false}
+              researchActive={false}
+              elapsed={nodeElapsedSeconds(node) ?? 0}
+              locale={locale}
+              onOpenDetails={() => onViewNodeThinking(node)}
+            />
           ) : null}
           {body ? (
             <div className="answer-body markdown-body">
-              <Markdown content={body} />
+              <Markdown content={body} locale={locale} />
             </div>
           ) : null}
           {failed ? (
@@ -3619,6 +3763,10 @@ function MessageActions({
 }
 
 const COMPOSER_TEXTAREA_MAX_HEIGHT = 176;
+/** 芯片与发送键夹在输入两侧时，输入行要让出来的横向空间：两侧内边距 + 两个间距 + 输入自身内边距 */
+const COMPOSER_ROW_GAP = 8;
+const COMPOSER_ROW_PADDING = 16;
+const COMPOSER_ROW_SLACK = 12;
 
 function DiscussionModePicker({
   discussionLevel,
@@ -3759,6 +3907,8 @@ function Composer({
   pauseFlash,
   locale,
   setInput,
+  webSearch,
+  setWebSearch,
   onSubmit,
   onPause,
 }: {
@@ -3768,11 +3918,33 @@ function Composer({
   pauseFlash: boolean;
   locale: Locale;
   setInput: Dispatch<SetStateAction<string>>;
+  webSearch: boolean;
+  setWebSearch: Dispatch<SetStateAction<boolean>>;
   onSubmit: () => void;
   onPause: () => void;
 }) {
+  const shellRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const toolRef = useRef<HTMLButtonElement>(null);
+  const sendRef = useRef<HTMLButtonElement>(null);
+  const measureRef = useRef<HTMLSpanElement>(null);
   const copy = t(locale).ui;
+  const [wide, setWide] = useState(false);
+
+  /* 一行放得下就把工具芯片和发送键留在输入行两端；一旦换行或长到挤不下了，
+     输入独占一行、芯片与发送键落到下一行 */
+  useLayoutEffect(() => {
+    const shell = shellRef.current;
+    const measure = measureRef.current;
+    if (!shell || !measure) return;
+    const reserved =
+      (toolRef.current?.offsetWidth ?? 0) +
+      (sendRef.current?.offsetWidth ?? 0) +
+      COMPOSER_ROW_GAP * 2 +
+      COMPOSER_ROW_PADDING +
+      COMPOSER_ROW_SLACK;
+    setWide(input.includes("\n") || measure.offsetWidth > shell.clientWidth - reserved);
+  }, [input, wide]);
 
   useEffect(() => {
     const textarea = textareaRef.current;
@@ -3783,46 +3955,70 @@ function Composer({
     textarea.style.height = `${nextHeight}px`;
     textarea.style.overflowY =
       textarea.scrollHeight > COMPOSER_TEXTAREA_MAX_HEIGHT ? "auto" : "hidden";
-  }, [input]);
+  }, [input, wide]);
 
   return (
-    <div className="composer-shell">
-      <div className="composer-input-row">
-        <textarea
-          ref={textareaRef}
-          value={input}
-          onChange={(event) => setInput(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter" && !event.shiftKey && !loading) {
-              event.preventDefault();
-              onSubmit();
-            }
-          }}
-          rows={1}
-          className="composer-textarea"
-          placeholder={t(locale).ui.composerPlaceholder}
-        />
-        <button
-          className={cn(
-            "send-button",
-            paused && pauseFlash && "send-button-pause-flash",
-            paused && !pauseFlash && "send-button-paused"
-          )}
-          onClick={paused ? undefined : loading ? onPause : onSubmit}
-          disabled={paused || (!loading && !input.trim())}
-          type="button"
-          aria-label={loading ? copy.stop : copy.send}
-          title={loading ? copy.stop : copy.send}
-        >
-          {paused ? (
-            <span className="pause-status-text">{t(locale).ui.paused}</span>
-          ) : loading ? (
-            <CircleStop size={16} aria-hidden="true" />
-          ) : (
-            <SendHorizontal size={18} aria-hidden="true" />
-          )}
-        </button>
-      </div>
+    <div ref={shellRef} className={cn("composer-shell", wide && "composer-shell-wide")}>
+      <span ref={measureRef} className="composer-measure" aria-hidden="true">
+        {input}
+      </span>
+      <textarea
+        ref={textareaRef}
+        value={input}
+        onChange={(event) => setInput(event.target.value)}
+        onKeyDown={(event) => {
+          // 中文输入法回车选词不应该把消息发出去
+          if (
+            event.key === "Enter" &&
+            !event.shiftKey &&
+            !loading &&
+            !event.nativeEvent.isComposing
+          ) {
+            event.preventDefault();
+            onSubmit();
+          }
+        }}
+        rows={1}
+        className="composer-textarea"
+        placeholder={t(locale).ui.composerPlaceholder}
+      />
+      <button
+        ref={toolRef}
+        type="button"
+        className={cn("composer-tool", webSearch && "composer-tool-active")}
+        aria-pressed={webSearch}
+        onClick={() => setWebSearch((current) => !current)}
+      >
+        {webSearch ? (
+          <span className="composer-tool-state" aria-hidden="true">
+            <Check size={9} strokeWidth={3.4} />
+          </span>
+        ) : (
+          <Globe size={13} aria-hidden="true" />
+        )}
+        <span>{webSearch ? copy.webSearchOn : copy.webSearch}</span>
+      </button>
+      <button
+        ref={sendRef}
+        className={cn(
+          "send-button",
+          paused && pauseFlash && "send-button-pause-flash",
+          paused && !pauseFlash && "send-button-paused"
+        )}
+        onClick={paused ? undefined : loading ? onPause : onSubmit}
+        disabled={paused || (!loading && !input.trim())}
+        type="button"
+        aria-label={loading ? copy.stop : copy.send}
+        title={loading ? copy.stop : copy.send}
+      >
+        {paused ? (
+          <span className="pause-status-text">{t(locale).ui.paused}</span>
+        ) : loading ? (
+          <CircleStop size={16} aria-hidden="true" />
+        ) : (
+          <SendHorizontal size={18} aria-hidden="true" />
+        )}
+      </button>
     </div>
   );
 }
@@ -3863,7 +4059,7 @@ function ThinkingDrawer({
               {node.title}
             </span>
           ) : null}
-          {node.summary ? <div className="reasoning-tree-summary markdown-body"><Markdown content={node.summary} /></div> : null}
+          {node.summary ? <div className="reasoning-tree-summary markdown-body"><Markdown content={node.summary} locale={locale} /></div> : null}
           {children.length > 0 ? <div className="reasoning-tree-children">{renderTreeNodes(children)}</div> : null}
         </div>
       );
@@ -3917,7 +4113,7 @@ function ThinkingDrawer({
                     <div className="reasoning-tree">{renderTreeNodes(item.treeNodes, item.title)}</div>
                   ) : (
                     <div className="reasoning-body markdown-body">
-                      <Markdown content={item.body} />
+                      <Markdown content={item.body} locale={locale} />
                     </div>
                   )
                 ) : null}
