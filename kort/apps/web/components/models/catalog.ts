@@ -3,6 +3,7 @@ export type ProviderTypeValue =
   | "anthropic"
   | "deepseek"
   | "bigmodel"
+  | "doubao"
   | "kimi"
   | "minimax"
   | "ollama"
@@ -35,6 +36,7 @@ export type CatalogPlan = {
 
 export type ProviderIconKind =
   | { kind: "brand"; key: string }
+  | { kind: "asset"; key: string }
   | { kind: "monogram"; char: string }
   | { kind: "generic" };
 
@@ -71,7 +73,7 @@ export const PROVIDER_CATALOG: CatalogProvider[] = [
         baseUrl: "https://api.deepseek.com",
         models: [
           { id: "deepseek-v4-pro", label: "DeepSeek V4 Pro", capabilities: REASONING_ONLY },
-          { id: "deepseek-flash", label: "DeepSeek Flash", capabilities: REASONING_ONLY },
+          { id: "deepseek-flash", label: "DeepSeek Flash", capabilities: ["reasoning", "vision"] },
         ],
       },
     ],
@@ -155,7 +157,7 @@ export const PROVIDER_CATALOG: CatalogProvider[] = [
     group: "recommended",
     providerType: "bigmodel",
     envKeyName: "BIGMODEL_API_KEY",
-    icon: { kind: "monogram", char: "Z" },
+    icon: { kind: "asset", key: "zdotai" },
     color: "#1F2A5B",
     consoleUrl: "https://open.bigmodel.cn/usercenter/apikeys",
     docsUrl: "https://docs.bigmodel.cn/cn/guide/start/model-overview",
@@ -192,6 +194,30 @@ export const PROVIDER_CATALOG: CatalogProvider[] = [
         hint: {
           zh: "Coding Plan 密钥目前只能通过 OpenAI Chat Completions 协议调用；Claude Code 用的 /api/anthropic 端点不对程序端开放。",
           en: "Coding Plan keys currently work over OpenAI Chat Completions only; the Claude-Code /api/anthropic endpoint is not open to programmatic calls.",
+        },
+      },
+    ],
+  },
+  {
+    id: "doubao",
+    name: { zh: "豆包 · 火山方舟", en: "Doubao (Volcengine Ark)" },
+    group: "recommended",
+    providerType: "doubao",
+    envKeyName: "ARK_API_KEY",
+    icon: { kind: "asset", key: "doubao" },
+    color: "#1E37FC",
+    consoleUrl: "https://ark.volcengine.com/region:cn-beijing/apikey",
+    docsUrl: "https://docs.volcengine.com/docs/ark/product-overview",
+    plans: [
+      {
+        id: "doubao-payg",
+        billing: "pay_as_you_go",
+        apiStyle: "openai",
+        baseUrl: "https://ark.cn-beijing.volces.com/api/v3",
+        models: [],
+        hint: {
+          zh: "模型 ID 以方舟控制台为准；推理接入点也可直接当模型 ID 填。",
+          en: "Model IDs come from the Ark console; an inference endpoint ID also works as the model ID.",
         },
       },
     ],
@@ -340,7 +366,7 @@ export const PROVIDER_CATALOG: CatalogProvider[] = [
     group: "more",
     providerType: "openai",
     envKeyName: "OPENAI_API_KEY",
-    icon: { kind: "monogram", char: "AI" },
+    icon: { kind: "asset", key: "openai" },
     color: "#0F1115",
     consoleUrl: "https://platform.openai.com/api-keys",
     docsUrl: "https://developers.openai.com/api/docs/api-reference",
@@ -386,6 +412,30 @@ export const PROVIDER_CATALOG: CatalogProvider[] = [
         apiStyle: "openai",
         baseUrl: "https://openrouter.ai/api/v1",
         models: [],
+      },
+    ],
+  },
+  {
+    id: "microsoft-copilot",
+    name: { zh: "Microsoft Copilot", en: "Microsoft Copilot" },
+    group: "more",
+    providerType: "openai",
+    envKeyName: "COPILOT_API_KEY",
+    icon: { kind: "asset", key: "microsoft-copilot" },
+    color: "#2253CE",
+    consoleUrl: "",
+    docsUrl: "https://learn.microsoft.com/copilot/",
+    plans: [
+      {
+        id: "copilot-bridge",
+        billing: "custom",
+        apiStyle: "openai",
+        baseUrl: "",
+        models: [],
+        hint: {
+          zh: "微软没有开放 Copilot 的 OpenAI 兼容接口；这里用于接你自建的兼容网关，Base URL 与 Key 以网关为准。",
+          en: "Microsoft exposes no OpenAI-compatible Copilot API; use this preset with your own compatible gateway.",
+        },
       },
     ],
   },

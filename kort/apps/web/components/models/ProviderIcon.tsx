@@ -56,7 +56,10 @@ const KEYWORD_ICONS: Array<{ match: RegExp; icon: ProviderIconKind; color: strin
   { match: /moonshot|kimi/, icon: { kind: "brand", key: "moonshotai" }, color: "#000000" },
   { match: /qwen|alibaba|bailian|dashscope|qianwen/, icon: { kind: "brand", key: "qwen" }, color: "#6950EF" },
   { match: /xiaomi|mimo/, icon: { kind: "brand", key: "xiaomi" }, color: "#FF6900" },
-  { match: /openai|gpt|chatgpt/, icon: { kind: "monogram", char: "AI" }, color: "#0F1115" },
+  { match: /copilot/, icon: { kind: "asset", key: "microsoft-copilot" }, color: "#2253CE" },
+  { match: /doubao|volcengine|volces|豆包/, icon: { kind: "asset", key: "doubao" }, color: "#1E37FC" },
+  { match: /zhipu|bigmodel|glm|z[-. ]?ai|zdotai/, icon: { kind: "asset", key: "zdotai" }, color: "#2D2D2D" },
+  { match: /openai|gpt|chatgpt/, icon: { kind: "asset", key: "openai" }, color: "#0F1115" },
 ];
 
 type IconSpec = { icon: ProviderIconKind; color: string };
@@ -99,6 +102,18 @@ function IconTile({
   className?: string;
 }) {
   const glyph = Math.round(size * 0.6);
+
+  if (icon.kind === "asset") {
+    return (
+      <span
+        className={`provider-icon provider-icon-brand provider-icon-asset ${className}`}
+        style={{ width: size, height: size }}
+        aria-hidden="true"
+      >
+        <img src={`/providers/${icon.key}.svg`} width={glyph} height={glyph} alt="" draggable={false} />
+      </span>
+    );
+  }
 
   if (icon.kind === "brand") {
     const brand = BRAND_ICONS[icon.key];
