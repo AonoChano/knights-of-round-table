@@ -1,7 +1,10 @@
+import { spawn } from "node:child_process";
+
 const apiUrl = process.env.KORT_API_HEALTH_URL ?? "http://127.0.0.1:8000/health";
 const webUrl = process.env.KORT_WEB_URL ?? "http://127.0.0.1:3000/";
 const timeoutMs = 60_000;
 const pollMs = 800;
+const openBrowser = process.env.KORT_OPEN_BROWSER === "1" && process.platform === "win32";
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -41,7 +44,17 @@ const apiReady = await waitFor(apiUrl, "api", (status) => status >= 200 && statu
 const webReady = await waitFor(webUrl, "web", (status) => status >= 200 && status < 500);
 
 if (apiReady && webReady) {
-  console.log("[warmup] dev server is warm. Open http://localhost:3000");
+  if (openBrowser) {
+    // `start` takes the first quoted argument as the window title.
+    spawn("cmd.exe", ["/c", "start", "", webUrl], {
+      stdio: "ignore",
+      detached: true,
+      windowsHide: true,
+    }).unref();
+    console.log(`[warmup] dev server is warm. Opened ${webUrl} in your browser.`);
+  } else {
+    console.log("[warmup] dev server is warm. Open http://localhost:3000");
+  }
 } else {
   console.warn("[warmup] dev server started, but one side did not answer during warmup.");
 }
