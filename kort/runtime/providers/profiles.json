@@ -19,7 +19,8 @@
         "label": "DeepSeek Flash",
         "enabled": true,
         "capabilities": [
-          "reasoning"
+          "reasoning",
+          "vision"
         ]
       }
     ]

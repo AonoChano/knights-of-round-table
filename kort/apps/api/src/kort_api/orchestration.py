@@ -87,10 +87,17 @@ def _call_model_stream(
     secrets: dict[str, str],
     *,
     disable_thinking: bool = False,
+    images: list[str] | None = None,
 ) -> Iterator[str]:
     profile = _profile_for_agent(agent, provider)
     client = OpenAICompatibleClient(secrets)
-    yield from client.stream_chat(provider=profile, prompt=user_prompt, system_prompt=system_prompt, disable_thinking=disable_thinking)
+    yield from client.stream_chat(
+        provider=profile,
+        prompt=user_prompt,
+        system_prompt=system_prompt,
+        disable_thinking=disable_thinking,
+        images=images,
+    )
 
 
 def _enabled_candidates(
@@ -98,8 +105,9 @@ def _enabled_candidates(
     providers: list[dict],
     secrets: dict[str, str],
     preferred_roles: tuple[str, ...] = ("synthesizer", "expert", "summarizer", "critic"),
+    preferred_agent: str | None = None,
 ) -> list[tuple[dict, dict]]:
-    collected: list[tuple[dict, dict, int]] = []
+    collected: list[tuple[dict, dict, int, bool]] = []
     for role in preferred_roles:
         for agent in agents:
             if agent.get("role") != role:
@@ -115,9 +123,10 @@ def _enabled_candidates(
                 continue
             if not model_is_selected(provider, str(agent.get("model") or "")):
                 continue
-            collected.append((agent, raw_provider, int(agent.get("priority") or 0)))
-    collected.sort(key=lambda item: item[2], reverse=True)
-    return [(agent, provider) for agent, provider, _ in collected]
+            is_preferred = bool(preferred_agent) and str(agent.get("name") or "") == preferred_agent
+            collected.append((agent, raw_provider, int(agent.get("priority") or 0), is_preferred))
+    collected.sort(key=lambda item: (not item[3], -item[2]))
+    return [(agent, provider) for agent, provider, _, _ in collected]
 
 
 def _clip(text: str, limit: int = 200) -> str:
@@ -164,6 +173,7 @@ def _stream_first_working(
     system_prompt: str | None = None,
     agent_contexts: dict[str, str] | None = None,
     disable_thinking: bool = False,
+    images: list[str] | None = None,
 ) -> Iterator[str]:
     errors: list[str] = []
     for agent, provider in candidates:
@@ -178,6 +188,7 @@ def _stream_first_working(
                 user_prompt=user_prompt,
                 secrets=secrets,
                 disable_thinking=disable_thinking,
+                images=images,
             ):
                 started = True
                 yield chunk
@@ -680,8 +691,14 @@ def _produce_final_answer(state: DiscussionState) -> dict:
     return {"final_answer_text": body}
 
 
-def _stream_final_answer(state: DiscussionState) -> Iterator[str]:
-    candidates = _enabled_candidates(state["agents"], state["providers"], state["secrets"])
+def _stream_final_answer(
+    state: DiscussionState,
+    preferred_agent: str | None = None,
+    images: list[str] | None = None,
+) -> Iterator[str]:
+    candidates = _enabled_candidates(
+        state["agents"], state["providers"], state["secrets"], preferred_agent=preferred_agent
+    )
     if not candidates:
         yield "No enabled provider available. Add a provider key in Settings."
         return
@@ -693,6 +710,7 @@ def _stream_final_answer(state: DiscussionState) -> Iterator[str]:
             secrets=state["secrets"],
             agent_contexts=state.get("agent_contexts"),
             disable_thinking=True,
+            images=images,
         )
     except ModelCallError as exc:
         yield f"The final response could not be generated. ({_clip(str(exc))})"
@@ -865,6 +883,8 @@ def run_direct_answer_stream(
     secrets: dict[str, str],
     agent_contexts: dict[str, str] | None = None,
     answer_stream: Callable[[str], Iterator[str]] | None = None,
+    preferred_agent: str | None = None,
+    images: list[str] | None = None,
 ) -> Iterator[str]:
     agents_dicts = [a.model_dump(mode="json") for a in agents]
     providers_dicts = [p.model_dump(mode="json") for p in providers]
@@ -892,7 +912,7 @@ def run_direct_answer_stream(
         yield from answer_stream(_final_answer_prompt(state))
         return
 
-    for chunk in _stream_final_answer(state):
+    for chunk in _stream_final_answer(state, preferred_agent, images=images):
         yield _sse("final_delta", {"delta": chunk})
 
 
@@ -904,6 +924,7 @@ def run_discussion_stream(
     max_rounds: int = 4,
     agent_contexts: dict[str, str] | None = None,
     answer_stream: Callable[[str], Iterator[str]] | None = None,
+    preferred_agent: str | None = None,
 ) -> Iterator[str]:
     agents_dicts = [a.model_dump(mode="json") for a in agents]
     providers_dicts = [p.model_dump(mode="json") for p in providers]
@@ -953,7 +974,7 @@ def run_discussion_stream(
         if answer_stream is not None:
             yield from answer_stream(_final_answer_prompt(state))
             return
-        for chunk in _stream_final_answer(state):
+        for chunk in _stream_final_answer(state, preferred_agent):
             yield _sse("final_delta", {"delta": chunk})
 
     if max_rounds <= 0:
@@ -1195,6 +1216,7 @@ async def run_solo_thinking_stream(
     providers: list[ProviderProfile],
     secrets: dict[str, str],
     agent_contexts: dict[str, str] | None = None,
+    preferred_agent: str | None = None,
 ) -> AsyncIterator[str]:
     """Async generator that streams a single model through visible summaries.
 
@@ -1207,7 +1229,9 @@ async def run_solo_thinking_stream(
     providers_dicts = [p.model_dump(mode="json") for p in providers]
 
     # -- resolve models ------------------------------------------------------
-    candidates = _enabled_candidates(agents_dicts, providers_dicts, secrets)
+    candidates = _enabled_candidates(
+        agents_dicts, providers_dicts, secrets, preferred_agent=preferred_agent
+    )
     if not candidates:
         yield _make_sse("thinking_complete", {"elapsed_ms": 0})
         yield _make_sse("final_delta", {"delta": "No enabled provider available. Add a provider key in Settings."})

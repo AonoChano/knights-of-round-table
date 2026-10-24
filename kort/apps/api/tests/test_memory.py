@@ -362,15 +362,17 @@ def test_conversation_round_becomes_retrievable_memory(monkeypatch) -> None:
     client.put("/api/providers/deepseek/secret", json={"api_key": "test-key"})
     seen: dict = {}
 
-    def fake_direct_stream(**kwargs):
+    def fake_discussion_stream(**kwargs):
         seen.update(kwargs)
+        yield "event: talking_active\ndata: {}\n\n"
+        yield "event: thinking_complete\ndata: {}\n\n"
         yield 'event: final_delta\ndata: {"delta": "我们约好周五复盘。"}\n\n'
 
-    monkeypatch.setattr("kort_api.conversations.run_direct_answer_stream", fake_direct_stream)
+    monkeypatch.setattr("kort_api.conversations.run_discussion_stream", fake_discussion_stream)
     try:
         first = client.post(
             "/api/conversations/memory-conversation-a/branches",
-            json={"parent_id": None, "role": "user", "content": "我们什么时候复盘？", "level": "off"},
+            json={"parent_id": None, "role": "user", "content": "我们什么时候复盘？", "level": "low"},
         )
         assert first.status_code == 200
         assert "event: node_complete" in first.text
@@ -380,7 +382,7 @@ def test_conversation_round_becomes_retrievable_memory(monkeypatch) -> None:
 
         second = client.post(
             "/api/conversations/memory-conversation-b/branches",
-            json={"parent_id": None, "role": "user", "content": "复盘时间定了吗？", "level": "off"},
+            json={"parent_id": None, "role": "user", "content": "复盘时间定了吗？", "level": "low"},
         )
         assert second.status_code == 200
         contexts = seen.get("agent_contexts") or {}

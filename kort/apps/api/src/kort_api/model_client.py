@@ -87,6 +87,7 @@ ANTHROPIC_THINKING_BUDGET = 4000
 _THINKING_STYLE: dict[str, str] = {
     "deepseek": "thinking_object",
     "bigmodel": "thinking_object",
+    "doubao": "thinking_object",
     "kimi": "thinking_object",
     "xiaomi": "thinking_object",
     "bailian": "enable_thinking",
@@ -240,6 +241,38 @@ def apply_thinking_parameters(
         payload["reasoning_effort"] = "high"
 
 
+def _split_image_data_url(url: str) -> tuple[str, str]:
+    header, separator, payload = url.partition(",")
+    if not separator or not header.startswith("data:image/") or ";base64" not in header:
+        raise ModelCallError("Image attachment is not a base64 image data URL.")
+    if not payload:
+        raise ModelCallError("Image attachment is empty.")
+    return header[len("data:") :].split(";", 1)[0].lower(), payload
+
+
+def _user_content(style: str, prompt: str, images: list[str] | None) -> str | list[dict[str, Any]]:
+    urls = [url for url in (images or []) if url]
+    if not urls:
+        return prompt
+    parsed = [_split_image_data_url(url) for url in urls]
+    if style == STYLE_ANTHROPIC:
+        blocks: list[dict[str, Any]] = [
+            {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": payload}}
+            for media_type, payload in parsed
+        ]
+        blocks.append({"type": "text", "text": prompt})
+        return blocks
+    if style == STYLE_RESPONSES:
+        return [
+            {"type": "input_text", "text": prompt},
+            *({"type": "input_image", "image_url": url} for url in urls),
+        ]
+    return [
+        {"type": "text", "text": prompt},
+        *({"type": "image_url", "image_url": {"url": url}} for url in urls),
+    ]
+
+
 class OpenAICompatibleClient:
     def __init__(self, secrets: dict[str, str]) -> None:
         self.secrets = secrets
@@ -253,6 +286,7 @@ class OpenAICompatibleClient:
         stream: bool,
         disable_thinking: bool,
         enable_thinking: bool = False,
+        images: list[str] | None = None,
     ) -> tuple[str, dict[str, str], dict]:
         style = normalize_style(provider.api_style)
         api_key = resolve_api_key(provider, self.secrets)
@@ -267,12 +301,13 @@ class OpenAICompatibleClient:
             headers["Authorization"] = f"Bearer {api_key}"
 
         url = chat_endpoint(provider.base_url, style)
+        user_content = _user_content(style, prompt, images)
 
         if style == STYLE_ANTHROPIC:
             payload: dict = {
                 "model": provider.default_model,
                 "system": system_prompt,
-                "messages": [{"role": "user", "content": prompt}],
+                "messages": [{"role": "user", "content": user_content}],
                 "max_tokens": ANTHROPIC_MAX_TOKENS,
             }
             if enable_thinking and not disable_thinking:
@@ -284,7 +319,7 @@ class OpenAICompatibleClient:
             payload = {
                 "model": provider.default_model,
                 "instructions": system_prompt,
-                "input": [{"role": "user", "content": prompt}],
+                "input": [{"role": "user", "content": user_content}],
                 "temperature": 0.4,
             }
         else:
@@ -292,7 +327,7 @@ class OpenAICompatibleClient:
                 "model": provider.default_model,
                 "messages": [
                     {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": prompt},
+                    {"role": "user", "content": user_content},
                 ],
                 "temperature": 0.4,
             }
@@ -309,13 +344,21 @@ class OpenAICompatibleClient:
             payload["stream"] = True
         return url, headers, payload
 
-    def chat(self, provider: ProviderProfile, prompt: str, system_prompt: str, *, disable_thinking: bool = False) -> str:
+    def chat(
+        self,
+        provider: ProviderProfile,
+        prompt: str,
+        system_prompt: str,
+        *,
+        disable_thinking: bool = False,
+        timeout: float = 120.0,
+    ) -> str:
         url, headers, payload = self._prepare(
             provider, prompt, system_prompt, stream=False, disable_thinking=disable_thinking
         )
 
         try:
-            response = httpx.post(url, headers=headers, json=payload, timeout=120)
+            response = httpx.post(url, headers=headers, json=payload, timeout=timeout)
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
             detail = sanitize_error_text(exc.response.text)
@@ -326,10 +369,16 @@ class OpenAICompatibleClient:
         return extract_message_text(provider.api_style, response.json())
 
     def stream_chat(
-        self, provider: ProviderProfile, prompt: str, system_prompt: str, *, disable_thinking: bool = False
+        self,
+        provider: ProviderProfile,
+        prompt: str,
+        system_prompt: str,
+        *,
+        disable_thinking: bool = False,
+        images: list[str] | None = None,
     ) -> Iterator[str]:
         url, headers, payload = self._prepare(
-            provider, prompt, system_prompt, stream=True, disable_thinking=disable_thinking
+            provider, prompt, system_prompt, stream=True, disable_thinking=disable_thinking, images=images
         )
 
         try:
@@ -356,6 +405,7 @@ class OpenAICompatibleClient:
         *,
         disable_thinking: bool = False,
         enable_thinking: bool = False,
+        images: list[str] | None = None,
     ) -> AsyncIterator[dict[str, str]]:
         """Stream a model response, splitting think (reasoning_content) from answer (content).
 
@@ -368,6 +418,7 @@ class OpenAICompatibleClient:
             stream=True,
             disable_thinking=disable_thinking,
             enable_thinking=enable_thinking,
+            images=images,
         )
 
         async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
@@ -701,6 +752,7 @@ class ToolSession:
         system_prompt: str,
         tools: list[dict[str, Any]],
         enable_thinking: bool = False,
+        images: list[str] | None = None,
     ) -> None:
         self.client = client
         self.provider = provider
@@ -714,6 +766,7 @@ class ToolSession:
             stream=False,
             disable_thinking=not enable_thinking,
             enable_thinking=enable_thinking,
+            images=images,
         )
         self._apply_tools()
         if self.style == STYLE_RESPONSES:
@@ -965,6 +1018,8 @@ def _thinking_style(provider: ProviderProfile) -> str:
         ("bigmodel", "thinking_object"),
         ("zhipu", "thinking_object"),
         ("glm", "thinking_object"),
+        ("doubao", "thinking_object"),
+        ("volces", "thinking_object"),
         ("moonshot", "thinking_object"),
         ("kimi", "thinking_object"),
         ("xiaomi", "thinking_object"),

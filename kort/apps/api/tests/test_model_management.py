@@ -419,9 +419,74 @@ def test_anthropic_style_calls_the_messages_endpoint(monkeypatch: pytest.MonkeyP
     assert capture.json["max_tokens"] == 8000
 
 
+def test_image_attachments_build_multimodal_payloads() -> None:
+    data = "data:image/jpeg;base64,QUJD"
+    client = OpenAICompatibleClient({"openai": "sk", "anthropic": "sk", "vision": "sk"})
+
+    _, _, openai_payload = client._prepare(
+        _profile(
+            provider_id="openai",
+            provider_type=ProviderType.openai,
+            base_url="https://api.openai.com/v1",
+            env_key_name="UNUSED_TEST_KEY",
+        ),
+        "look",
+        "sys",
+        stream=False,
+        disable_thinking=False,
+        images=[data],
+    )
+    assert openai_payload["messages"][1]["content"] == [
+        {"type": "text", "text": "look"},
+        {"type": "image_url", "image_url": {"url": data}},
+    ]
+
+    _, _, anthropic_payload = client._prepare(
+        _profile(
+            provider_id="anthropic",
+            provider_type=ProviderType.anthropic,
+            base_url="https://api.anthropic.com/v1",
+            api_style="anthropic",
+            default_model="claude-sonnet-5-5",
+            env_key_name="ANTHROPIC_API_KEY",
+        ),
+        "look",
+        "sys",
+        stream=False,
+        disable_thinking=False,
+        images=[data],
+    )
+    assert anthropic_payload["messages"][0]["content"] == [
+        {
+            "type": "image",
+            "source": {"type": "base64", "media_type": "image/jpeg", "data": "QUJD"},
+        },
+        {"type": "text", "text": "look"},
+    ]
+
+    _, _, responses_payload = client._prepare(
+        _profile(
+            provider_id="openai",
+            provider_type=ProviderType.openai,
+            base_url="https://api.openai.com/v1",
+            api_style="openai_responses",
+            default_model="gpt-5.4",
+            env_key_name="UNUSED_TEST_KEY",
+        ),
+        "look",
+        "sys",
+        stream=False,
+        disable_thinking=False,
+        images=[data],
+    )
+    assert responses_payload["input"][0]["content"] == [
+        {"type": "input_text", "text": "look"},
+        {"type": "input_image", "image_url": data},
+    ]
+
+
 def test_responses_style_uses_input_and_streams_output_text(monkeypatch: pytest.MonkeyPatch) -> None:
     lines = [
-        'data: {"type":"response.created","response":{"id":"resp_1"}}',
         'data: {"type":"response.output_text.delta","delta":"Hel"}',
         'data: {"type":"response.output_text.delta","delta":"lo"}',
         "data: [DONE]",

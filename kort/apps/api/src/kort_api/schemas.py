@@ -16,6 +16,7 @@ CANCELLED_ROUND_LIMITATION = "Conversation was paused by the user."
 
 MAX_ATTACHMENTS = 4
 MAX_ATTACHMENT_CHARS = 20_000
+MAX_IMAGE_DATA_CHARS = 3_500_000
 
 
 class ProviderType(str, Enum):
@@ -23,6 +24,7 @@ class ProviderType(str, Enum):
     anthropic = "anthropic"
     deepseek = "deepseek"
     bigmodel = "bigmodel"
+    doubao = "doubao"
     kimi = "kimi"
     minimax = "minimax"
     ollama = "ollama"
@@ -267,6 +269,15 @@ class ToolTrace(BaseModel):
     source_count: int = Field(default=0, ge=0)
 
 
+class ModelOverride(BaseModel):
+    """A direct provider/model choice for the bare harness (discussion off)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    provider_profile: str = Field(min_length=1, max_length=80)
+    model: str = Field(min_length=1, max_length=200)
+
+
 class ConversationRequest(BaseModel):
     """Routing inputs for one generation; built server-side from the branch being answered."""
 
@@ -275,14 +286,33 @@ class ConversationRequest(BaseModel):
     conversation_id: str | None = Field(default=None)
     deep_think: bool = False
     custom_max_rounds: int | None = Field(default=None, ge=1, le=12)
+    model_override: ModelOverride | None = Field(default=None)
 
 
 class MessageAttachment(BaseModel):
-    """A text file handed over in the composer; its body goes to the model with the question."""
+    """A text file or image handed over in the composer."""
 
+    kind: Literal["text", "image"] = "text"
     name: str = Field(min_length=1, max_length=120)
     mime: str = Field(default="", max_length=120)
-    text: str = Field(max_length=MAX_ATTACHMENT_CHARS)
+    text: str = Field(default="", max_length=MAX_ATTACHMENT_CHARS)
+    data: str = Field(default="", max_length=MAX_IMAGE_DATA_CHARS)
+    width: int = Field(default=0, ge=0, le=20_000)
+    height: int = Field(default=0, ge=0, le=20_000)
+    bytes: int = Field(default=0, ge=0)
+
+    @model_validator(mode="after")
+    def payload_matches_kind(self) -> "MessageAttachment":
+        if self.kind == "image":
+            header = self.data[:64]
+            if not header.startswith("data:image/") or ";base64," not in header:
+                raise ValueError("an image attachment needs a base64 image data URL")
+            media_type = header[len("data:") :].split(";", 1)[0].lower()
+            if media_type not in {"image/png", "image/jpeg", "image/webp", "image/gif"}:
+                raise ValueError("unsupported image type")
+            if self.text:
+                raise ValueError("an image attachment cannot carry text")
+        return self
 
 
 class BranchRequest(BaseModel):
@@ -296,15 +326,26 @@ class BranchRequest(BaseModel):
     level: str = Field(default="auto", pattern=r"^(off|auto|low|medium|high)$")
     deep_think: bool = False
     custom_max_rounds: int | None = Field(default=None, ge=1, le=12)
-    web_search: bool = True
+    web_search: Literal["auto", "required", "disabled"] = "auto"
+    preferred_agent: str | None = Field(default=None, max_length=120)
+    model_override: ModelOverride | None = Field(default=None)
     attachments: list[MessageAttachment] = Field(default_factory=list, max_length=MAX_ATTACHMENTS)
 
     @model_validator(mode="after")
     def content_matches_role(self) -> "BranchRequest":
-        if self.role == "user" and not self.content.strip():
-            raise ValueError("a user branch needs content")
+        images = [item for item in self.attachments if item.kind == "image"]
+        if self.role == "user" and not self.content.strip() and not images:
+            raise ValueError("a user branch needs content or an image")
         if self.role == "assistant" and self.content.strip():
             raise ValueError("an assistant branch is generated, not supplied")
+        if self.role == "assistant" and self.attachments:
+            raise ValueError("an assistant branch cannot carry attachments")
+        if images and self.level != "off":
+            raise ValueError("image attachments require discussion level 'off'")
+        if images and self.deep_think:
+            raise ValueError("image attachments are not supported with deep think")
+        if self.model_override is not None and self.level != "off":
+            raise ValueError("model_override requires discussion level 'off'")
         return self
 
 

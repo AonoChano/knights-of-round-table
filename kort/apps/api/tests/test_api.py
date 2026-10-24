@@ -265,6 +265,178 @@ def test_oversized_attachment_is_rejected() -> None:
     assert response.status_code == 422
 
 
+IMAGE_DATA_URL = "data:image/jpeg;base64,QUJD"
+
+
+def _seed_vision_provider() -> None:
+    profiles = [
+        {
+            "provider_id": "vision",
+            "label": "Vision",
+            "provider_type": "openai",
+            "base_url": "https://vision.test/v1",
+            "api_style": "openai",
+            "default_model": "vision-chat",
+            "env_key_name": "VISION_API_KEY",
+            "enabled": True,
+            "capabilities": ["chat", "vision"],
+            "models": [
+                {
+                    "id": "vision-chat",
+                    "label": "Vision Chat",
+                    "enabled": True,
+                    "capabilities": ["vision"],
+                }
+            ],
+        }
+    ]
+    app_module.provider_store.path.write_text(json.dumps(profiles), encoding="utf-8")
+    app_module.provider_store.secrets_path.write_text(
+        json.dumps({"vision": "sk-test"}), encoding="utf-8"
+    )
+
+
+def _image_attachment(**overrides) -> dict:
+    return {
+        "kind": "image",
+        "name": "cat.png",
+        "mime": "image/png",
+        "data": IMAGE_DATA_URL,
+        "width": 640,
+        "height": 480,
+        "bytes": 32,
+        **overrides,
+    }
+
+
+def test_image_attachment_reaches_vision_model_and_stored_node(monkeypatch) -> None:
+    _seed_vision_provider()
+    seen: dict = {}
+
+    def fake_direct_stream(**kwargs):
+        seen.update(kwargs)
+        yield 'event: final_delta\ndata: {"delta": "seen it"}\n\n'
+
+    monkeypatch.setattr("kort_api.conversations.run_direct_answer_stream", fake_direct_stream)
+
+    response, cid = _post_user_branch(
+        "这是什么？", level="off", attachments=[_image_attachment()]
+    )
+    assert response.status_code == 200, response.text
+    assert seen["images"] == [IMAGE_DATA_URL]
+    assert "Image cat.png (image/png) is attached" in seen["question"]
+
+    payload = client.get(f"/api/conversations/{cid}").json()
+    user_node = next(node for node in payload["nodes"] if node["role"] == "user")
+    assert user_node["attachments"][0]["kind"] == "image"
+    assert user_node["attachments"][0]["data"] == IMAGE_DATA_URL
+    assert user_node["content"] == "这是什么？"
+
+
+def test_image_only_message_uses_a_fallback_question_and_title(monkeypatch) -> None:
+    _seed_vision_provider()
+    seen: dict = {}
+
+    def fake_direct_stream(**kwargs):
+        seen.update(kwargs)
+        yield 'event: final_delta\ndata: {"delta": "seen it"}\n\n'
+
+    monkeypatch.setattr("kort_api.conversations.run_direct_answer_stream", fake_direct_stream)
+
+    response, cid = _post_user_branch("", level="off", attachments=[_image_attachment()])
+    assert response.status_code == 200, response.text
+    assert "Describe the attached image(s) in detail." in seen["question"]
+    payload = client.get(f"/api/conversations/{cid}").json()
+    user_node = next(node for node in payload["nodes"] if node["role"] == "user")
+    assert user_node["content"] == ""
+    assert payload["title"] == "cat.png"
+
+
+def test_image_attachment_requires_single_model_mode() -> None:
+    response, _ = _post_user_branch(
+        "看图", level="low", attachments=[_image_attachment()]
+    )
+    assert response.status_code == 422
+
+
+def test_image_auto_selection_picks_a_non_default_vision_model(monkeypatch) -> None:
+    profiles = [
+        {
+            "provider_id": "vision",
+            "label": "Vision",
+            "provider_type": "openai",
+            "base_url": "https://vision.test/v1",
+            "api_style": "openai",
+            "default_model": "text-chat",
+            "env_key_name": "VISION_API_KEY",
+            "enabled": True,
+            "capabilities": ["chat"],
+            "models": [
+                {"id": "text-chat", "label": "Text Chat", "enabled": True, "capabilities": ["chat"]},
+                {"id": "vision-chat", "label": "Vision Chat", "enabled": True, "capabilities": ["vision"]},
+            ],
+        }
+    ]
+    app_module.provider_store.path.write_text(json.dumps(profiles), encoding="utf-8")
+    app_module.provider_store.secrets_path.write_text(
+        json.dumps({"vision": "sk-test"}), encoding="utf-8"
+    )
+    seen: dict = {}
+
+    def fake_direct_stream(**kwargs):
+        seen.update(kwargs)
+        yield 'event: final_delta\ndata: {"delta": "seen it"}\n\n'
+
+    monkeypatch.setattr("kort_api.conversations.run_direct_answer_stream", fake_direct_stream)
+
+    response, _ = _post_user_branch("看图", level="off", attachments=[_image_attachment()])
+    assert response.status_code == 200, response.text
+    assert seen["agents"][0].model == "vision-chat"
+
+
+def test_image_attachment_requires_a_vision_model() -> None:
+    response, _ = _post_user_branch(
+        "看图", level="off", attachments=[_image_attachment()]
+    )
+    assert response.status_code == 422
+    assert "vision-capable" in response.json()["detail"]
+
+
+def test_image_attachment_is_rejected_with_deep_think() -> None:
+    _seed_vision_provider()
+    response, _ = _post_user_branch(
+        "看图",
+        level="off",
+        deep_think=True,
+        attachments=[_image_attachment()],
+    )
+    assert response.status_code == 422
+    assert "deep think" in json.dumps(response.json()["detail"], ensure_ascii=False)
+
+
+def test_image_attachment_requires_a_data_url() -> None:
+    response, _ = _post_user_branch(
+        "看图",
+        level="off",
+        attachments=[_image_attachment(data="https://example.com/cat.png")],
+    )
+    assert response.status_code == 422
+
+
+def test_image_attachment_rejects_svg() -> None:
+    response, _ = _post_user_branch(
+        "看图",
+        level="off",
+        attachments=[
+            _image_attachment(
+                mime="image/svg+xml",
+                data="data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=",
+            )
+        ],
+    )
+    assert response.status_code == 422
+
+
 class _FakeProviderStream:
     """One canned SSE body per model request, served through ToolSession.stream_turn."""
 
@@ -584,11 +756,13 @@ def test_a_second_node_keeps_its_own_tool_history(monkeypatch) -> None:
     assert "second topic" in node_two_result["content"]
 
 
-def test_deep_think_off_level_uses_solo_route(monkeypatch) -> None:
+def test_deep_think_off_level_uses_bare_solo_harness(monkeypatch) -> None:
     client.put("/api/providers/deepseek/secret", json={"api_key": "secret-test-key"})
     _create(_make_agent_name("solo-agent"))
+    seen: dict = {}
 
-    async def fake_solo_stream(**_kwargs):
+    async def fake_solo_stream(**kwargs):
+        seen.update(kwargs)
         yield "event: thinking_active\ndata: {}\n\n"
         yield "event: thinking_complete\ndata: {\"elapsed_ms\": 12}\n\n"
         yield 'event: final_delta\ndata: {"delta": "solo answer"}\n\n'
@@ -599,32 +773,72 @@ def test_deep_think_off_level_uses_solo_route(monkeypatch) -> None:
     monkeypatch.setattr("kort_api.conversations.run_solo_thinking_stream", fake_solo_stream)
     monkeypatch.setattr("kort_api.conversations.run_discussion_stream", fail_discussion_stream)
 
-    response, _ = _post_user_branch("主线？", level="off", deep_think=True)
+    response, _ = _post_user_branch(
+        "主线？", level="off", deep_think=True, web_search="disabled"
+    )
     events = _event_names(response.text)
 
     assert response.status_code == 200
-    assert "delegation_complete" in events
+    assert "delegation_complete" not in events
     assert "thinking_active" in events
     assert "talking_active" not in events
-    assert '"route_kind": "solo_thinking"' in response.text
+    assert [agent.name for agent in seen["agents"]] == ["harness", "harness-projector"]
+    assert all(agent.system_prompt == "" for agent in seen["agents"])
 
 
-def test_stream_persists_delegation_metadata(monkeypatch) -> None:
+def test_off_level_persists_no_delegation_and_uses_bare_harness(monkeypatch) -> None:
     client.put("/api/providers/deepseek/secret", json={"api_key": "secret-test-key"})
     _create(_make_agent_name("direct-agent"))
+    seen: dict = {}
 
-    def fake_direct_stream(**_kwargs):
+    def fake_direct_stream(**kwargs):
+        seen.update(kwargs)
         yield 'event: final_delta\ndata: {"delta": "direct answer"}\n\n'
 
     monkeypatch.setattr("kort_api.conversations.run_direct_answer_stream", fake_direct_stream)
 
-    response, _ = _post_user_branch("Hello", level="off")
+    response, cid = _post_user_branch("Hello", level="off")
 
     assert response.status_code == 200
-    assert "event: delegation_complete" in response.text
-    assert '"route_kind": "direct"' in response.text
-    assert '"delegation": {' in response.text
-    assert '"participant_count": 1' in response.text
+    assert "event: delegation_complete" not in response.text
+    assert [agent.name for agent in seen["agents"]] == ["harness", "harness-projector"]
+    assert all(agent.system_prompt == "" for agent in seen["agents"])
+    detail = client.get(f"/api/conversations/{cid}").json()
+    assistant_node = next(node for node in detail["nodes"] if node["role"] == "assistant")
+    assert assistant_node["delegation"] is None
+
+
+def test_off_level_model_override_selects_provider_and_model(monkeypatch) -> None:
+    client.put("/api/providers/deepseek/secret", json={"api_key": "secret-test-key"})
+    _create(_make_agent_name("direct-agent"))
+    seen: dict = {}
+
+    def fake_direct_stream(**kwargs):
+        seen.update(kwargs)
+        yield 'event: final_delta\ndata: {"delta": "override answer"}\n\n'
+
+    monkeypatch.setattr("kort_api.conversations.run_direct_answer_stream", fake_direct_stream)
+
+    response, _ = _post_user_branch(
+        "Use this model",
+        level="off",
+        model_override={"provider_profile": "deepseek", "model": "deepseek-reasoner"},
+    )
+
+    assert response.status_code == 200
+    assert all(agent.provider_profile == "deepseek" for agent in seen["agents"])
+    assert all(agent.model == "deepseek-reasoner" for agent in seen["agents"])
+    assert all(agent.system_prompt == "" for agent in seen["agents"])
+
+
+def test_model_override_is_rejected_when_discussion_is_on() -> None:
+    response, _ = _post_user_branch(
+        "Hello",
+        level="auto",
+        model_override={"provider_profile": "deepseek", "model": "deepseek-reasoner"},
+    )
+
+    assert response.status_code == 422
 
 
 def test_new_post_replaces_running_job() -> None:
@@ -981,7 +1195,11 @@ def test_discussion_stream_emits_speaker_messages(monkeypatch) -> None:
         return f"{agent['nickname']} speaks"
 
     monkeypatch.setattr(orchestration, "_call_model", fake_call_model)
-    monkeypatch.setattr(orchestration, "_stream_final_answer", lambda _state: iter(["final answer"]))
+    monkeypatch.setattr(
+        orchestration,
+        "_stream_final_answer",
+        lambda _state, _preferred_agent=None: iter(["final answer"]),
+    )
 
     agents = [
         AgentDefinition(
@@ -1512,3 +1730,129 @@ def test_model_stream_reports_http_error_without_reading_closed_body(
     assert "HTTP 400" in str(excinfo.value)
     assert "gpt-4.1-mini" in str(excinfo.value)
     assert "sk-secret-value" not in str(excinfo.value)
+
+
+def test_disabled_web_search_uses_the_non_tool_route(monkeypatch) -> None:
+    seen: dict = {}
+
+    def fake_direct_stream(**kwargs):
+        seen.update(kwargs)
+        yield 'event: final_delta\ndata: {"delta": "offline answer"}\n\n'
+
+    monkeypatch.setattr("kort_api.conversations.run_direct_answer_stream", fake_direct_stream)
+
+    response, _ = _post_user_branch("不用查，直接回答", level="off", web_search="disabled")
+
+    assert response.status_code == 200
+    assert seen["answer_stream"] is None
+
+
+def test_required_web_search_executes_a_search_before_the_model(monkeypatch) -> None:
+    from kort_api import web_research
+    from kort_api.schemas import ToolSource
+
+    client.put("/api/providers/deepseek/secret", json={"api_key": "secret-test-key"})
+    _create(_make_agent_name("required-search"))
+    source = ToolSource(
+        title="ACM announcement", url="https://acm.org/a", domain="acm.org", snippet="fact"
+    )
+    queries: list[str] = []
+
+    def fake_search(query, max_results):
+        queries.append(query)
+        return [source]
+
+    monkeypatch.setattr(web_research, "search_web", fake_search)
+    captured = _install_provider_stream(
+        monkeypatch,
+        [
+            [
+                'data: {"choices": [{"delta": {"content": "根据检索到的公告 [1]。"}}]}',
+                'data: {"choices": [{"delta": {}, "finish_reason": "stop"}]}',
+                "data: [DONE]",
+            ]
+        ],
+    )
+
+    response, _ = _post_user_branch("今天有什么新闻？", level="off", web_search="required")
+    events = _event_names(response.text)
+
+    assert response.status_code == 200
+    assert queries == ["今天有什么新闻？"]
+    assert events.index("tool_call_started") < events.index("tool_call_completed") < events.index("final_delta")
+    assert "tool_trace" in events
+    first = captured["payloads"][0]
+    last_user = [message for message in first["messages"] if message["role"] == "user"][-1]
+    assert "required_search" in last_user["content"]
+    assert "ACM announcement" in last_user["content"]
+
+
+def test_required_search_rewrites_a_context_dependent_follow_up(monkeypatch) -> None:
+    from kort_api import agent_loop, web_research
+    from kort_api.schemas import ToolSource
+
+    client.put("/api/providers/deepseek/secret", json={"api_key": "secret-test-key"})
+    _create(_make_agent_name("contextual-search"))
+    source = ToolSource(
+        title="IceCube", url="https://icecube.wisc.edu/", domain="icecube.wisc.edu", snippet="neutrino"
+    )
+    queries: list[str] = []
+
+    def fake_search(query, max_results):
+        queries.append(query)
+        return [source]
+
+    monkeypatch.setattr(web_research, "search_web", fake_search)
+    planned: list[dict] = []
+
+    def fake_plan(**kwargs) -> str:
+        planned.append(kwargs)
+        return "冰立方中微子 天文台 研究意义"
+
+    monkeypatch.setattr(agent_loop, "_plan_search_query", fake_plan)
+    captured = _install_provider_stream(
+        monkeypatch,
+        [
+            [
+                'data: {"choices": [{"delta": {"content": "2026年诺贝尔物理学奖授予冰立方中微子天文台团队。"}}]}',
+                "data: [DONE]",
+            ],
+            [
+                'data: {"choices": [{"delta": {"content": "这项研究让我们能用中微子观测宇宙 [1]。"}}]}',
+                "data: [DONE]",
+            ],
+        ],
+    )
+
+    first, cid = _post_user_branch("2026年诺贝尔物理学奖授予了谁？", level="off", web_search="auto")
+    assert first.status_code == 200
+    _, assistant_first = _node_ids(cid)
+    second = client.post(
+        f"/api/conversations/{cid}/branches",
+        json={
+            "parent_id": assistant_first,
+            "role": "user",
+            "content": "这个研究的意义是?",
+            "level": "off",
+            "web_search": "required",
+        },
+    )
+
+    assert second.status_code == 200
+    assert queries == ["冰立方中微子 天文台 研究意义"]
+    assert planned[0]["latest"] == "这个研究的意义是?"
+    assert "冰立方中微子" in planned[0]["context"]
+    nodes = client.get(f"/api/conversations/{cid}").json()["nodes"]
+    by_id = {node["node_id"]: node for node in nodes}
+    answer_node = next(
+        node
+        for node in nodes
+        if node["role"] == "assistant"
+        and node["parent_id"] is not None
+        and by_id[node["parent_id"]]["content"] == "这个研究的意义是?"
+    )
+    assert answer_node["tool_traces"][0]["query"] == "冰立方中微子 天文台 研究意义"
+    last_user = [
+        message for message in captured["payloads"][-1]["messages"] if message["role"] == "user"
+    ][-1]
+    assert "IceCube" in last_user["content"]
