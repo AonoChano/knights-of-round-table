@@ -11,7 +11,7 @@ type TimerHandle = ReturnType<typeof setTimeout>;
 
 const CARD_GAP = 8;
 const HOVER_DELAY = 120;
-const CLOSE_DELAY = 80;
+const CLOSE_DELAY = 160;
 /* below this much room the card flips under the marker instead of above it */
 const FLIP_ABOVE = 210;
 const CARD_WIDTH = 244;
@@ -19,6 +19,7 @@ const CARD_WIDTH = 244;
 export function InlineCitation({ source, locale }: { source: CiteSource; locale: Locale }) {
   const copy = t(locale);
   const anchorRef = useRef<HTMLElement | null>(null);
+  const cardRef = useRef<HTMLElement | null>(null);
   const openTimer = useRef<TimerHandle | null>(null);
   const closeTimer = useRef<TimerHandle | null>(null);
   const [coords, setCoords] = useState<{ left: number; top: number; below: boolean } | null>(null);
@@ -43,12 +44,20 @@ export function InlineCitation({ source, locale }: { source: CiteSource; locale:
   }, []);
 
   const hide = useCallback(() => {
+    if (openTimer.current) clearTimeout(openTimer.current);
+    openTimer.current = null;
     if (closeTimer.current) clearTimeout(closeTimer.current);
     closeTimer.current = setTimeout(() => setCoords(null), CLOSE_DELAY);
   }, []);
 
+  const keepOpen = useCallback(() => {
+    if (closeTimer.current) clearTimeout(closeTimer.current);
+    closeTimer.current = null;
+  }, []);
+
   const openDelayed = useCallback(() => {
     if (closeTimer.current) clearTimeout(closeTimer.current);
+    closeTimer.current = null;
     if (openTimer.current) clearTimeout(openTimer.current);
     openTimer.current = setTimeout(show, HOVER_DELAY);
   }, [show]);
@@ -86,7 +95,10 @@ export function InlineCitation({ source, locale }: { source: CiteSource; locale:
         onMouseEnter={openDelayed}
         onMouseLeave={hide}
         onFocus={show}
-        onBlur={() => setCoords(null)}
+        onBlur={(event) => {
+          if (cardRef.current?.contains(event.relatedTarget as Node | null)) return;
+          setCoords(null);
+        }}
         onClick={toggle}
       >
         {source.index}
@@ -94,8 +106,12 @@ export function InlineCitation({ source, locale }: { source: CiteSource; locale:
       {coords
         ? createPortal(
             <aside
+              ref={cardRef}
               className="float-card"
               role="tooltip"
+              data-below={coords.below ? "true" : "false"}
+              onMouseEnter={keepOpen}
+              onMouseLeave={hide}
               style={
                 {
                   left: coords.left,

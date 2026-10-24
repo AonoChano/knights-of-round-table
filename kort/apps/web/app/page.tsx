@@ -44,6 +44,7 @@ import { API_BASE } from "../components/models/api";
 import type { ProviderProfile, ProviderSecretStatus } from "../components/models/types";
 import type { DiscussionLevel, Locale } from "./locale";
 import { AgentStrip } from "../components/discussion/AgentStrip";
+import { AgentGlyph } from "../components/agents/AgentGlyph";
 import { DiscussionView } from "../components/discussion/DiscussionView";
 import { MemoryPanel } from "../components/memory/MemoryPanel";
 import { ThinkingTrace } from "../components/thinking/ThinkingTrace";
@@ -52,6 +53,10 @@ import { Composer } from "../components/composer/Composer";
 import type {
   ComposerAttachmentItem,
   ComposerAttachmentPayload,
+  ComposerModelMode,
+  ComposerModelOption,
+  ComposerProviderModelOption,
+  WebSearchMode,
 } from "../components/composer/Composer";
 import { ConversationMap, mapTurns } from "../components/conversation/ConversationMap";
 import { ConversationSearchDialog } from "../components/search/ConversationSearchDialog";
@@ -146,7 +151,11 @@ type BranchAttempt = {
   role: "user" | "assistant";
   content: string;
   attachments?: ComposerAttachmentPayload[];
+  /** 编辑已有消息：新分支要顶替这条消息的位置，不能像新提问那样追加到末尾 */
+  editOfNodeId?: string;
 };
+
+type PendingEdit = { nodeId: string; content: string };
 
 type DiscussionMessage = {
   id: string;
@@ -250,6 +259,7 @@ type StreamSlot = {
   talkingActive: boolean;
   discussionLevel: DiscussionLevel;
   submittedQuestion: string | null;
+  pendingEdit: PendingEdit | null;
   plannedConversationId: string | null;
   deepThink: boolean;
   requestPhase: "sent" | "delegating" | "delegated" | null;
@@ -259,13 +269,15 @@ type StreamSlot = {
   streamError: string | null;
   discussionMessages: DiscussionMessage[];
   toolTraces: ToolTrace[];
-  webSearch: boolean;
 };
 
 const TRANSIENT_TIMELINE_IDS = new Set(["thinking-active", "talking-active"]);
 const DISCUSSION_LEVEL_KEY = "kort-discussion-level";
 const DEEP_THINK_KEY = "kort-deep-think";
-const WEB_SEARCH_KEY = "kort-web-search";
+const WEB_SEARCH_MODE_KEY = "kort-web-search-mode";
+const LEGACY_WEB_SEARCH_KEY = "kort-web-search";
+const PREFERRED_AGENT_KEY = "kort-preferred-agent";
+const NORMAL_MODEL_KEY = "kort-normal-model";
 const DEVELOPER_MODE_KEY = "kort-developer-mode";
 const LOG_LEVEL_KEY = "kort-log-level";
 const DEFAULT_DISCUSSION_LEVEL: DiscussionLevel = "auto";
@@ -305,10 +317,35 @@ function saveDeepThink(enabled: boolean): void {
   localStorage.setItem(DEEP_THINK_KEY, String(enabled));
 }
 
-function loadWebSearch(): boolean {
-  if (typeof window === "undefined") return true;
-  // 默认允许联网，由研究台自己判断这条要不要检索；只有用户显式关过才保持关闭
-  return localStorage.getItem(WEB_SEARCH_KEY) !== "false";
+function loadWebSearchMode(): WebSearchMode {
+  if (typeof window === "undefined") return "auto";
+  const stored = localStorage.getItem(WEB_SEARCH_MODE_KEY);
+  if (stored === "auto" || stored === "required" || stored === "disabled") return stored;
+  // 旧的布尔值只有“用户显式关过”才值得迁移成 disabled，其余回到默认 auto
+  return localStorage.getItem(LEGACY_WEB_SEARCH_KEY) === "false" ? "disabled" : "auto";
+}
+
+function loadPreferredAgent(): string {
+  if (typeof window === "undefined") return "";
+  return localStorage.getItem(PREFERRED_AGENT_KEY) ?? "";
+}
+
+function loadNormalModel(): string {
+  if (typeof window === "undefined") return "";
+  return localStorage.getItem(NORMAL_MODEL_KEY) ?? "";
+}
+
+function saveNormalModel(value: string): void {
+  if (value) localStorage.setItem(NORMAL_MODEL_KEY, value);
+  else localStorage.removeItem(NORMAL_MODEL_KEY);
+}
+
+function splitModelOptionId(value: string): { provider_profile: string; model: string } | null {
+  const index = value.indexOf("::");
+  if (index <= 0) return null;
+  const provider_profile = value.slice(0, index);
+  const model = value.slice(index + 2);
+  return provider_profile && model ? { provider_profile, model } : null;
 }
 
 function loadDeveloperMode(): boolean {
@@ -383,6 +420,7 @@ function createEmptySlot(): StreamSlot {
     talkingActive: false,
     discussionLevel: loadDiscussionLevel(),
     submittedQuestion: null,
+    pendingEdit: null,
     plannedConversationId: null,
     deepThink: loadDeepThink(),
     requestPhase: null,
@@ -392,7 +430,6 @@ function createEmptySlot(): StreamSlot {
     streamError: null,
     discussionMessages: [],
     toolTraces: [],
-    webSearch: loadWebSearch(),
   };
 }
 
@@ -712,11 +749,16 @@ function parseAttachments(value: unknown): ComposerAttachmentPayload[] {
   return value
     .map((item) => item as Record<string, unknown> | null)
     .filter((item): item is Record<string, unknown> => Boolean(item))
-    .filter((item) => typeof item.name === "string" && typeof item.text === "string")
+    .filter((item) => typeof item.name === "string")
     .map((item) => ({
+      kind: item.kind === "image" ? ("image" as const) : ("text" as const),
       name: item.name as string,
       mime: typeof item.mime === "string" ? item.mime : "",
-      text: item.text as string,
+      text: typeof item.text === "string" ? item.text : "",
+      ...(typeof item.data === "string" ? { data: item.data } : {}),
+      ...(typeof item.width === "number" ? { width: item.width } : {}),
+      ...(typeof item.height === "number" ? { height: item.height } : {}),
+      ...(typeof item.bytes === "number" ? { bytes: item.bytes } : {}),
     }));
 }
 
@@ -959,9 +1001,12 @@ export default function HomePage() {
 }
 
 function HomeExperience() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<ComposerAttachmentItem[]>([]);
   const [submittedQuestion, setSubmittedQuestion] = useState<string | null>(null);
+  const [pendingEdit, setPendingEdit] = useState<PendingEdit | null>(null);
   const [conversation, setConversation] = useState<ConversationResponse | null>(null);
   const [providers, setProviders] = useState<ProviderProfile[]>([]);
   const [providerSecretStatus, setProviderSecretStatus] = useState<Record<string, ProviderSecretStatus>>({});
@@ -983,8 +1028,11 @@ function HomeExperience() {
   const [conversations, setConversations] = useState<ConversationListItem[]>([]);
   const [conversationsError, setConversationsError] = useState<string | null>(null);
   const [conversationsLoading, setConversationsLoading] = useState(true);
-  const [conversationLoading, setConversationLoading] = useState(false);
+  const [conversationLoading, setConversationLoading] = useState(
+    () => Boolean(searchParams.get("c"))
+  );
   const [providersLoading, setProvidersLoading] = useState(true);
+  const [providerSecretsLoading, setProviderSecretsLoading] = useState(true);
   const [agentsLoading, setAgentsLoading] = useState(true);
   const [nodes, setNodes] = useState<MessageNode[]>([]);
   const [activeRootId, setActiveRootId] = useState<string | null>(null);
@@ -1013,13 +1061,12 @@ function HomeExperience() {
   const [discussionMessages, setDiscussionMessages] = useState<DiscussionMessage[]>([]);
   const [discussionView, setDiscussionView] = useState<DiscussionViewTarget | null>(null);
   const [toolTraces, setToolTraces] = useState<ToolTrace[]>([]);
-  const [webSearch, setWebSearch] = useState(true);
+  const [webSearchMode, setWebSearchMode] = useState<WebSearchMode>("auto");
+  const [preferredAgent, setPreferredAgent] = useState("");
+  const [normalModel, setNormalModel] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchMiss, setSearchMiss] = useState<string | null>(null);
   const [locateNodeId, setLocateNodeId] = useState<string | null>(null);
-
-  const router = useRouter();
-  const searchParams = useSearchParams();
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const thinkingLabelRef = useRef<TimerHandle | null>(null);
@@ -1048,6 +1095,7 @@ function HomeExperience() {
   const activeSlotIdRef = useRef<string | null>(null);
   const currentCidRef = useRef<string | null>(null);
   const preferencesReadyRef = useRef(false);
+  const lastDiscussionOnLevelRef = useRef<DiscussionLevel>(DEFAULT_DISCUSSION_LEVEL);
   // 关闭搜索弹窗后把焦点还给打开它的那个控件
   const searchReturnRef = useRef<HTMLElement | null>(null);
   const searchMissTimerRef = useRef<TimerHandle | null>(null);
@@ -1072,6 +1120,7 @@ function HomeExperience() {
     setDiscussionLevel(slot.discussionLevel);
     setDeepThink(slot.deepThink);
     setSubmittedQuestion(slot.submittedQuestion);
+    setPendingEdit(slot.pendingEdit);
     setPendingConvId(slot.plannedConversationId);
     setConversation(slot.conversation);
     setPaused(slot.paused);
@@ -1098,6 +1147,7 @@ function HomeExperience() {
     slot.deepThink = deepThink;
     slot.paused = paused;
     slot.submittedQuestion = submittedQuestion;
+    slot.pendingEdit = pendingEdit;
     slot.plannedConversationId = pendingConvId;
     slot.conversation = conversation;
     slot.streamError = streamError;
@@ -1105,7 +1155,6 @@ function HomeExperience() {
     slot.delegationInfo = delegationInfo;
     slot.discussionMessages = discussionMessagesRef.current;
     slot.toolTraces = toolTraces;
-    slot.webSearch = webSearch;
   }
 
   function saveCurrentSlot() {
@@ -1242,6 +1291,7 @@ function HomeExperience() {
     setTalkingActive(false);
     setLoading(false);
     setSubmittedQuestion(null);
+    setPendingEdit(null);
     setStreamError(null);
     setRequestPhase(null);
     setDelegationInfo(null);
@@ -1268,6 +1318,9 @@ function HomeExperience() {
       if (!s.loading) slotMapRef.current.delete(cid);
     });
     resetConversation();
+    // 新建对话要作废还在路上的历史会话请求，否则它晚到的数据会把骨架替换回旧会话
+    conversationLoadRef.current += 1;
+    setConversationLoading(false);
     setSubmittedQuestion(null);
     setNodesSynced([]);
     setActiveRootId(null);
@@ -1284,9 +1337,13 @@ function HomeExperience() {
 
   useEffect(() => {
     const loadedLocale = loadLocale();
-    setDiscussionLevel(loadDiscussionLevel());
+    const loadedLevel = loadDiscussionLevel();
+    if (loadedLevel !== "off") lastDiscussionOnLevelRef.current = loadedLevel;
+    setDiscussionLevel(loadedLevel);
     setDeepThink(loadDeepThink());
-    setWebSearch(loadWebSearch());
+    setWebSearchMode(loadWebSearchMode());
+    setPreferredAgent(loadPreferredAgent());
+    setNormalModel(loadNormalModel());
     setDeveloperMode(loadDeveloperMode());
     setLogLevel(loadLogLevel());
     setLocale(loadedLocale);
@@ -1392,8 +1449,23 @@ function HomeExperience() {
 
   useEffect(() => {
     if (!preferencesReadyRef.current) return;
-    localStorage.setItem(WEB_SEARCH_KEY, String(webSearch));
-  }, [webSearch]);
+    localStorage.setItem(WEB_SEARCH_MODE_KEY, webSearchMode);
+  }, [webSearchMode]);
+
+  useEffect(() => {
+    if (!preferencesReadyRef.current) return;
+    if (preferredAgent) localStorage.setItem(PREFERRED_AGENT_KEY, preferredAgent);
+    else localStorage.removeItem(PREFERRED_AGENT_KEY);
+  }, [preferredAgent]);
+
+  useEffect(() => {
+    if (!preferencesReadyRef.current) return;
+    saveNormalModel(normalModel);
+  }, [normalModel]);
+
+  useEffect(() => {
+    if (discussionLevel !== "off") lastDiscussionOnLevelRef.current = discussionLevel;
+  }, [discussionLevel]);
 
   useEffect(() => {
     if (!preferencesReadyRef.current) return;
@@ -1442,6 +1514,8 @@ function HomeExperience() {
         error: clientErrorMessage(error, t(locale).ui.backendUnavailable),
       });
       setProviderSecretStatus({});
+    } finally {
+      setProviderSecretsLoading(false);
     }
   }
 
@@ -1902,8 +1976,10 @@ function HomeExperience() {
     slot.streamingNodeId = null;
     slot.pendingRetryOf = null;
     slot.submittedQuestion = null;
+    slot.pendingEdit = null;
     submittedQuestionRef.current = null;
     setSubmittedQuestion(null);
+    setPendingEdit(null);
     slot.finalBody = "";
     setFinalBody("");
     slot.timeline = [];
@@ -1969,7 +2045,6 @@ function HomeExperience() {
     slot.streamingNodeId = null;
     slot.pendingRetryOf = attempt.role === "assistant" ? attempt.parentId : null;
     slot.toolTraces = [];
-    slot.webSearch = webSearch;
     setToolTraces([]);
     setStreamingNodeId(null);
     setPendingRetryOf(slot.pendingRetryOf);
@@ -1977,8 +2052,12 @@ function HomeExperience() {
     currentCidRef.current = convId;
     router.replace(`/?c=${convId}`, { scroll: false });
     const liveQuestion = attempt.role === "user" ? attempt.content : null;
+    const pendingEdit = attempt.editOfNodeId
+      ? { nodeId: attempt.editOfNodeId, content: attempt.content }
+      : null;
     setSubmittedQuestion(liveQuestion);
     submittedQuestionRef.current = liveQuestion;
+    setPendingEdit(pendingEdit);
     if (attempt.role === "user") {
       setInput("");
       setAttachments([]);
@@ -1989,6 +2068,7 @@ function HomeExperience() {
     const controller = slot.abortController!;
     slot.streamError = null;
     slot.submittedQuestion = liveQuestion;
+    slot.pendingEdit = pendingEdit;
     slot.discussionLevel = discussionLevel;
     slot.deepThink = discussionLevel === "off" ? deepThink : false;
     slot.requestPhase = "sent";
@@ -2000,7 +2080,10 @@ function HomeExperience() {
       setConversations((prev) => [
         {
           conversation_id: convId,
-          title: attempt.content.slice(0, 30),
+          title:
+            attempt.content.slice(0, 30) ||
+            attempt.attachments?.find((file) => file.kind === "image")?.name.slice(0, 30) ||
+            "",
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
           expert_count: 0,
@@ -2018,20 +2101,32 @@ function HomeExperience() {
         role: attempt.role,
         discussionLevel,
         deepThink: discussionLevel === "off" ? deepThink : false,
-        webSearch,
+        webSearch: webSearchMode,
+        preferredAgent: discussionLevel === "off" ? null : effectivePreferredAgent,
+        modelOverride: discussionLevel === "off" ? effectiveNormalModel : null,
       });
-      const body: Record<string, string | boolean | number | null | ComposerAttachmentPayload[]> = {
+      const body: Record<
+        string,
+        string | boolean | number | null | ComposerAttachmentPayload[] | { provider_profile: string; model: string }
+      > = {
         parent_id: attempt.parentId,
         role: attempt.role,
         content: attempt.role === "user" ? attempt.content : "",
         level: discussionLevel,
-        web_search: webSearch,
+        web_search: webSearchMode,
       };
+      if (discussionLevel !== "off" && effectivePreferredAgent) {
+        body.preferred_agent = effectivePreferredAgent;
+      }
       if (attempt.attachments?.length) {
         body.attachments = attempt.attachments;
       }
       if (discussionLevel === "off") {
         body.deep_think = deepThink;
+        const override = splitModelOptionId(effectiveNormalModel);
+        if (override) {
+          body.model_override = override;
+        }
       }
       if (customMaxRounds !== null) {
         body.custom_max_rounds = customMaxRounds;
@@ -2113,6 +2208,8 @@ function HomeExperience() {
         }
       }
     } catch (e: unknown) {
+      slot.pendingEdit = null;
+      if (activeSlotIdRef.current === convId) setPendingEdit(null);
       if (isExpectedAbortError(e)) {
         clientLog("info", "conversation stream aborted by user", { conversationId: convId });
       } else {
@@ -2130,6 +2227,8 @@ function HomeExperience() {
         });
       }
     } finally {
+      slot.pendingEdit = null;
+      if (activeSlotIdRef.current === convId) setPendingEdit(null);
       if (slot.streamingNodeId) {
         markStreamingNodeFailed(slot, t(locale).ui.backendUnavailable);
         if (activeSlotIdRef.current === convId) {
@@ -2149,7 +2248,8 @@ function HomeExperience() {
 
   async function sendQuestion(files: ComposerAttachmentPayload[]) {
     const question = input.trim();
-    if (!question || loading) return;
+    const hasImage = files.some((file) => file.kind === "image");
+    if ((!question && !hasImage) || loading) return;
     if (currentConversationId && !activeRootId) return;
     await runBranch({
       parentId: currentConversationId ? activeLeafId(nodesRef.current, activeRootId) : null,
@@ -2167,6 +2267,7 @@ function HomeExperience() {
       role: "user",
       content: trimmed,
       attachments: node.attachments,
+      editOfNodeId: node.node_id,
     });
   }
 
@@ -2312,6 +2413,7 @@ function HomeExperience() {
       slot.streamingNodeId = startedNodes.find((node) => node.role === "assistant")?.node_id ?? null;
       slot.pendingRetryOf = null;
       slot.submittedQuestion = null;
+      slot.pendingEdit = null;
       slot.requestPhase = "sent";
       slot.toolTraces = [];
       return;
@@ -2507,6 +2609,7 @@ function HomeExperience() {
       );
       slot.loading = false;
       slot.requestPhase = null;
+      slot.pendingEdit = null;
       if (!markStreamingNodeFailed(slot, errorMessage)) {
         slot.streamError = errorMessage;
       }
@@ -2533,6 +2636,7 @@ function HomeExperience() {
       setToolTraces([]);
       submittedQuestionRef.current = null;
       setSubmittedQuestion(null);
+      setPendingEdit(null);
       setRequestPhase("sent");
       const title = typeof message.data.title === "string" ? message.data.title : "";
       const cid = typeof message.data.conversation_id === "string" ? message.data.conversation_id : currentConversationId;
@@ -2857,6 +2961,7 @@ function HomeExperience() {
       );
       setLoading(false);
       setRequestPhase(null);
+      setPendingEdit(null);
       const failedId = streamContext?.streamingNodeId ?? streamingNodeId;
       const failedNode = failedId
         ? streamContext?.slot.nodes.find((node) => node.node_id === failedId) ?? null
@@ -2888,6 +2993,81 @@ function HomeExperience() {
   const hasRun = Boolean(submittedQuestion || loading || nodes.length > 0);
   const tr = t(locale);
   const hasDiscussion = discussionMessages.length > 0;
+
+  /* 只列出真正能作答的席位：供应商启用、模型启用、密钥可用 */
+  const modelOptions = useMemo<ComposerModelOption[]>(() => {
+    const providersById = new Map(providers.map((provider) => [provider.provider_id, provider]));
+    const options: ComposerModelOption[] = [];
+    for (const agent of agents) {
+      const provider = providersById.get(agent.provider_profile);
+      if (!provider || !provider.enabled) continue;
+      const model = agent.model || provider.default_model;
+      if (!model) continue;
+      const listed = provider.models.length
+        ? provider.models.find((entry) => entry.id === model)
+        : undefined;
+      if (provider.models.length > 0 && !listed) continue;
+      if (listed && !listed.enabled) continue;
+      const secret = providerSecretStatus[provider.provider_id];
+      if (provider.provider_type !== "ollama" && !secret?.configured && !secret?.env_configured) continue;
+      options.push({ name: agent.name, label: agent.nickname || agent.name, model });
+    }
+    return options;
+  }, [agents, providerSecretStatus, providers]);
+
+  const effectivePreferredAgent = modelOptions.some((option) => option.name === preferredAgent)
+    ? preferredAgent
+    : "";
+
+  useEffect(() => {
+    if (!preferredAgent) return;
+    if (agentsLoading || providersLoading || providerSecretsLoading) return;
+    if (modelOptions.some((option) => option.name === preferredAgent)) return;
+    setPreferredAgent("");
+  }, [agentsLoading, modelOptions, preferredAgent, providerSecretsLoading, providersLoading]);
+
+  /* 讨论关闭时选的是供应商自己的模型，与专家席位无关 */
+  const providerModelOptions = useMemo<ComposerProviderModelOption[]>(() => {
+    const options: ComposerProviderModelOption[] = [];
+    const seen = new Set<string>();
+    for (const provider of providers) {
+      if (!provider.enabled) continue;
+      const secret = providerSecretStatus[provider.provider_id];
+      if (provider.provider_type !== "ollama" && !secret?.configured && !secret?.env_configured) continue;
+      for (const model of modelsOf(provider)) {
+        if (!model.enabled || !model.id) continue;
+        const id = `${provider.provider_id}::${model.id}`;
+        if (seen.has(id)) continue;
+        seen.add(id);
+        options.push({
+          id,
+          provider,
+          label: model.label || model.id,
+          model: model.id,
+          capabilities: model.capabilities,
+        });
+      }
+    }
+    return options;
+  }, [providerSecretStatus, providers]);
+
+  const effectiveNormalModel = providerModelOptions.some((option) => option.id === normalModel)
+    ? normalModel
+    : "";
+
+  useEffect(() => {
+    if (!normalModel) return;
+    if (providersLoading || providerSecretsLoading) return;
+    if (providerModelOptions.some((option) => option.id === normalModel)) return;
+    setNormalModel("");
+  }, [normalModel, providerModelOptions, providerSecretsLoading, providersLoading]);
+
+  function toggleDiscussionMode() {
+    setDiscussionLevel((current) =>
+      current === "off" ? lastDiscussionOnLevelRef.current : "off"
+    );
+  }
+
   const mapEntries = useMemo(
     () => mapTurns(activePathOf(nodes, activeRootId), tr.ui.mapUntitled),
     [activeRootId, nodes, tr.ui.mapUntitled]
@@ -3038,6 +3218,7 @@ function HomeExperience() {
                     thinkingComplete={thinkingComplete}
                     elapsed={elapsed}
                     question={submittedQuestion}
+                    pendingEdit={pendingEdit}
                     timeline={visibleTimeline}
                     toolTraces={toolTraces}
                     finalBody={finalBody}
@@ -3080,12 +3261,16 @@ function HomeExperience() {
                       pauseFlash={pauseFlash}
                       locale={locale}
                       setInput={setInput}
-                      webSearch={webSearch}
-                      setWebSearch={setWebSearch}
-                      discussionLevel={discussionLevel}
-                      setDiscussionLevel={setDiscussionLevel}
+                      webSearchMode={webSearchMode}
+                      setWebSearchMode={setWebSearchMode}
+                      modelMode={discussionLevel === "off" ? "models" : "agents"}
+                      modelOptions={modelOptions}
+                      providerModelOptions={providerModelOptions}
+                      modelValue={discussionLevel === "off" ? effectiveNormalModel : effectivePreferredAgent}
+                      setModelValue={discussionLevel === "off" ? setNormalModel : setPreferredAgent}
+                      discussionOn={discussionLevel !== "off"}
                       deepThink={deepThink}
-                      setDeepThink={setDeepThink}
+                      onToggleDiscussion={toggleDiscussionMode}
                       attachments={attachments}
                       setAttachments={setAttachments}
                       onSubmit={(files) => void sendQuestion(files)}
@@ -3096,7 +3281,7 @@ function HomeExperience() {
               </div>
             </div>
 
-            {hasRun && !conversationLoading ? (
+            {hasRun || conversationLoading ? (
               <div className="composer-dock">
                 {hasDiscussion && loading ? (
                   <div className="discussion-cta-row">
@@ -3118,12 +3303,16 @@ function HomeExperience() {
                   pauseFlash={pauseFlash}
                   locale={locale}
                   setInput={setInput}
-                  webSearch={webSearch}
-                  setWebSearch={setWebSearch}
-                  discussionLevel={discussionLevel}
-                  setDiscussionLevel={setDiscussionLevel}
+                  webSearchMode={webSearchMode}
+                  setWebSearchMode={setWebSearchMode}
+                  modelMode={discussionLevel === "off" ? "models" : "agents"}
+                  modelOptions={modelOptions}
+                  providerModelOptions={providerModelOptions}
+                  modelValue={discussionLevel === "off" ? effectiveNormalModel : effectivePreferredAgent}
+                  setModelValue={discussionLevel === "off" ? setNormalModel : setPreferredAgent}
+                  discussionOn={discussionLevel !== "off"}
                   deepThink={deepThink}
-                  setDeepThink={setDeepThink}
+                  onToggleDiscussion={toggleDiscussionMode}
                   attachments={attachments}
                   setAttachments={setAttachments}
                   onSubmit={(files) => void sendQuestion(files)}
@@ -3633,6 +3822,7 @@ function ConversationView({
   thinkingComplete,
   elapsed,
   question,
+  pendingEdit,
   timeline,
   toolTraces,
   finalBody,
@@ -3658,6 +3848,7 @@ function ConversationView({
   thinkingComplete: boolean;
   elapsed: number;
   question: string | null;
+  pendingEdit: PendingEdit | null;
   timeline: TimelineItem[];
   toolTraces: ToolTrace[];
   finalBody: string;
@@ -3678,6 +3869,14 @@ function ConversationView({
   const tr = t(locale);
   const copy = tr.ui;
   const path = activePathOf(nodes, activeRootId);
+  // 编辑提交后、新分支落盘前，把对话截断到被编辑消息之前，在原位显示改后的文本，
+  // 而不是让同一段文字再追加到对话末尾
+  const pendingEditIndex = pendingEdit
+    ? path.findIndex((node) => node.node_id === pendingEdit.nodeId)
+    : -1;
+  const showPendingEdit = Boolean(pendingEdit) && pendingEditIndex >= 0;
+  const visiblePath = showPendingEdit ? path.slice(0, pendingEditIndex) : path;
+  const pendingEditNode = showPendingEdit ? path[pendingEditIndex] : null;
   const liveSources = useMemo(() => numberSources(toolTraces), [toolTraces]);
   const liveNodeId =
     streamingNodeId ??
@@ -3754,21 +3953,40 @@ function ConversationView({
         </div>
       );
     }
+    const images = (node.attachments ?? []).filter(
+      (file) => file.kind === "image" && Boolean(file.data)
+    );
+    const files = (node.attachments ?? []).filter((file) => file.kind !== "image");
     return (
       <div
         className={cn("user-message-row", locateNodeId === node.node_id && "node-locate")}
         data-node-id={node.node_id}
         key={`user-${node.node_id}`}
       >
-        <div className="user-message">{node.content}</div>
-        {node.attachments && node.attachments.length > 0 ? (
+        {images.length > 0 ? (
+          <div className="user-message-images">
+            {images.map((file, index) => (
+              <img
+                key={`${node.node_id}-image-${index}`}
+                className="user-message-image"
+                src={file.data}
+                alt={file.name}
+                title={file.name}
+                loading="lazy"
+                draggable={false}
+              />
+            ))}
+          </div>
+        ) : null}
+        {node.content ? <div className="user-message">{node.content}</div> : null}
+        {files.length > 0 ? (
           <div className="user-message-files">
-            {node.attachments.map((file) => (
+            {files.map((file) => (
               <span className="user-message-file" key={`${node.node_id}-${file.name}`}>
                 <FileText size={11} aria-hidden="true" />
                 <span className="user-message-file-name">{file.name}</span>
                 <span className="user-message-file-size">
-                  {tr.composer.attachmentChars(file.text.length)}
+                  {tr.composer.attachmentChars(file.text?.length ?? 0)}
                 </span>
               </span>
             ))}
@@ -3943,7 +4161,7 @@ function ConversationView({
   }
 
   const turns: Array<{ user: MessageNode | null; assistant: MessageNode | null }> = [];
-  for (const node of path) {
+  for (const node of visiblePath) {
     if (node.role === "user") {
       turns.push({ user: node, assistant: null });
     } else if (turns.length > 0 && turns[turns.length - 1].assistant === null) {
@@ -3973,7 +4191,14 @@ function ConversationView({
         );
       })}
 
-      {question ? (
+      {showPendingEdit && pendingEdit && pendingEditNode ? (
+        <div className="conversation-stack" key={`pending-edit-${pendingEdit.nodeId}`}>
+          {renderUserMessage({ ...pendingEditNode, content: pendingEdit.content })}
+          {renderLiveAssistant()}
+        </div>
+      ) : null}
+
+      {question && !showPendingEdit ? (
         <div className="conversation-stack">
           <div className="user-message">{question}</div>
           {renderLiveAssistant()}
@@ -4067,12 +4292,6 @@ function delegationTooltip(locale: Locale, delegation: DelegationInfo | null) {
       lines.push(copy.delegationRounds(delegation.max_rounds));
     }
   }
-  const agentLines = delegation.agents.slice(0, 6).map((agent) =>
-    copy.delegationAgentLine(agent.nickname || agent.name, agent.role, agent.model)
-  );
-  if (agentLines.length) {
-    lines.push(...agentLines);
-  }
   return lines.join("\n");
 }
 
@@ -4140,16 +4359,17 @@ function MessageActions({
           onSelect={branch.onSelect}
         />
       ) : null}
-      <AgentStrip
-        agents={delegation?.agents ?? []}
-        messages={discussion}
-        locale={locale}
-        tooltip={tooltip}
-        onOpen={onOpenDiscussion}
-        openLabel={openLabel}
-      />
-      {copied ? <span className="message-action-status">{copy.copied}</span> : null}
-    </div>
+      {delegation || discussion.length > 0 ? (
+        <AgentStrip
+          agents={delegation?.agents ?? []}
+          messages={discussion}
+          locale={locale}
+          tooltip={tooltip}
+          onOpen={onOpenDiscussion}
+          openLabel={openLabel}
+        />
+      ) : null}
+      {copied ? <span className="message-action-status">{copy.copied}</span> : null}    </div>
   );
 }
 
@@ -4172,9 +4392,12 @@ function DiscussionModePicker({
 }) {
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const pickerRef = useRef<HTMLDivElement>(null);
-  const levels = useMemo(() => discussionLevels(locale), [locale]);
+  // 关闭讨论走底栏的开关，左上角只保留仍适用于单一模型的设置
+  const levels = useMemo(
+    () => discussionLevels(locale).filter((level) => level.id !== "off"),
+    [locale]
+  );
   const active = levels.find((d) => d.id === discussionLevel) ?? levels[0];
-  const isActive = discussionLevel !== "off";
   const modeTitle = `${active.tag} [${active.code}]`;
 
   useEffect(() => {
@@ -4197,44 +4420,50 @@ function DiscussionModePicker({
 
   return (
     <div ref={pickerRef} className="discussion-mode">
-      <div className="discussion-mode-control">
-        <button
-          className={cn("discussion-level-trigger", "discussion-level-trigger-topbar", isActive && "discussion-level-trigger-active")}
-          onClick={() => setDropdownOpen((prev) => !prev)}
-          type="button"
-          aria-haspopup="menu"
-          aria-expanded={dropdownOpen}
-          aria-label={modeTitle}
-          title={modeTitle}
-        >
-          <span className="discussion-trigger-label">{active.tag}</span>
-          <span className="discussion-trigger-code">[{active.code}]</span>
-          <ChevronDown className="discussion-trigger-chevron" size={14} aria-hidden="true" />
-        </button>
-        {dropdownOpen ? (
-          <div className="discussion-level-dropdown discussion-level-dropdown-topbar" role="menu">
-            {levels.map((level) => (
-              <button
-                key={level.id}
-                className="discussion-level-option"
-                type="button"
-                role="menuitemradio"
-                aria-checked={discussionLevel === level.id}
-                onClick={() => {
-                  setDiscussionLevel(level.id);
-                  setDropdownOpen(false);
-                }}
-              >
-                <span className="discussion-level-label">{level.label}</span>
-                <span className="discussion-level-tag">{level.tag}</span>
-                {discussionLevel === level.id ? (
-                  <Check className="discussion-level-check" size={14} aria-hidden="true" />
-                ) : null}
-              </button>
-            ))}
-          </div>
-        ) : null}
-      </div>
+      {discussionLevel !== "off" ? (
+        <div className="discussion-mode-control">
+          <button
+            className={cn(
+              "discussion-level-trigger",
+              "discussion-level-trigger-topbar",
+              "discussion-level-trigger-active"
+            )}
+            onClick={() => setDropdownOpen((prev) => !prev)}
+            type="button"
+            aria-haspopup="menu"
+            aria-expanded={dropdownOpen}
+            aria-label={modeTitle}
+            title={modeTitle}
+          >
+            <span className="discussion-trigger-label">{active.tag}</span>
+            <span className="discussion-trigger-code">[{active.code}]</span>
+            <ChevronDown className="discussion-trigger-chevron" size={14} aria-hidden="true" />
+          </button>
+          {dropdownOpen ? (
+            <div className="discussion-level-dropdown discussion-level-dropdown-topbar" role="menu">
+              {levels.map((level) => (
+                <button
+                  key={level.id}
+                  className="discussion-level-option"
+                  type="button"
+                  role="menuitemradio"
+                  aria-checked={discussionLevel === level.id}
+                  onClick={() => {
+                    setDiscussionLevel(level.id);
+                    setDropdownOpen(false);
+                  }}
+                >
+                  <span className="discussion-level-label">{level.label}</span>
+                  <span className="discussion-level-tag">{level.tag}</span>
+                  {discussionLevel === level.id ? (
+                    <Check className="discussion-level-check" size={14} aria-hidden="true" />
+                  ) : null}
+                </button>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
       {discussionLevel === "off" ? (
         <button
           className={cn(
@@ -4541,6 +4770,7 @@ function SettingsOverlay({
                   return (
                     <section key={agent.name} className="settings-card">
                       <div className="flex items-center gap-2">
+                        <AgentGlyph agent={agent.name} size={16} />
                         <div className="font-medium">{agent.nickname}</div>
                         {isSystem ? (
                           <span className="rounded border border-line bg-gray-50 px-1.5 py-0.5 text-[11px] text-muted">[{copy.system}]</span>

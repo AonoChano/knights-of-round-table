@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 import {
   AlertCircle,
   Check,
@@ -9,7 +9,6 @@ import {
   ExternalLink,
   FileText,
   Search,
-  Sparkles,
 } from "lucide-react";
 import { t } from "../../app/locale";
 import type { Locale } from "../../app/locale";
@@ -102,6 +101,74 @@ function isFetch(name: string) {
   return name === "web_fetch";
 }
 
+function ChessThinkingIcon({ active }: { active: boolean }) {
+  const uid = useId().replace(/[^a-zA-Z0-9_-]/g, "");
+  const pawnMask = `chess-thinking-pawn-${uid}`;
+  const knightMask = `chess-thinking-knight-${uid}`;
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width="20"
+      height="20"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.75"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className="chess-thinking-icon"
+      data-icon="chess-thinking"
+      data-animated={active ? "true" : "false"}
+      aria-hidden="true"
+    >
+      <defs>
+        <mask id={pawnMask}>
+          <rect width="24" height="24" fill="white" stroke="none" />
+          <g
+            className="chess-thinking-part chess-thinking-pawn-mask"
+            fill="black"
+            stroke="black"
+            strokeWidth="2.7"
+          >
+            <circle cx="17.5" cy="7" r="2.3" />
+            <path d="M16.5 9.2h2c-.3 2.4.3 4.2 1.5 6.3l1 3h-7l1-3c1.2-2.1 1.8-3.9 1.5-6.3Z" />
+          </g>
+        </mask>
+        <mask id={knightMask}>
+          <rect width="24" height="24" fill="white" stroke="none" />
+          <g
+            className="chess-thinking-part chess-thinking-knight-mask"
+            fill="black"
+            stroke="black"
+            strokeWidth="2.7"
+          >
+            <path d="M5 17v-2.5L8 11l-3 .8-1-2L7.5 6V3l4 2.8L14 11l-1 6H5Z" />
+            <path d="M4 17h10l1 3H3l1-3Z" />
+          </g>
+        </mask>
+      </defs>
+      <g mask={`url(#${pawnMask})`}>
+        <g className="chess-thinking-part chess-thinking-back">
+          <path d="M5 17v-2.5L8 11l-3 .8-1-2L7.5 6V3l4 2.8L14 11l-1 6H5Z" />
+          <path d="M4 17h10l1 3H3l1-3Z" />
+          <path d="M9.5 7.7h.01" strokeWidth="2.4" />
+        </g>
+      </g>
+      <g mask={`url(#${knightMask})`}>
+        <g className="chess-thinking-part chess-thinking-pawn">
+          <circle cx="17.5" cy="7" r="2.3" />
+          <path d="M16.5 9.2c.3 2.4-.3 4.2-1.5 6.3h5c-1.2-2.1-1.8-3.9-1.5-6.3M15 15.5h5l1 3h-7l1-3Z" />
+        </g>
+      </g>
+      <g className="chess-thinking-part chess-thinking-front">
+        <path d="M5 17v-2.5L8 11l-3 .8-1-2L7.5 6V3l4 2.8L14 11l-1 6H5Z" />
+        <path d="M4 17h10l1 3H3l1-3Z" />
+        <path d="M9.5 7.7h.01" strokeWidth="2.4" />
+      </g>
+    </svg>
+  );
+}
+
 export function ThinkingTrace({
   timeline,
   active,
@@ -158,7 +225,7 @@ export function ThinkingTrace({
         onClick={() => setManualExpanded((current) => !(current ?? active))}
       >
         <span className="thinking-trace-glyph" aria-hidden="true">
-          {runningCall ? <Search size={15} /> : <Sparkles size={15} />}
+          {runningCall ? <Search size={15} /> : <ChessThinkingIcon active={active} />}
         </span>
         {active ? (
           <span className="thinking-trace-title thinking-trace-shimmer" role="status">

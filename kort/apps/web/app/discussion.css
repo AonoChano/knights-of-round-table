@@ -488,8 +488,8 @@
   flex: 0 0 auto;
   place-items: center;
   border-radius: 999px;
-  background: rgba(23, 23, 23, 0.05);
-  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.9);
+  background: var(--surface-soft);
+  box-shadow: 0 0 0 2px #fffefb;
   transition: transform 160ms var(--ease-productive);
 }
 
@@ -501,10 +501,12 @@
   transform: none;
 }
 
-.agent-strip-ellipsis {
+.agent-strip-more {
   color: var(--ink-muted);
-  font-size: 14px;
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
   font-weight: 700;
+  letter-spacing: -0.01em;
   line-height: 1;
 }
 

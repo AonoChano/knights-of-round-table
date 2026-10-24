@@ -53,8 +53,6 @@ export const t = (locale: Locale) => {
     composer: {
       ...copy.composer,
       attachmentChars: (count: number) => formatTemplate(copy.composer.attachmentChars, { count }),
-      commandLevel: (level: string) => formatTemplate(copy.composer.commandLevel, { level }),
-      slashEmpty: (query: string) => formatTemplate(copy.composer.slashEmpty, { query }),
     },
     thinking: {
       ...copy.thinking,
