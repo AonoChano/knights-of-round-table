@@ -1,0 +1,367 @@
+/* 工具行：左侧 +、联网、模型；右侧语音、发送 */
+.composer-toolbar {
+  display: flex;
+  min-height: 32px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 2px;
+}
+
+.composer-toolbar-group {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 4px;
+}
+
+.composer-toolbar-group:last-child {
+  flex-shrink: 0;
+}
+
+.composer-icon-button {
+  display: inline-flex;
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--ink-muted);
+  cursor: pointer;
+  transition:
+    background 160ms var(--ease-productive),
+    color 160ms var(--ease-productive),
+    transform 140ms var(--ease-productive),
+    opacity 160ms var(--ease-productive);
+}
+
+.composer-icon-button:hover:not(:disabled) {
+  background: rgba(23, 23, 23, 0.05);
+  color: var(--ink-strong);
+}
+
+.composer-icon-button:active:not(:disabled) {
+  transform: scale(0.94);
+}
+
+.composer-icon-button:disabled {
+  opacity: 0.4;
+}
+
+.composer-icon-button.is-active {
+  background: var(--ink-strong);
+  color: #fdfcfa;
+}
+
+.composer-icon-button.is-active:hover {
+  background: var(--ink-strong);
+  color: #fdfcfa;
+}
+
+.composer-icon-button.is-open {
+  background: rgba(23, 23, 23, 0.05);
+  color: var(--ink-strong);
+}
+
+/* 专家讨论只用图标颜色表达开关，避免整颗按钮变成黑底 */
+.composer-icon-button.composer-discussion-toggle.is-active,
+.composer-icon-button.composer-discussion-toggle.is-active:hover:not(:disabled) {
+  background: transparent;
+  color: #3f7a5f;
+}
+
+.composer-icon-button.composer-discussion-toggle.is-active:hover:not(:disabled) {
+  background: rgba(63, 122, 95, 0.08);
+}
+
+/* 模型菜单直接摆供应商的品牌标，不再套一层通用盒子 */
+.composer-provider-icon.provider-icon-brand,
+.composer-provider-icon.provider-icon-generic {
+  background: transparent;
+}
+
+.composer-file-input {
+  display: none;
+}
+
+/* ------------------------------------------------------------ 联网搜索与模型 */
+
+.composer-search {
+  --search-color: var(--ink-muted);
+  position: relative;
+  display: inline-flex;
+  height: 32px;
+  flex-shrink: 0;
+  align-items: center;
+  color: var(--search-color);
+  transition: color 180ms var(--ease-productive);
+}
+
+.composer-search:hover,
+.composer-search.is-open {
+  --search-color: var(--ink-strong);
+}
+
+.composer-search.is-required,
+.composer-search.is-required:hover,
+.composer-search.is-required.is-open {
+  --search-color: #3f7a5f;
+}
+
+.composer-search.is-disabled,
+.composer-search.is-disabled:hover,
+.composer-search.is-disabled.is-open {
+  --search-color: #b4483c;
+}
+
+.composer-search-main {
+  display: inline-flex;
+  width: 32px;
+  height: 32px;
+  align-items: center;
+  justify-content: center;
+  color: inherit;
+}
+
+.composer-search-caret {
+  display: inline-flex;
+  width: 18px;
+  height: 32px;
+  align-items: center;
+  justify-content: center;
+  color: inherit;
+  opacity: 0.5;
+  transition:
+    opacity 160ms var(--ease-productive),
+    transform 180ms var(--ease-productive);
+}
+
+.composer-search-caret:hover {
+  opacity: 0.9;
+}
+
+.composer-search.is-open .composer-search-caret {
+  transform: rotate(180deg);
+}
+
+.composer-model {
+  position: relative;
+  display: inline-flex;
+  min-width: 0;
+  flex-shrink: 1;
+  align-items: center;
+}
+
+.composer-model-trigger {
+  display: inline-flex;
+  max-width: 200px;
+  min-width: 0;
+  height: 32px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px 0 10px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ink-muted);
+  font-size: 12px;
+  text-align: left;
+  transition:
+    background 180ms var(--ease-productive),
+    color 180ms var(--ease-productive);
+}
+
+.composer-model:hover .composer-model-trigger,
+.composer-model.is-open .composer-model-trigger {
+  background: rgba(23, 23, 23, 0.05);
+  color: var(--ink-strong);
+}
+
+.composer-model.is-selected .composer-model-trigger {
+  color: var(--ink-strong);
+}
+
+.composer-model-label {
+  display: flex;
+  min-width: 0;
+  flex-shrink: 1;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.composer-model-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1;
+}
+
+.composer-model-caret {
+  flex-shrink: 0;
+  opacity: 0.7;
+  transition: transform 180ms var(--ease-productive);
+}
+
+.composer-model.is-open .composer-model-caret {
+  transform: rotate(180deg);
+}
+
+/* ------------------------------------------------------------ 弹出菜单 */
+
+.composer-popover {
+  position: absolute;
+  z-index: 30;
+  bottom: calc(100% + 8px);
+  padding: 4px;
+  border: 1px solid var(--hairline);
+  border-radius: 12px;
+  background: #fffefb;
+  box-shadow: var(--shadow-soft);
+  animation: composer-popover-in 160ms var(--ease-productive) both;
+  transform-origin: bottom left;
+}
+
+.composer-popover-search {
+  left: -36px;
+  width: min(284px, calc(100vw - 32px));
+}
+
+.composer-attach {
+  position: relative;
+  display: inline-flex;
+  flex-shrink: 0;
+}
+
+.composer-popover-attach {
+  left: -4px;
+  width: min(216px, calc(100vw - 32px));
+  transform-origin: bottom left;
+}
+
+.composer-popover-row.composer-attach-row {
+  min-height: 40px;
+  gap: 9px;
+  padding: 4px 7px;
+}
+
+.composer-attach-row .composer-popover-copy {
+  gap: 1px;
+}
+
+.composer-attach-row .composer-popover-name {
+  line-height: 1.25;
+}
+
+.composer-attach-row .composer-popover-desc {
+  line-height: 1.25;
+}
+
+.composer-popover-row.composer-attach-row.is-disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.composer-popover-row.composer-attach-row.is-disabled:hover {
+  background: transparent;
+}
+
+.composer-popover-model {
+  left: 50%;
+  width: min(264px, calc(100vw - 32px));
+  max-height: min(340px, 50vh);
+  overflow-y: auto;
+  transform: translateX(-50%);
+  transform-origin: bottom center;
+  animation-name: composer-popover-in-centered;
+}
+
+@keyframes composer-popover-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes composer-popover-in-centered {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(4px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0) scale(1);
+  }
+}
+
+.composer-popover-row {
+  display: flex;
+  width: 100%;
+  min-height: 46px;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+  transition: background 140ms var(--ease-productive);
+}
+
+.composer-popover-row:hover,
+.composer-popover-row:focus-visible {
+  background: rgba(23, 23, 23, 0.05);
+}
+
+.composer-popover-row.is-active {
+  background: rgba(63, 111, 95, 0.07);
+}
+
+.composer-popover-icon {
+  display: inline-flex;
+  width: 20px;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  color: var(--ink-muted);
+}
+
+.composer-popover-copy {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.composer-popover-name {
+  color: var(--ink-strong);
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+.composer-popover-desc {
+  overflow: hidden;
+  color: var(--ink-muted);
+  font-size: 11.5px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-popover-check {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: #3f6f5f;
+}

@@ -1,4 +1,15 @@
-import "./globals.css";
+import "./styles/01-base.css";
+import "./styles/02-toolbar.css";
+import "./styles/03-models-attachments.css";
+import "./styles/04-voice-thinking.css";
+import "./styles/05-thinking-discussion.css";
+import "./styles/06-agent-code.css";
+import "./styles/07-citations-cards.css";
+import "./styles/08-settings.css";
+import "./styles/09-responsive.css";
+import "./styles/10-scrollbars.css";
+import "./styles/11-memory.css";
+import "./styles/12-search.css";
 import "./discussion.css";
 import "./models.css";
 import type { Metadata } from "next";

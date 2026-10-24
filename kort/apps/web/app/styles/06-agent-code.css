@@ -1,0 +1,701 @@
+/* 席位条本身即讨论入口时，button 需要继承徽标排版 */
+button.delegation-badge {
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.delegation-badge::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 8px);
+  z-index: 36;
+  width: max-content;
+  max-width: 320px;
+  border: 1px solid rgba(23, 23, 23, 0.1);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: 0 18px 46px rgba(29, 29, 26, 0.14);
+  color: var(--ink-strong);
+  font-size: 12px;
+  line-height: 1.65;
+  opacity: 0;
+  padding: 10px 12px;
+  pointer-events: none;
+  transform: translateY(3px);
+  transition:
+    opacity 140ms var(--ease-productive),
+    transform 140ms var(--ease-productive);
+  white-space: pre-line;
+}
+
+.delegation-badge:hover::after,
+.delegation-badge:focus-visible::after {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.delegation-badge:not([data-tooltip])::after {
+  display: none;
+}
+
+/* ------------------------------------------------------------ agent glyphs */
+
+.agent-glyph {
+  --glyph-tempo: 0.4;
+  display: inline-block;
+  flex: 0 0 auto;
+  overflow: visible;
+  fill: none;
+  stroke: #47785a;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.75;
+  vertical-align: middle;
+}
+
+.agent-glyph .part {
+  transform-box: view-box;
+  transform-origin: 12px 12px;
+}
+
+@keyframes agent-lift {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-1px); }
+}
+
+@keyframes agent-float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-2px); }
+}
+
+@keyframes agent-sway {
+  0%, 100% { transform: rotate(-5deg); }
+  50% { transform: rotate(6deg); }
+}
+
+@keyframes agent-breathe {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.55; transform: scale(0.89); }
+}
+
+@keyframes agent-grow {
+  0%, 100% { transform: scaleY(1); }
+  50% { transform: scaleY(0.8); }
+}
+
+@keyframes agent-draw {
+  0%, 100% { stroke-dashoffset: 0; }
+  50% { stroke-dashoffset: 24; }
+}
+
+@keyframes agent-reveal {
+  0%, 100% { opacity: 1; }
+  35% { opacity: 0.25; }
+  65% { opacity: 1; }
+}
+
+@keyframes agent-blink {
+  0%, 40%, 50%, 100% { transform: scaleY(1); }
+  45% { transform: scaleY(0.15); }
+}
+
+.agent-glyph.is-playing[data-icon="archivist"] .sheet {
+  animation: agent-float calc(2.7s * var(--glyph-tempo)) ease-in-out;
+}
+
+.agent-glyph.is-playing[data-icon="creative-spark"] .spark {
+  transform-origin: 17px 8px;
+  animation: agent-breathe calc(2.7s * var(--glyph-tempo)) ease-in-out;
+}
+
+.agent-glyph.is-playing[data-icon="creative-spark"] .bulb {
+  animation: agent-lift calc(4s * var(--glyph-tempo)) ease-in-out;
+}
+
+.agent-glyph.is-playing[data-icon="critical-thinker"] .lens {
+  animation: agent-sway calc(3s * var(--glyph-tempo)) ease-in-out;
+}
+
+.agent-glyph.is-playing[data-icon="discussion-host"] .bubble-a {
+  animation: agent-float calc(3.6s * var(--glyph-tempo)) ease-in-out;
+}
+
+.agent-glyph.is-playing[data-icon="discussion-host"] .bubble-b {
+  animation: agent-float calc(3.6s * var(--glyph-tempo)) ease-in-out
+    calc(-1.8s * var(--glyph-tempo));
+}
+
+.agent-glyph.is-playing[data-icon="dream-weaver"] .thread-a {
+  stroke-dasharray: 48;
+  animation: agent-draw calc(5s * var(--glyph-tempo)) ease-in-out;
+}
+
+.agent-glyph.is-playing[data-icon="dream-weaver"] .thread-b {
+  animation: agent-breathe calc(3s * var(--glyph-tempo)) ease-in-out;
+}
+
+.agent-glyph.is-playing[data-icon="dream-weaver"] .star {
+  animation: agent-sway calc(3s * var(--glyph-tempo)) ease-in-out;
+}
+
+.agent-glyph.is-playing[data-icon="field-recorder"] .landscape {
+  stroke-dasharray: 24;
+  animation: agent-draw calc(4s * var(--glyph-tempo)) ease-in-out;
+}
+
+.agent-glyph.is-playing[data-icon="gardener"] .leaves {
+  transform-origin: 12px 20px;
+  animation: agent-grow calc(3.5s * var(--glyph-tempo)) ease-in-out;
+}
+
+.agent-glyph.is-playing[data-icon="logic-analyst"] .node-a {
+  animation: agent-reveal calc(3s * var(--glyph-tempo)) ease;
+}
+
+.agent-glyph.is-playing[data-icon="logic-analyst"] .node-b {
+  animation: agent-reveal calc(3s * var(--glyph-tempo)) ease
+    calc(0.5s * var(--glyph-tempo));
+}
+
+.agent-glyph.is-playing[data-icon="logic-analyst"] .node-c {
+  animation: agent-reveal calc(3s * var(--glyph-tempo)) ease
+    calc(1s * var(--glyph-tempo));
+}
+
+.agent-glyph.is-playing[data-icon="research-lead"] .needle {
+  transform-origin: 10px 13px;
+  animation: agent-sway calc(3s * var(--glyph-tempo)) ease-in-out;
+}
+
+.agent-glyph.is-playing[data-icon="research-lead"] .star {
+  animation: agent-breathe calc(3s * var(--glyph-tempo)) ease-in-out;
+}
+
+.agent-glyph.is-playing[data-icon="visible-summarizer"] .eye {
+  transform-origin: 12px 7px;
+  animation: agent-blink calc(5s * var(--glyph-tempo)) ease-in-out;
+}
+
+.agent-glyph.is-playing[data-icon="visible-summarizer"] .summary {
+  stroke-dasharray: 24;
+  animation: agent-draw calc(5s * var(--glyph-tempo)) ease-in-out;
+}
+
+.agent-glyph.is-playing.is-looping .part {
+  animation-iteration-count: infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-glyph .part {
+    animation: none !important;
+  }
+}
+
+.agent-strip-tooltip {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 8px);
+  z-index: 36;
+  display: flex;
+  width: max-content;
+  max-width: min(360px, calc(100vw - 40px));
+  flex-direction: column;
+  padding: 10px 12px;
+  border: 1px solid rgba(23, 23, 23, 0.1);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: 0 18px 46px rgba(29, 29, 26, 0.14);
+  color: var(--ink-strong);
+  font-size: 12px;
+  line-height: 1.65;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(3px);
+  transition:
+    opacity 140ms var(--ease-productive),
+    transform 140ms var(--ease-productive),
+    visibility 140ms;
+  visibility: hidden;
+}
+
+.delegation-badge:hover .agent-strip-tooltip,
+.delegation-badge:focus-visible .agent-strip-tooltip {
+  opacity: 1;
+  transform: translateY(0);
+  visibility: visible;
+}
+
+.agent-strip-tooltip-line {
+  display: block;
+}
+
+.agent-strip-tooltip-agents {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin-top: 3px;
+}
+
+.agent-strip-tooltip-agent {
+  display: flex;
+  max-width: 100%;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.agent-strip-tooltip-agent > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.thinking-drawer {
+  display: flex;
+  height: 100dvh;
+  width: 360px;
+  min-height: 0;
+  flex-shrink: 0;
+  flex-direction: column;
+  overflow: hidden;
+  border-left: 1px solid var(--hairline);
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: -18px 0 60px rgba(29, 29, 26, 0.06);
+  backdrop-filter: blur(18px);
+  animation: drawerIn 230ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+.thinking-drawer-header {
+  display: flex;
+  flex-shrink: 0;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  border-bottom: 1px solid rgba(23, 23, 23, 0.055);
+  padding: 22px 22px 16px;
+}
+
+.thinking-drawer-title {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.thinking-drawer-meta {
+  min-height: 16px;
+  margin-top: 4px;
+  color: #7a7a75;
+  font-size: 12px;
+}
+
+.thinking-drawer-body {
+  min-height: 0;
+  flex: 1;
+  overflow-y: auto;
+  padding: 18px 22px 22px;
+}
+
+.reasoning-timeline {
+  position: relative;
+  display: grid;
+  gap: 0;
+}
+
+.reasoning-node {
+  position: relative;
+  display: grid;
+  grid-template-columns: 20px 1fr;
+  gap: 12px;
+  padding-bottom: 28px;
+}
+
+.reasoning-dot {
+  position: relative;
+  z-index: 1;
+  margin-top: 5px;
+  height: 9px;
+  width: 9px;
+  border-radius: 999px;
+  background: #b9b9b4;
+}
+
+.reasoning-dot-active {
+  background: #286fd6;
+  animation: breathe 2s ease-in-out infinite;
+}
+
+.reasoning-dot-done {
+  background: #377c4d;
+}
+
+.reasoning-dot-talking {
+  background: #c87b35;
+  animation: breathe 1.4s ease-in-out infinite;
+}
+
+@keyframes highlightSweep {
+  from {
+    background-position: 120% 0;
+  }
+  to {
+    background-position: -120% 0;
+  }
+}
+
+@keyframes reasoningNodeAppear {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.reasoning-node-appear {
+  animation: reasoningNodeAppear 320ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+.reasoning-line {
+  position: absolute;
+  top: 17px;
+  bottom: 0;
+  left: 4px;
+  width: 1px;
+  background: rgba(0, 0, 0, 0.1);
+}
+
+.reasoning-title {
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.5;
+}
+
+.reasoning-body {
+  margin-top: 10px;
+  color: #6a6a67;
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.78;
+}
+
+.reasoning-body p {
+  font-weight: 400;
+  margin: 0;
+}
+
+.reasoning-tree {
+  display: grid;
+  gap: 12px;
+  margin-top: 10px;
+  color: #686864;
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.reasoning-tree-node {
+  display: grid;
+  gap: 6px;
+}
+
+.reasoning-tree-title {
+  color: var(--ink-strong);
+  font-weight: 650;
+  line-height: 1.45;
+}
+
+.reasoning-tree-title-done {
+  color: #377c4d;
+}
+
+.reasoning-tree-summary {
+  color: #6a6a67;
+  font-size: 13px;
+  line-height: 1.78;
+}
+
+.reasoning-tree-summary p {
+  margin: 0;
+}
+
+.reasoning-tree-children {
+  display: grid;
+  gap: 12px;
+  margin-top: 2px;
+  margin-left: 4px;
+  border-left: 1px solid rgba(23, 23, 23, 0.12);
+  padding-left: 14px;
+}
+
+.reasoning-body h1,
+.reasoning-body h2,
+.reasoning-body h3,
+.reasoning-body h4 {
+  font-size: 13px;
+  font-weight: 600;
+  margin: 0.6em 0 0.3em;
+  line-height: 1.5;
+}
+
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3 {
+  margin: 1.2em 0 0.5em;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.markdown-body h1 {
+  font-size: 24px;
+}
+
+.markdown-body h2 {
+  font-size: 20px;
+}
+
+.markdown-body h3 {
+  font-size: 17px;
+}
+
+.markdown-body p,
+.markdown-body ul,
+.markdown-body ol,
+.markdown-body table,
+.markdown-body blockquote {
+  margin: 0.85em 0;
+}
+
+.markdown-body ul,
+.markdown-body ol {
+  padding-left: 1.35rem;
+}
+
+.markdown-body table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+
+.markdown-body th,
+.markdown-body td {
+  border: 1px solid var(--hairline);
+  padding: 8px 10px;
+  vertical-align: top;
+}
+
+.markdown-body code {
+  border-radius: 5px;
+  background: rgba(0, 0, 0, 0.05);
+  padding: 0.12em 0.32em;
+  font-size: 0.92em;
+}
+
+/* 缩进式代码块（无语言标注时 react-markdown 仍会输出 pre） */
+.markdown-body pre {
+  overflow-x: auto;
+  border-radius: 10px;
+  background: #fbfaf7;
+  padding: 12px 14px;
+  color: #3a3a37;
+}
+
+/* ── 代码块：浅色编辑器面板 ─────────────────────────────── */
+.code-block {
+  margin: 12px 0;
+  overflow: hidden;
+  border: 1px solid var(--hairline);
+  border-radius: 12px;
+  background: #fdfcfa;
+  box-shadow: var(--shadow-tight);
+}
+
+.code-block-head {
+  display: flex;
+  height: 38px;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid var(--hairline);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.86), rgba(244, 242, 237, 0.62));
+  padding: 0 9px 0 12px;
+}
+
+.code-block-title {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+  color: var(--ink-muted);
+}
+
+.code-block-title span {
+  overflow: hidden;
+  color: var(--ink-strong);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.code-block-stat {
+  display: inline-flex;
+  gap: 7px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+
+.code-stat-add {
+  color: #3f6f5f;
+}
+
+.code-stat-del {
+  color: #a34a3e;
+}
+
+.code-block-copy {
+  display: inline-flex;
+  height: 24px;
+  margin-left: auto;
+  align-items: center;
+  gap: 5px;
+  padding: 0 7px;
+  border-radius: 6px;
+  color: var(--ink-muted);
+  font-size: 11.5px;
+  transition:
+    background 150ms ease,
+    color 150ms ease,
+    transform 150ms var(--ease-productive);
+}
+
+.code-block-copy:hover {
+  background: rgba(23, 23, 23, 0.05);
+  color: var(--ink-strong);
+}
+
+.code-block-copy:active:not(:disabled) {
+  transform: scale(0.95);
+}
+
+.code-block-copy-done {
+  color: #3f6f5f;
+}
+
+.code-block-body {
+  position: relative;
+  padding: 9px 0;
+  color: #3a3a37;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.68;
+}
+
+/* 行号导轨 */
+.code-block-body::before {
+  position: absolute;
+  top: 7px;
+  bottom: 7px;
+  left: 38px;
+  width: 1px;
+  background: var(--hairline);
+  content: "";
+}
+
+.code-block .code-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr);
+  align-items: start;
+}
+
+.code-block .code-gutter {
+  -webkit-user-select: none;
+  user-select: none;
+  padding-top: 1px;
+  color: rgba(104, 104, 98, 0.6);
+  font-size: 11px;
+  text-align: center;
+}
+
+.code-block .code-text {
+  background: transparent;
+  padding: 0 12px 0 9px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  color: inherit;
+  font-size: inherit;
+}
+
+.code-block .code-row-hunk .code-text,
+.code-block .code-row-file .code-text {
+  color: var(--ink-muted);
+}
+
+.code-block .code-row-hunk .code-gutter,
+.code-block .code-row-file .code-gutter {
+  color: rgba(104, 104, 98, 0.4);
+}
+
+/* 增删行：底色 + 左侧强调条，删除条用斜纹以免和“整行被删”混淆 */
+.code-block .code-row-add {
+  background: rgba(63, 111, 95, 0.1);
+}
+
+.code-block .code-row-del {
+  background: rgba(163, 74, 62, 0.09);
+}
+
+.code-block .code-row-add .code-mark {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  background: #3f6f5f;
+}
+
+.code-block .code-row-del .code-mark {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  background: repeating-linear-gradient(45deg, #a34a3e 0, #a34a3e 1.5px, transparent 1.5px, transparent 3px);
+}
+
+.code-block .code-word-add,
+.code-block .code-word-del {
+  padding: 0 1px;
+  border-radius: 3px;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
+
+.code-block .code-word-add {
+  background: rgba(63, 111, 95, 0.26);
+}
+
+.code-block .code-word-del {
+  background: rgba(163, 74, 62, 0.24);
+}
+
+/* 语法着色：暖色系，和界面的米白/墨黑一致，不用冷调 IDE 配色 */
+.tk-keyword {
+  color: #8a4f7d;
+}
+
+.tk-string {
+  color: #9a5b2f;
+}
+
+.tk-number {
+  color: #7a6a3a;
+}
+
+.tk-function {
+  color: var(--ink-strong);
+  font-weight: 600;
+}
+
+.tk-comment {
+  color: #97968f;
+  font-style: italic;
+}
