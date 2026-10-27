@@ -1,7 +1,9 @@
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="kort/apps/web/public/kort-readme-logo-inverted.svg" />
-  <img alt="KORT" src="kort/apps/web/public/kort-readme-logo.svg" width="300" height="96" />
-</picture>
+<div align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="kort/apps/web/public/kort-readme-logo-inverted.svg" />
+    <img alt="KORT" src="kort/apps/web/public/kort-readme-logo.svg" width="300" height="96" />
+  </picture>
+</div>
 
 <h1 align="center">Knights of the Round Table</h1>
 

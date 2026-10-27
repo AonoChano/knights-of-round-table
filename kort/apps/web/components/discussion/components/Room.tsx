@@ -142,15 +142,17 @@ export function Room({ theme }: { theme: ThemeMode }) {
         <polygon points="1150,90 1450,90 1180,900 560,900" fill="url(#beam)" opacity={0.55} className="beam-shimmer" />
       </g>
 
-      {/* 墙上挂画（Anthropic 风格日芒） */}
+      {/* 墙上挂画（KORT 骑士徽记，取自 app/icon.svg 的图形部分） */}
       <g transform="translate(800 170)">
         <rect x={-96} y={-76} width={192} height={152} rx={4} fill={night ? '#4a3226' : '#8a6a4f'} className="theme-fill" />
         <rect x={-84} y={-64} width={168} height={128} fill={night ? '#2b211c' : '#f4ead9'} className="theme-fill" />
-        <g fill="#D97757">
-          {Array.from({ length: 12 }, (_, i) => (
-            <rect key={i} x={-3} y={-44} width={6} height={30} rx={3} transform={`rotate(${i * 30})`} />
-          ))}
-          <circle r={10} />
+        <g fill={night ? '#e8c39e' : '#3b2b22'} className="theme-fill" transform="scale(1.55) translate(-147.35 -36.42)">
+          <path d="M121.097 65.4186C121.431 63.9186 122.597 60.9186 124.597 60.9186H164.597C165.931 61.752 168.497 63.8186 168.097 65.4186V71.4186H121.097V65.4186Z" />
+          <path
+            fillRule="evenodd"
+            clipRule="evenodd"
+            d="M124.597 24.4186C124.097 16.752 129.397 1.41865 154.597 1.41865L151.097 8.91865C151.097 8.91865 155.597 11.4186 157.597 10.9186C159.597 10.4186 160.597 17.4186 173.597 27.9186V32.4186L170.097 35.4186C170.097 35.4186 164.264 34.9186 165.597 35.9186C166.931 36.9186 162.097 32.4186 162.097 32.4186L154.097 32.9186L151.097 30.4186H149.597L147.597 32.9186V34.4186L164.597 57.9186H153.097L140.097 40.4186L135.597 45.9186V57.9186H124.597V24.4186ZM135.597 21.9186C139.997 11.1186 149.764 11.752 154.097 13.4186L135.597 32.9186V32.4186V21.9186Z"
+          />
         </g>
       </g>
 
