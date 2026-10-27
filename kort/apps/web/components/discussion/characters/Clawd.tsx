@@ -5,6 +5,9 @@ import { registerCharacter } from './registry';
 
 /**
  * Clawd —— Anthropic Claude Code 的像素吉祥物
+ * 非官方同人复刻：Claude / Clawd 的文字与形象权利归 Anthropic，本项目与 Anthropic 无关联、
+ * 未获其背书或授权。要换掉席位形象，向 registry 注册另一个 CharacterDefinition 即可，勿在此文件里
+ * 继续扩散原形象。
  * 网格坐标系：viewBox 0 0 20 17
  *  身体  x 3..17, y 6..14
  *  手臂  x 1..3 / 17..19, y 9..11
